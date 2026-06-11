@@ -1,0 +1,58 @@
+[build-system]
+# scikit-build-core drives CMake during the wheel build (first-class uv / PEP 517
+# CMake integration). pybind11 is a build-time requirement; CPM fetches mdspan.
+# The build still needs an AdaptiveCpp install on the machine — pass its location
+# with e.g. `uv pip install . -C cmake.define.AdaptiveCpp_DIR=/opt/adaptivecpp/lib/cmake/AdaptiveCpp`
+# (or via CMAKE_PREFIX_PATH in the environment). See README "Building".
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "egg"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "gdtk",
+  "matplotlib>=3.10.9",
+  "numpy>=2.4.6",
+  "pytest>=9.0.3",
+  "pyvista>=0.48.4",
+  "scipy>=1.17.1",
+]
+
+[tool.scikit-build]
+cmake.version = ">=3.25"
+cmake.build-type = "Release"
+# Only build the extension for the wheel — not the C++ tests/benchmarks.
+build.targets = ["cpp_core"]
+# Install ONLY our component — keeps the CPM deps' install rules (mdspan headers,
+# lib/cmake configs) out of the wheel / site-packages. See install(... COMPONENT
+# egg) in CMakeLists.txt.
+install.components = ["egg"]
+wheel.packages = ["egg"]
+# Persistent build dir => fast incremental editable rebuilds (see editable.* below).
+build-dir = "build/{wheel_tag}"
+# Ship the compiled extension; never the in-tree dev copy or build junk.
+# NB: patterns are gitignore-style and match at any depth — anchor build dirs
+# with a leading "/" so e.g. "build*" doesn't also eat egg/topology/builder.py.
+sdist.exclude = ["egg/_cpp/*.so", "/build", "/dist", "/wheels", ".cpm_cache", ".venv", "*.whl"]
+
+# Editable installs (`uv pip install -e .` / `uv sync`): keep BOTH Python and C++
+# live. redirect mode picks up .py edits with no rebuild; editable.rebuild re-runs
+# `cmake --build` when the extension is imported if sources changed. Trigger it
+# without running the app via `uv run python -c "import egg._cpp.cpp_core"`,
+# or bypass the hook with `cmake --build build/<tag> --target cpp_core`.
+editable.mode = "redirect"
+editable.rebuild = true
+editable.verbose = true
+
+[tool.scikit-build.cmake.define]
+EGG_BUILD_TESTS = "OFF"
+EGG_BUILD_BENCH = "OFF"
+# generic = CPU + GPU JIT; override with -C cmake.define.ACPP_TARGETS=omp for CPU-only.
+ACPP_TARGETS = "generic"
+
+[tool.uv.sources]
+gdtk = { git = "https://github.com/gdtk-uq/gdtk", subdirectory = "src/lib" }

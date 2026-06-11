@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# C++ build artifacts
+build/
+.cpm_cache/
+egg/_cpp/*.so
+compile_commands.json
+
+# Editor / tool caches
+.cache/
+
+# Local-only state (not part of the project)
+.bash_history
+.claude/

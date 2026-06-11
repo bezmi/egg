@@ -1,0 +1,48 @@
+{
+  "name": "egg (Fedora + AdaptiveCpp, Podman rootless)",
+  "build": {
+    "dockerfile": "Containerfile",
+    "context": "..",
+    "args": {
+      "WITH_ROCM": "0",
+      "WITH_CUDA": "0"
+    }
+  },
+
+  // Rootless Podman: keep host UID/GID so files written in /workspace stay
+  // owned by you. VS Code must be told to use podman via the user/global
+  // setting  "dev.containers.dockerPath": "podman"  (not settable here).
+  "runArgs": [
+    "--userns=keep-id"
+  ],
+
+  // Standard editable build: uv sync drives scikit-build-core, which compiles
+  // the C++ extension (cpp_core) against the image's AdaptiveCpp (found via
+  // CMAKE_PREFIX_PATH=/opt/adaptivecpp) and installs egg editable. C++ edits
+  // recompile on import (editable.rebuild). See DEVELOPING.md.
+  "postCreateCommand": "uv sync",
+
+  "containerEnv": {
+    "EGG_BACKEND": "cpp"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-vscode.cmake-tools"
+      ]
+    }
+  }
+
+  // --- GPU (opt-in) -------------------------------------------------------
+  // Rebuild with the matching backend arg, then add the CDI device to runArgs.
+  // Generate the CDI spec once on the host (see .devcontainer/README.md):
+  //
+  //   AMD/ROCm   (build arg WITH_ROCM=1):  "--device=amd.com/gpu=all"
+  //              host: amd-ctk cdi generate --output=/etc/cdi/amd.yaml
+  //
+  //   NVIDIA/CUDA (build arg WITH_CUDA=1): "--device=nvidia.com/gpu=all"
+  //              host: nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+}

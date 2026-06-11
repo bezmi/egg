@@ -1,0 +1,14 @@
+# Keep the build context small (context is the repo root). Podman reads
+# .containerignore; Docker reads .dockerignore — symlinked for both.
+.git
+.venv
+build/
+build_gpu/
+.cpm_cache/
+.cache/
+.pytest_cache/
+__pycache__/
+*.egg-info/
+egg/_cpp/*.so
+sliding.png
+Testing/

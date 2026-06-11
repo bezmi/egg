@@ -1,0 +1,4 @@
+If:
+  PathMatch: Source/physics/gas/.*
+CompileFlags:
+  CompilationDatabase: build/debug
