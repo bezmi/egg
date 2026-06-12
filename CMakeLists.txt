@@ -266,6 +266,7 @@ if(EGG_BUILD_TESTS)
     tests/cpp/test_metric.cpp
     tests/cpp/test_solve.cpp
     tests/cpp/test_geometry.cpp
+    tests/cpp/test_curves.cpp
     tests/cpp/test_patch.cpp)
   target_link_libraries(cpp_tests PRIVATE egg_core Boost::ut)
   target_compile_definitions(cpp_tests PRIVATE BOOST_UT_DISABLE_MODULE)

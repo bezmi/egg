@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <experimental/mdspan>
 
 namespace egg
@@ -64,6 +65,81 @@ inline constexpr int kWInvSize = dim::wInv(kDefaultDim);
 inline constexpr int kJRows = dim::jRows(kDefaultDim);
 inline constexpr int kJCols = dim::jCols(kDefaultDim);
 inline constexpr int kJSize = dim::jSize(kDefaultDim);
+
+/// @defgroup vecops Elementwise std::array vector ops
+/// @brief Vector arithmetic on fixed-size point/vector arrays, used by the
+///        geometry charts (`eval`/`frame`) and `orthonormalize`.
+///
+/// Defined in namespace `egg` so ordinary unqualified lookup inside `egg` picks
+/// them up; they are not found by ADL for `std::array` elsewhere. Templated on
+/// `std::size_t` to match `std::array`'s size parameter — deducing an `int`
+/// through `std::array<double, N>` is a non-deduced context and fails.
+/// @{
+
+/// @brief Elementwise sum @f$ a + b @f$.
+/// @tparam N Array length.
+/// @param a,b Operands of equal length.
+/// @return The elementwise sum.
+template <std::size_t N>
+inline std::array<double, N> operator+(const std::array<double, N>& a,
+                                       const std::array<double, N>& b)
+{
+    std::array<double, N> r;
+    for (std::size_t i = 0; i < N; ++i) { r[i] = a[i] + b[i]; }
+    return r;
+}
+/// @brief Elementwise difference @f$ a - b @f$.
+/// @tparam N Array length.
+/// @param a,b Operands of equal length.
+/// @return The elementwise difference.
+template <std::size_t N>
+inline std::array<double, N> operator-(const std::array<double, N>& a,
+                                       const std::array<double, N>& b)
+{
+    std::array<double, N> r;
+    for (std::size_t i = 0; i < N; ++i) { r[i] = a[i] - b[i]; }
+    return r;
+}
+/// @brief Scalar–vector product @f$ s\,a @f$.
+/// @tparam N Array length.
+/// @param s Scalar factor.
+/// @param a Vector operand.
+/// @return The scaled vector.
+template <std::size_t N>
+inline std::array<double, N> operator*(double s, const std::array<double, N>& a)
+{
+    std::array<double, N> r;
+    for (std::size_t i = 0; i < N; ++i) { r[i] = s * a[i]; }
+    return r;
+}
+/// @brief Euclidean inner product @f$ a \cdot b @f$.
+/// @tparam N Array length.
+/// @param a,b Operands of equal length.
+/// @return The scalar dot product.
+template <std::size_t N>
+inline double dot(const std::array<double, N>& a, const std::array<double, N>& b)
+{
+    double acc = 0.0;
+    for (std::size_t i = 0; i < N; ++i) { acc += a[i] * b[i]; }
+    return acc;
+}
+/// @brief Unit vector in the direction of @p a.
+/// @tparam N Array length.
+/// @param a Vector to normalize.
+/// @return @f$ a / \lVert a \rVert @f$, or the first basis axis @f$ e_0 @f$ when
+///         @p a is degenerate (@f$ \lVert a \rVert < 10^{-15} @f$), matching the
+///         legacy tangent fallbacks.
+template <std::size_t N> inline std::array<double, N> normalize(const std::array<double, N>& a)
+{
+    const double n = std::sqrt(dot(a, a));
+    if (n < 1e-15) {
+        std::array<double, N> e {};
+        e[0] = 1.0;  // degenerate => first basis axis (matches the legacy fallbacks)
+        return e;
+    }
+    return (1.0 / n) * a;
+}
+/// @}
 
 // Node i occupies X[D*i + 0 .. D*i + D-1] in the flat coordinate array.
 // load_pt / store_pt loop over D, so the kernels never spell out per-axis

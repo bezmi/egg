@@ -104,7 +104,7 @@ inline constexpr std::array<Sample, {len(_METRIC_CASES)}> kSamples = {{{{
 def gen_geometry() -> str:
     # TAG_* constants and PARAM_PAD_SIZE live on the host-side encoding module.
     from egg.geometry.entity_encoding import (
-        TAG_FREE, TAG_LINESEG, TAG_CIRCLE, TAG_ELLIPSE, TAG_PLANE,
+        TAG_FREE, TAG_LINESEG, TAG_CIRCLE, TAG_ELLIPSE,
         PARAM_PAD_SIZE,
     )
 
@@ -118,8 +118,8 @@ def gen_geometry() -> str:
     line = pad([0.0, 0.0, 2.0, 1.0])        # start (0,0) -> end (2,1)
     circ = pad([0.5, -0.3, 2.0])             # center (0.5,-0.3), r=2
     elli = pad([0.0, 0.0, 3.0, 1.0])        # center (0,0), radii (3,1)
-    plane = pad([1.0, 1.0, 0.0, 1.0])        # q=(1,1), n=(0,1)
 
+    # The 2D entity set is curves only; Sphere/Plane are 3D surfaces (milestone B).
     cases = [
         ("free", TAG_FREE, np.zeros(PARAM_PAD_SIZE), [0.3, -0.7]),
         ("lineseg-mid", TAG_LINESEG, line, [1.0, 1.5]),
@@ -130,7 +130,6 @@ def gen_geometry() -> str:
         ("circle-center", TAG_CIRCLE, circ, [0.5, -0.3]),      # p == center
         ("ellipse-out", TAG_ELLIPSE, elli, [2.0, 2.0]),
         ("ellipse-center", TAG_ELLIPSE, elli, [0.0, 0.0]),     # p == center
-        ("plane", TAG_PLANE, plane, [0.4, 3.2]),
     ]
 
     rows: list[str] = []
