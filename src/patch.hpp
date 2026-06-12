@@ -199,6 +199,8 @@ inline VecN<D> newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& po
         static_cast<void>(pos);
         static_cast<void>(entity);
         return solveNxN<D>(H, g);
+        // TODO: at the moment, this assume 1D, but in a 3D grid, projecting on to a surface
+        // gives us a tangent space that is 2D, so we have to allow for solving a 2x2 system
     } else {
         const PtN<D> b = entity.tangent(pos);  // (d, 1) column
         // A_mat = bᵀ H b (scalar); rhs = bᵀ g (scalar).
