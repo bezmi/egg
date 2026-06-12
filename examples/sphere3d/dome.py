@@ -13,7 +13,8 @@ produces) and drives the C++ core directly at ``dim=3``:
 
 Usage::
 
-    uv run dome.py [--n N] [--sweeps N] [--device cpu|gpu|auto]
+    uv run dome.py [--n N] [--sweeps N] [--chunk N] [--device cpu|gpu|auto]
+        [--plot-live] [--plot-grid] [--plot-energy]
 """
 
 import argparse
@@ -149,11 +150,52 @@ def build_context(n, sphere_c, sphere_r):
     return {"groups": groups, "energy_stencil": energy_stencil}
 
 
+def _grid_polylines(X, n):
+    """The structured grid's wireframe as a list of (n, 3) polylines."""
+    P = X.reshape(n, n, n, 3)
+    lines = []
+    for a in range(n):
+        for b in range(n):
+            lines.append(P[a, b, :, :])  # k-lines
+            lines.append(P[a, :, b, :])  # j-lines
+            lines.append(P[:, a, b, :])  # i-lines
+    return lines
+
+
+def _draw_wireframe(ax, X, n, title=""):
+    ax.cla()
+    for line in _grid_polylines(X, n):
+        ax.plot(line[:, 0], line[:, 1], line[:, 2], "b-", lw=0.4)
+    ax.set_title(title)
+    ax.set_box_aspect((1, 1, 1.1))
+
+
+def _plot_energy(energies, mindets):
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+    ax[0].plot(energies, "-o", ms=3)
+    ax[0].set(title="TMOP energy", xlabel="sweep", ylabel="F")
+    ax[1].axhline(0, color="r", lw=0.8)
+    ax[1].plot(mindets, "-o", ms=2)
+    ax[1].set(title="min det A", xlabel="sweep")
+    plt.tight_layout()
+    plt.show()
+
+
 def main():
     p = argparse.ArgumentParser(description="3D dome-on-a-cube smoothing demo.")
     p.add_argument("--n", type=int, default=7, help="nodes per edge")
     p.add_argument("--sweeps", type=int, default=30)
+    p.add_argument("--chunk", type=int, default=10,
+                   help="sweeps per device-resident chunk")
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
+    p.add_argument("--plot-live", action="store_true",
+                   help="matplotlib animated 3D wireframe (one frame per chunk)")
+    p.add_argument("--plot-grid", action="store_true",
+                   help="matplotlib final 3D wireframe grid")
+    p.add_argument("--plot-energy", action="store_true",
+                   help="matplotlib energy + min-det convergence curves")
     a = p.parse_args()
 
     print("=" * 56)
@@ -188,11 +230,43 @@ def main():
     d = X[top] - c
     X[top] = c + r * d / np.linalg.norm(d, axis=1)[:, None]
 
-    X_out, energies, mindets = cpp_core.cpp_sweep(
-        ctx, X.ravel(), a.sweeps, device=a.device, phase="barrier",
-        delta=0.0, dim=3,
-    )
-    X_out = X_out.reshape(-1, 3)
+    # Chunked, device-resident driving: the context/X are uploaded once and the
+    # sweeps run in chunks so live plotting only pays one download per chunk.
+    session = cpp_core.CppSweepSession(ctx, X.ravel(), device=a.device, dim=3)
+    energies, mindets = [], []
+
+    live = None
+    if a.plot_live:
+        import matplotlib.pyplot as plt
+
+        plt.ion()
+        fig = plt.figure(figsize=(7, 7))
+        live = fig.add_subplot(projection="3d")
+        _draw_wireframe(live, X.ravel(), n, "sweep 0")
+        plt.pause(0.01)
+
+    done = 0
+    while done < a.sweeps:
+        step = min(a.chunk, a.sweeps - done)
+        e, m = session.run(step, phase="barrier", delta=0.0)
+        energies.extend(np.asarray(e))
+        mindets.extend(np.asarray(m))
+        done += step
+        print(f"  sweeps={done:4d} energy={energies[-1]:.4e} "
+              f"min_det={mindets[-1]:.4e}")
+        if live is not None:
+            import matplotlib.pyplot as plt
+
+            _draw_wireframe(live, session.get_X(), n, f"sweep {done}")
+            plt.pause(0.01)
+
+    if live is not None:
+        import matplotlib.pyplot as plt
+
+        plt.ioff()
+        plt.show()
+
+    X_out = session.get_X().reshape(-1, 3)
 
     print(f"energy : {energies[0]:.4e} -> {energies[-1]:.4e}")
     print(f"min det: {mindets[0]:.4e} -> {mindets[-1]:.4e}")
@@ -203,6 +277,17 @@ def main():
           f"{np.abs(radii - r).max():.2e} (r = {r})")
     assert mindets[-1] > 0.0
     assert np.abs(radii - r).max() < 1e-9
+
+    if a.plot_grid:
+        import matplotlib.pyplot as plt
+
+        fig = plt.figure(figsize=(7, 7))
+        ax = fig.add_subplot(projection="3d")
+        _draw_wireframe(ax, X_out.ravel(), n, "final grid")
+        plt.show()
+    if a.plot_energy:
+        _plot_energy(energies, mindets)
+
     print("Done.")
 
 
