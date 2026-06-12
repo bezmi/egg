@@ -1,9 +1,12 @@
 """Sphere inside a cube — the 3D analogue of the 2D circle-in-rectangle O-grid.
 
-A 6-block "cubed-sphere" shell fills the region between a spherical cavity of
-radius ``r0`` and the cube ``[-1, 1]^3``: each block maps one cube face
-(``n x n`` nodes) radially inward to the matching spherical cap (``m`` layers).
-Shared block faces/edges are merged into single global nodes by position.
+Mirrors the 2D circle example's topology one dimension up: a 6-block
+"cubed-sphere" **O-shell** wraps the spherical cavity of radius ``r0`` out to
+an *inset* cube of half-width ``cw`` (the 3D o-ring), and the gap between the
+inset cube and the outer cube ``[-1, 1]^3`` is filled by the 26 axis-aligned
+**H-grid** blocks of its 3x3x3 decomposition (6 face + 12 edge + 8 corner
+blocks) — 32 blocks total. Shared block faces/edges are merged into single
+global nodes by position.
 
 Constrained DOFs exercise the whole 3D entity set:
 
@@ -20,8 +23,9 @@ O-ring picture.
 
 Usage::
 
-    uv run sphere_in_cube.py [--n N] [--m M] [--r0 R] [--sweeps N] [--chunk N]
-        [--device cpu|gpu|auto] [--plot-live] [--plot-grid] [--plot-energy]
+    uv run sphere_in_cube.py [--n N] [--m M] [--mh M] [--r0 R] [--cw C]
+        [--sweeps N] [--chunk N] [--device cpu|gpu|auto] [--plot-live]
+        [--plot-grid] [--plot-energy] [--plot-3d] [--plot-topology]
 """
 
 import argparse
@@ -52,10 +56,18 @@ _FACES = [
 ]
 
 
-def build_grid(n, m, r0):
-    """Cubed-sphere shell nodes + per-block id lattices (merged by position).
+def build_grid(n, m, mh, r0, cw):
+    """O-shell + H-grid block lattices, merged into global nodes by position.
 
-    Returns (X (N,3), blocks [(n,n,m) id arrays], frames per block).
+    Mirrors the 2D circle example's topology one dimension up:
+
+    - **O-shell** — 6 cubed-sphere blocks between the sphere surface and the
+      *inset* cube of half-width ``cw`` (the 3D "o-ring"), ``n x n x m`` each;
+    - **H-grid** — the 26 axis-aligned boxes of the 3x3x3 decomposition of the
+      gap between the inset cube and the outer cube ``[-1, 1]^3`` (6 face + 12
+      edge + 8 corner blocks), ``mh`` nodes across each thin direction.
+
+    Returns (X (N,3), blocks [list of (na,nb,nc) id arrays]).
     """
     key_of = {}
     X = []
@@ -68,17 +80,34 @@ def build_grid(n, m, r0):
         return key_of[key]
 
     blocks = []
+    # O-shell: sphere -> inset cube, radially interpolated.
     ab = np.linspace(-1.0, 1.0, n)
     for e, t1, t2 in _FACES:
         e, t1, t2 = map(np.asarray, (e, t1, t2))
         ids = np.empty((n, n, m), dtype=np.int64)
         for i, a in enumerate(ab):
             for j, b in enumerate(ab):
-                p_cube = e + a * t1 + b * t2
-                p_sph = r0 * p_cube / np.linalg.norm(p_cube)
+                p_in = cw * (e + a * t1 + b * t2)  # on the inset cube
+                p_sph = r0 * p_in / np.linalg.norm(p_in)
                 for k in range(m):
                     t = k / (m - 1)
-                    ids[i, j, k] = nid(p_sph + t * (p_cube - p_sph))
+                    ids[i, j, k] = nid(p_sph + t * (p_in - p_sph))
+        blocks.append(ids)
+
+    # H-grid: the 3x3x3 boxes around the inset cube (centre box omitted).
+    # The middle segment reuses the O-shell face node count/spacing so shared
+    # faces merge node-for-node.
+    segs = [np.linspace(-1.0, -cw, mh), np.linspace(-cw, cw, n),
+            np.linspace(cw, 1.0, mh)]
+    for si, sj, sk in product(range(3), repeat=3):
+        if si == sj == sk == 1:
+            continue  # the inset cube interior is the O-shell + cavity
+        xs, ys, zs = segs[si], segs[sj], segs[sk]
+        ids = np.empty((len(xs), len(ys), len(zs)), dtype=np.int64)
+        for i, x in enumerate(xs):
+            for j, y in enumerate(ys):
+                for k, z in enumerate(zs):
+                    ids[i, j, k] = nid((x, y, z))
         blocks.append(ids)
     return np.asarray(X), blocks
 
@@ -135,8 +164,8 @@ def build_context(X, blocks, tags, params, fixed):
     node_samples = [[] for _ in range(N)]
     adj = [set() for _ in range(N)]
     for ids in blocks:
-        n, _, m = ids.shape
-        for ci, cj, ck in product(range(n - 1), range(n - 1), range(m - 1)):
+        na, nb, nc = ids.shape
+        for ci, cj, ck in product(range(na - 1), range(nb - 1), range(nc - 1)):
             cell = ids[ci:ci + 2, cj:cj + 2, ck:ck + 2]
             cell_ids = [int(v) for v in cell.ravel()]
             for u in cell_ids:
@@ -262,6 +291,38 @@ def section_edges(X0, edges, tol=1e-6):
     return out
 
 
+def plot_topology(X, blocks, r0):
+    """PyVista view of the declared block topology, one colour per block.
+
+    "Rough" on purpose: each block is drawn as the 12 *straight* edges between
+    its 8 corner nodes (the declared topology), not projected onto the curved
+    sphere surface. The cavity sphere is shaded for reference.
+    """
+    import pyvista as pv
+    from matplotlib import colormaps
+
+    cmap = colormaps["tab20"]
+    pl = pv.Plotter()
+    for bi, ids in enumerate(blocks):
+        corners = {(i, j, k): X[ids[-(i == 1), -(j == 1), -(k == 1)]]
+                   for i, j, k in product((0, 1), repeat=3)}
+        pts, cells = [], []
+        for a, b in [((0, 0, 0), (1, 0, 0)), ((0, 1, 0), (1, 1, 0)),
+                     ((0, 0, 1), (1, 0, 1)), ((0, 1, 1), (1, 1, 1)),
+                     ((0, 0, 0), (0, 1, 0)), ((1, 0, 0), (1, 1, 0)),
+                     ((0, 0, 1), (0, 1, 1)), ((1, 0, 1), (1, 1, 1)),
+                     ((0, 0, 0), (0, 0, 1)), ((1, 0, 0), (1, 0, 1)),
+                     ((0, 1, 0), (0, 1, 1)), ((1, 1, 0), (1, 1, 1))]:
+            cells.extend([2, len(pts), len(pts) + 1])
+            pts.extend([corners[a], corners[b]])
+        mesh = pv.PolyData(np.asarray(pts), lines=np.asarray(cells))
+        pl.add_mesh(mesh, color=cmap(bi % 20), line_width=3)
+    pl.add_mesh(pv.Sphere(radius=r0), color="lightgray", opacity=0.4)
+    pl.add_text(f"{len(blocks)} blocks (6 O-shell + {len(blocks) - 6} H)",
+                font_size=10)
+    pl.show()
+
+
 class GridPlots:
     """PyVista panes: the XY/YZ section wireframes (+ an optional 3D pane).
 
@@ -332,10 +393,15 @@ def main():
     p = argparse.ArgumentParser(
         description="3D sphere-in-cube O-grid smoothing demo.")
     p.add_argument("--n", type=int, default=9,
-                   help="nodes per cube-face edge (odd keeps nodes on the "
-                        "section planes)")
-    p.add_argument("--m", type=int, default=5, help="radial layers")
+                   help="nodes per inset-cube face edge (odd keeps nodes on "
+                        "the section planes)")
+    p.add_argument("--m", type=int, default=4,
+                   help="radial layers in the O-shell")
+    p.add_argument("--mh", type=int, default=3,
+                   help="nodes across each H-grid layer")
     p.add_argument("--r0", type=float, default=0.5, help="sphere radius")
+    p.add_argument("--cw", type=float, default=0.7,
+                   help="inset-cube half-width (O-shell outer boundary)")
     p.add_argument("--sweeps", type=int, default=40)
     p.add_argument("--chunk", type=int, default=10,
                    help="sweeps per device-resident chunk")
@@ -349,13 +415,21 @@ def main():
     p.add_argument("--plot-3d", action="store_true",
                    help="add a 3D wireframe pane to the live/final plots "
                         "(dome-example style)")
+    p.add_argument("--plot-topology", action="store_true",
+                   help="PyVista view of the declared block topology only — "
+                        "no pipeline run")
     a = p.parse_args()
 
     print("=" * 56)
     print("d=3: sphere in a cube (6-block O-grid) → TMOP smooth")
     print("=" * 56)
 
-    X, blocks = build_grid(a.n, a.m, a.r0)
+    X, blocks = build_grid(a.n, a.m, a.mh, a.r0, a.cw)
+
+    if a.plot_topology:
+        plot_topology(X, blocks, a.r0)
+        return
+
     tags, params, fixed = classify(X, a.r0)
     ctx = build_context(X, blocks, tags, params, fixed)
     edges = grid_edges(blocks)
