@@ -70,12 +70,6 @@ def main():
     p.add_argument(
         "--resolution", type=int, default=2, help="Resolution scaling factor"
     )
-    p.add_argument(
-        "--solver",
-        choices=["gauss-seidel", "jacobi"],
-        default="gauss-seidel",
-        help="TMOP solver: gauss-seidel (faster per-sweep) or jacobi (higher CPU utilisation)",
-    )
     a = p.parse_args()
 
     print("=" * 56)

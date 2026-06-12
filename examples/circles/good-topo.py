@@ -61,12 +61,6 @@ def main():
     p.add_argument("--tmop-sweeps", type=int, default=40)
     p.add_argument("--sweeps-per-delta", type=int, default=20)
     p.add_argument("--chunk", type=int, default=10)
-    p.add_argument(
-        "--solver",
-        choices=["gauss-seidel", "jacobi"],
-        default="gauss-seidel",
-        help="TMOP solver: gauss-seidel (faster per-sweep) or jacobi (higher CPU utilisation)",
-    )
     # Boundary-layer clustering on the (single) circle. <=0 disables it; the
     # ``*2`` flags exist only for CLI parity with the side-by-side demo (which
     # clusters a second circle) and are ignored here.
