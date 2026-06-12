@@ -22,17 +22,17 @@ Layouts (2D; ``d`` is the spatial dimension; angles/parameters in radians):
 | QuadBezier   | 8   | ``[P0(2), P1(2), P2(2), t0, t1, ...pad]``             |
 | CubicBezier  | 9   | ``[P0(2), P1(2), P2(2), P3(2), t0, t1]``              |
 | BSpline      | 10  | ``[degree, n_ctrl, knot_off, ctrl_off, t0, t1]``      |
+| Composite    | 11  | ``[n_segs, rec_off]``                                 |
 
-The arc/Bézier/B-spline entities have no Python geometry class yet (they enter
-through the vector/CAD importer front-end); the tags are defined here so the C++
-and Python sides share one numbering. ``encode_entity`` covers the analytic 2D
-set only.
-
-The B-spline is variable-length: its knot vector and control net live in a
-per-group ``arena`` (a flat float64 array uploaded alongside ``params``), and the
-blob stores only the offsets (``knot_off``, ``ctrl_off``, in float64 units) and
-counts (knots = ``n_ctrl + degree + 1``; control net = ``2 * n_ctrl``, x/y
-interleaved). Emitting the arena from the sweep-context builder is front-end work.
+The B-spline and composite path are variable-length: their data lives in a
+shared ``arena`` (a flat float64 array uploaded alongside ``params``), and the
+blob stores only offsets (in float64 units) and counts. The B-spline arena data
+is the knot vector (length ``n_ctrl + degree + 1``) and control net
+(``2 * n_ctrl``, x/y interleaved). The composite arena data is ``n_segs``
+records of ``1 + PARAM_PAD_SIZE`` doubles, each ``[tag, params...]`` — one
+encoded (non-composite) segment entity per record. Callers that may encode
+variable-length entities pass an ``arena`` list to :func:`encode_entity`, which
+appends to it and is later flattened into the per-group upload array.
 """
 
 from __future__ import annotations
@@ -53,6 +53,7 @@ __all__ = [
     "TAG_QUADBEZIER",
     "TAG_CUBICBEZIER",
     "TAG_BSPLINE",
+    "TAG_COMPOSITE",
 ]
 
 PARAM_PAD_SIZE = 12  # >= 2*d for all 2D/3D entities (3D plane needs 2*3 = 6)
@@ -68,15 +69,29 @@ TAG_ELLIPSEARC = 7
 TAG_QUADBEZIER = 8
 TAG_CUBICBEZIER = 9
 TAG_BSPLINE = 10
+TAG_COMPOSITE = 11
 
 
-def encode_entity(entity, d: int = 2):
+def encode_entity(entity, d: int = 2, arena: list | None = None):
     """Encode a geometry entity into ``(type_tag, params)``.
 
     ``params`` is a length-``PARAM_PAD_SIZE`` numpy float64 array, zero-padded.
     Returns ``(TAG_FREE, zeros)`` for ``entity is None``.
+
+    Variable-length entities (B-spline, composite path) append their data to
+    ``arena`` (a growable list of floats shared by all DOFs of the upload) and
+    store only offsets/counts in ``params``; encoding one without an arena
+    raises ``ValueError``.
     """
     from egg.geometry.analytic2d import Circle, Ellipse, LineSegment
+    from egg.geometry.curves2d import (
+        BSplineCurve,
+        CircleArc,
+        CompositePath,
+        CubicBezier,
+        EllipseArc,
+        QuadBezier,
+    )
 
     params = np.zeros(PARAM_PAD_SIZE, dtype=np.float64)
     if entity is None:
@@ -93,4 +108,49 @@ def encode_entity(entity, d: int = 2):
         params[:d] = entity.center[:d]
         params[d:2 * d] = np.array([entity.rx, entity.ry])
         return TAG_ELLIPSE, params
+    if isinstance(entity, CircleArc):
+        params[:2] = entity.center
+        params[2] = entity.radius
+        params[3:5] = (entity.t0, entity.t1)
+        params[5] = float(entity.closed)
+        return TAG_CIRCLEARC, params
+    if isinstance(entity, EllipseArc):
+        params[:2] = entity.center
+        params[2:5] = (entity.a, entity.b, entity.phi)
+        params[5:7] = (entity.t0, entity.t1)
+        params[7] = float(entity.closed)
+        return TAG_ELLIPSEARC, params
+    if isinstance(entity, QuadBezier):
+        params[:6] = entity.p.ravel()
+        params[6:8] = (entity.t0, entity.t1)
+        return TAG_QUADBEZIER, params
+    if isinstance(entity, CubicBezier):
+        params[:8] = entity.p.ravel()
+        params[8:10] = (entity.t0, entity.t1)
+        return TAG_CUBICBEZIER, params
+    if isinstance(entity, BSplineCurve):
+        if arena is None:
+            raise ValueError("encoding a BSplineCurve requires an arena")
+        knot_off = len(arena)
+        arena.extend(entity.knots.tolist())
+        ctrl_off = len(arena)
+        arena.extend(entity.ctrl.ravel().tolist())
+        params[:6] = (entity.degree, entity.ctrl.shape[0],
+                      knot_off, ctrl_off, entity.t0, entity.t1)
+        return TAG_BSPLINE, params
+    if isinstance(entity, CompositePath):
+        if arena is None:
+            raise ValueError("encoding a CompositePath requires an arena")
+        # Encode segment data (e.g. B-spline knots/nets) first so the records
+        # land contiguously at rec_off.
+        recs = []
+        for seg in entity.segments:
+            seg_tag, seg_params = encode_entity(seg, d=d, arena=arena)
+            recs.append((seg_tag, seg_params))
+        rec_off = len(arena)
+        for seg_tag, seg_params in recs:
+            arena.append(float(seg_tag))
+            arena.extend(seg_params.tolist())
+        params[:2] = (len(recs), rec_off)
+        return TAG_COMPOSITE, params
     raise NotImplementedError(f"Entity type {type(entity)} not encodable yet")

@@ -144,6 +144,12 @@ def flatten_context(ctx: SweepContext) -> dict:
             "P_of": np.ascontiguousarray(np.concatenate(P_of), dtype=np.int32),
             "params": np.ascontiguousarray(np.concatenate(params), dtype=np.float64),
         })
+        # Variable-length entity data (B-spline knots/nets, composite-path
+        # records). Offsets in params index into this shared array, so every
+        # group gets the same arena.
+        arena = getattr(ctx, "entity_arena", None)
+        if arena is not None and arena.size > 0:
+            groups[-1]["arena"] = np.ascontiguousarray(arena, dtype=np.float64)
 
     es = ctx.energy_stencil
     n = int(es["gc"].shape[0])

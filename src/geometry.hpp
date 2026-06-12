@@ -8,6 +8,7 @@
 #include <limits>
 #include <numbers>
 #include <span>
+#include <type_traits>
 #include <variant>
 
 namespace egg
@@ -25,8 +26,11 @@ inline constexpr Tag TAG_ELLIPSEARC = 7;
 inline constexpr Tag TAG_QUADBEZIER = 8;
 inline constexpr Tag TAG_CUBICBEZIER = 9;
 inline constexpr Tag TAG_BSPLINE = 10;
+inline constexpr Tag TAG_COMPOSITE = 11;
 
 inline constexpr int kParamPad = 12;
+/// @brief Arena record size of one composite-path segment: `[tag, params(kParamPad)]`.
+inline constexpr int kCompositeRecSize = 1 + kParamPad;
 
 // Pt is the D=2 coordinate type (PtN<2>). The 2D entity set is curves only
 // (Free, line, circle, ellipse, arcs, Béziers); Sphere/Plane are genuine
@@ -619,6 +623,36 @@ struct BSplineCurveParam {
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& u) const { return {deriv(u)}; }
 };
 
+/// @brief A composite path: an ordered sequence of curve segments joined
+///        end-to-end (the 2D analogue of an OCCT wire).
+///
+/// The segments live as fixed-size records in the per-group arena
+/// (@ref kCompositeRecSize doubles each: `[tag, params...]`), so the type stays
+/// trivially copyable. Projection projects onto every segment and keeps the
+/// nearest; the tangent is the matched segment's. The reported effective tdim
+/// is always 1: a node clamped onto a segment endpoint sits on an interior
+/// joint of the (continuous) path and must stay free to slide across onto the
+/// neighbouring segment on the next projection. Nested composites are not
+/// supported (such records are skipped).
+struct CompositePath {
+    using Pt = PtN<2>;              ///< Point type.
+    using Vec = VecN<2>;            ///< Vector type.
+    static constexpr int tdim = 1;  ///< A path is a curve.
+    int n_segs;                     ///< Number of segment records.
+    std::span<const double> recs;   ///< Segment records, @c n_segs*kCompositeRecSize doubles.
+    const double* arena;            ///< Arena base for span-backed segments (B-splines).
+
+    /// @brief Fused frame of the nearest segment to @p p.
+    /// @param p Query point.
+    /// @return The nearest segment's projected point and unit tangent; @c eff_tdim is 1.
+    [[nodiscard]] Frame<2, 1> project_frame(const Pt& p) const;  // defined after make_entity
+    /// @brief Project @p p onto the nearest segment.
+    [[nodiscard]] Pt project(const Pt& p) const { return project_frame(p).pos; }
+    /// @brief The matched segment's unit tangent column.
+    [[nodiscard]] std::array<Vec, 1> tangent_basis(const Pt& p) const
+    { return project_frame(p).basis; }
+};
+
 static_assert(Parametrization<LineParam> && Parametrization<CircleArcParam> &&
               Parametrization<EllipseArcParam> && Parametrization<QuadBezierParam> &&
               Parametrization<CubicBezierParam> && Parametrization<BSplineCurveParam>);
@@ -627,7 +661,7 @@ static_assert(GeometryEntity<Free<2>> && GeometryEntity<LineSeg> && GeometryEnti
               GeometryEntity<TrimmedEntity<CircleArcParam>> &&
               GeometryEntity<TrimmedEntity<EllipseArcParam>> &&
               GeometryEntity<TrimmedEntity<QuadBezierParam>> &&
-              GeometryEntity<TrimmedEntity<CubicBezierParam>>);
+              GeometryEntity<TrimmedEntity<CubicBezierParam>> && GeometryEntity<CompositePath>);
 
 // --- Per-dimension closed entity set + the host-side factory ------------------
 
@@ -645,7 +679,8 @@ template <> struct EntityKind<2> {
                               TrimmedEntity<EllipseArcParam>,
                               TrimmedEntity<QuadBezierParam>,
                               TrimmedEntity<CubicBezierParam>,
-                              TrimmedEntity<BSplineCurveParam>>;
+                              TrimmedEntity<BSplineCurveParam>,
+                              CompositePath>;
 };
 /// @brief Convenience alias for the entity variant at embedding dimension @p D.
 template <int D> using EntityKindT = typename EntityKind<D>::type;
@@ -705,11 +740,53 @@ inline EntityKindT<2> make_entity(Tag tag, const double* params, const double* a
                     .ctrl = {arena + ctrl_off, n_ctrl_d}},
           .trim = {.t0 = params[4], .t1 = params[5], .closed = false}};
     }
+    case TAG_COMPOSITE: {
+        // Blob: [n_segs, rec_off]; the segment records live in the arena.
+        const int n_segs = static_cast<int>(params[0]);
+        const auto rec_off = static_cast<std::size_t>(params[1]);
+        return CompositePath {
+          .n_segs = n_segs,
+          .recs = {arena + rec_off, static_cast<std::size_t>(n_segs) * kCompositeRecSize},
+          .arena = arena};
+    }
     // TAG_SPHERE / TAG_PLANE are 3D surfaces; they have no 2D entity, so they
     // fall through to Free here.
     case TAG_FREE:
     default: return Free<2> {};
     }
+}
+
+inline Frame<2, 1> CompositePath::project_frame(const Pt& p) const
+{
+    Frame<2, 1> best {.pos = p, .basis = {Vec {1.0, 0.0}}, .eff_tdim = 1};
+    double best_d = std::numeric_limits<double>::infinity();
+    for (int s = 0; s < n_segs; ++s) {
+        const double* rec = recs.data() + (static_cast<std::size_t>(s) * kCompositeRecSize);
+        const Tag tag = static_cast<Tag>(rec[0]);
+        if (tag == TAG_COMPOSITE || tag == TAG_FREE) { continue; }  // no nesting
+        std::visit(
+          [&](const auto& e) {
+              // Only non-composite curve segments (tdim==1) participate;
+              // Free/composite records are filtered by tag above. Excluding
+              // CompositePath here is a compile-time necessity, not just an
+              // optimisation: a recursive call is illegal in device code.
+              using Seg = std::decay_t<decltype(e)>;
+              if constexpr (Seg::tdim == 1 && !std::is_same_v<Seg, CompositePath>) {
+                  Frame<2, 1> f = e.project_frame(p);
+                  const Vec d = f.pos - p;
+                  const double dd = dot(d, d);
+                  if (dd < best_d) {
+                      best_d = dd;
+                      // A clamped segment endpoint is an interior joint of the
+                      // continuous path, not a pinned vertex.
+                      f.eff_tdim = 1;
+                      best = f;
+                  }
+              }
+          },
+          make_entity(tag, rec + 1, arena));
+    }
+    return best;
 }
 
 /// @brief Dimension-templated dispatch over @ref make_entity.
