@@ -262,43 +262,57 @@ def section_edges(X0, edges, tol=1e-6):
     return out
 
 
-def _draw_sections(axes, X, sec_edges, title=""):
-    """Planar sections: XY (z=0) and YZ (x=0) edge plots (in-plane coords)."""
-    for ax_plot, (plane_ax, keep, name), sel in zip(axes, _SECTIONS, sec_edges):
-        ax_plot.cla()
-        for u, v in sel:
-            ax_plot.plot([X[u][keep[0]], X[v][keep[0]]],
-                         [X[u][keep[1]], X[v][keep[1]]], "b-", lw=0.5)
-        ax_plot.set_title(f"{name} {title}")
-        ax_plot.set_aspect("equal")
+class GridPlots:
+    """PyVista panes: the XY/YZ section wireframes (+ an optional 3D pane).
 
+    The section panes render the (frozen) section edges as 3D line meshes
+    viewed along the plane normal with parallel projection; live updates just
+    swap the shared point array in place, so redraws stay cheap.
+    """
 
-def _draw_wire3d(ax, X, edges, title=""):
-    """Full 3D wireframe (all hex edges), dome-example style."""
-    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+    def __init__(self, X, sections, edges, plot3d, off_screen=False):
+        import pyvista as pv
 
-    ax.cla()
-    segs = X[np.asarray(edges)]  # (E, 2, 3)
-    ax.add_collection3d(Line3DCollection(segs, colors="b", linewidths=0.25))
-    ax.set_xlim(-1, 1)
-    ax.set_ylim(-1, 1)
-    ax.set_zlim(-1, 1)
-    ax.set_title(title)
-    ax.set_box_aspect((1, 1, 1))
+        self._pv = pv
+        n_panes = 3 if plot3d else 2
+        self.plotter = pv.Plotter(shape=(1, n_panes), off_screen=off_screen,
+                                  window_size=(520 * n_panes, 520))
+        self.meshes = []
+        for i, (sel, (_plane_ax, _keep, name), view) in enumerate(
+                zip(sections, _SECTIONS, ("xy", "yz"))):
+            self.plotter.subplot(0, i)
+            mesh = self._lines(X, sel)
+            self.plotter.add_mesh(mesh, color="blue", line_width=1)
+            self.plotter.add_text(name, font_size=10)
+            getattr(self.plotter, f"view_{view}")()
+            self.plotter.enable_parallel_projection()
+            self.meshes.append(mesh)
+        if plot3d:
+            self.plotter.subplot(0, n_panes - 1)
+            mesh = self._lines(X, edges)
+            self.plotter.add_mesh(mesh, color="blue", line_width=1)
+            self.plotter.add_text("3D", font_size=10)
+            self.meshes.append(mesh)
 
+    def _lines(self, X, edge_list):
+        e = np.asarray(edge_list, dtype=np.int64)
+        cells = np.column_stack([np.full(e.shape[0], 2, dtype=np.int64), e])
+        return self._pv.PolyData(np.asarray(X, dtype=float).copy(),
+                                 lines=cells.ravel())
 
-def _make_axes(plot3d):
-    """Figure with the two section panes (+ an optional 3D pane)."""
-    import matplotlib.pyplot as plt
+    def open_live(self):
+        self.plotter.show(interactive_update=True, auto_close=False)
 
-    if plot3d:
-        fig = plt.figure(figsize=(16, 5.5))
-        sec = [fig.add_subplot(1, 3, 1), fig.add_subplot(1, 3, 2)]
-        ax3d = fig.add_subplot(1, 3, 3, projection="3d")
-    else:
-        fig, sec = plt.subplots(1, 2, figsize=(11, 5.5))
-        ax3d = None
-    return fig, sec, ax3d
+    def update(self, X):
+        for mesh in self.meshes:
+            mesh.points = np.asarray(X, dtype=float)
+        if self.plotter.off_screen:
+            self.plotter.render()
+        else:
+            self.plotter.update()
+
+    def show(self):
+        self.plotter.show()
 
 
 def _plot_energy(energies, mindets):
@@ -327,9 +341,9 @@ def main():
                    help="sweeps per device-resident chunk")
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
     p.add_argument("--plot-live", action="store_true",
-                   help="matplotlib animated XY/YZ sections (one frame per chunk)")
+                   help="PyVista animated XY/YZ sections (one frame per chunk)")
     p.add_argument("--plot-grid", action="store_true",
-                   help="matplotlib final XY/YZ section plots")
+                   help="PyVista final XY/YZ section plots")
     p.add_argument("--plot-energy", action="store_true",
                    help="matplotlib energy + min-det convergence curves")
     p.add_argument("--plot-3d", action="store_true",
@@ -354,16 +368,10 @@ def main():
     session = cpp_core.CppSweepSession(ctx, X.ravel(), device=a.device, dim=3)
     energies, mindets = [], []
 
-    live = live3d = None
+    live = None
     if a.plot_live:
-        import matplotlib.pyplot as plt
-
-        plt.ion()
-        fig, live, live3d = _make_axes(a.plot_3d)
-        _draw_sections(live, X, sections, "sweep 0")
-        if live3d is not None:
-            _draw_wire3d(live3d, X, edges, "sweep 0")
-        plt.pause(0.01)
+        live = GridPlots(X, sections, edges, a.plot_3d)
+        live.open_live()
 
     done = 0
     while done < a.sweeps:
@@ -375,19 +383,10 @@ def main():
         print(f"  sweeps={done:4d} energy={energies[-1]:.4e} "
               f"min_det={mindets[-1]:.4e}")
         if live is not None:
-            import matplotlib.pyplot as plt
-
-            X_cur = session.get_X().reshape(-1, 3)
-            _draw_sections(live, X_cur, sections, f"sweep {done}")
-            if live3d is not None:
-                _draw_wire3d(live3d, X_cur, edges, f"sweep {done}")
-            plt.pause(0.01)
+            live.update(session.get_X().reshape(-1, 3))
 
     if live is not None:
-        import matplotlib.pyplot as plt
-
-        plt.ioff()
-        plt.show()
+        live.show()
 
     X_out = session.get_X().reshape(-1, 3)
 
@@ -406,13 +405,7 @@ def main():
     assert sph_dev < 1e-9 and pl_dev < 1e-9
 
     if a.plot_grid:
-        import matplotlib.pyplot as plt
-
-        fig, axes, ax3d = _make_axes(a.plot_3d)
-        _draw_sections(axes, X_out, sections, "final")
-        if ax3d is not None:
-            _draw_wire3d(ax3d, X_out, edges, "final")
-        plt.show()
+        GridPlots(X_out, sections, edges, a.plot_3d).show()
     if a.plot_energy:
         _plot_energy(energies, mindets)
 
