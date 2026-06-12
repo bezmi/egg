@@ -6,6 +6,7 @@
 #include "metric.hpp"
 #include "patch.hpp"
 
+#include <array>
 #include <cstddef>
 #include <functional>
 #include <limits>
@@ -16,114 +17,121 @@
 namespace egg
 {
 
-struct SweepGroupHost {
-    std::size_t D;                   // DOFs in this colour
-    std::size_t total_samples;       // Σ P_of[d]
-    std::vector<int> gc;             // [total_samples]
-    std::vector<int> gn0;            // [total_samples]
-    std::vector<int> gn1;            // [total_samples]
-    std::vector<double> s0;          // [total_samples]
-    std::vector<double> s1;          // [total_samples]
-    std::vector<double> W_inv;       // [total_samples*4]
-    std::vector<int> role;           // [total_samples]
-    std::vector<double> J;           // [total_samples*24]
-    std::vector<int> dof_idx;        // [D]
-    std::vector<int> tag;            // [D]
-    std::vector<int> P_of;           // [D]  patch size per DOF
-    std::vector<int> sample_offset;  // [D]  exclusive prefix sum of P_of
-    std::vector<double> params;      // [D*12]
+// The colored Gauss-Seidel kernels build the per-corner stencil through the
+// D-neighbour PatchViewT<D> and take the D×D Newton step. The A→T→detA math is
+// single-sourced in patch.hpp::assemble_vecT; everything here is generic over D,
+// and only the dimensions whose math exists (D=2 in Phase 1) are instantiated.
+
+template <int D> struct SweepGroupHostT {
+    std::size_t ndof;                   // DOFs in this colour
+    std::size_t total_samples;          // Σ P_of[d]
+    std::vector<int> gc;                // [total_samples]
+    std::vector<int> gn[D];             // [total_samples] per axis (was gn0, gn1)
+    std::vector<double> s[D];           // [total_samples] per axis (was s0, s1)
+    std::vector<double> W_inv;          // [total_samples * dim::wInv(D)]
+    std::vector<int> role;              // [total_samples]
+    std::vector<double> J;              // [total_samples * dim::jSize(D)]
+    std::vector<int> dof_idx;           // [ndof]
+    std::vector<int> tag;               // [ndof]
+    std::vector<int> P_of;              // [ndof]  patch size per DOF
+    std::vector<int> sample_offset;     // [ndof]  exclusive prefix sum of P_of
+    std::vector<double> params;         // [ndof * kParamPad]
 };
 
-struct EnergyStencilHost {
+template <int D> struct EnergyStencilHostT {
     std::size_t num_samples;
-    std::vector<int> gc;  // [num_samples]
-    std::vector<int> gn0;
-    std::vector<int> gn1;
-    std::vector<double> s0;
-    std::vector<double> s1;
-    std::vector<double> W_inv;  // [num_samples*4]
+    std::vector<int> gc;        // [num_samples]
+    std::vector<int> gn[D];
+    std::vector<double> s[D];
+    std::vector<double> W_inv;  // [num_samples * dim::wInv(D)]
 };
 
-struct SweepContextHost {
-    std::vector<SweepGroupHost> groups;  // colour-ordered
-    EnergyStencilHost energy_stencil;
+template <int D> struct SweepContextHostT {
+    std::vector<SweepGroupHostT<D>> groups;  // colour-ordered
+    EnergyStencilHostT<D> energy_stencil;
     std::size_t num_nodes;
-    std::vector<double> X;  // [num_nodes*2] initial positions
+    std::vector<double> X;  // [num_nodes * D] initial positions
 };
 
-struct GroupView {
-    std::size_t D;
-    View1<const int> gc, gn0, gn1, role;                 // [total_samples]
-    View1<const double> s0, s1;                          // [total_samples]
-    View1<const double> W_inv;                           // [total_samples*4]
-    View1<const double> J;                               // [total_samples*24]
-    View1<const int> dof_idx, tag, P_of, sample_offset;  // [D]
-    View1<const double> params;                          // [D*12]
+template <int D> struct GroupViewT {
+    std::size_t ndof;
+    View1<const int> gc, role;                           // [total_samples]
+    View1<const int> gn[D];                              // [total_samples]
+    View1<const double> s[D];                            // [total_samples]
+    View1<const double> W_inv;                           // [total_samples * wInv]
+    View1<const double> J;                               // [total_samples * jSize]
+    View1<const int> dof_idx, tag, P_of, sample_offset;  // [ndof]
+    View1<const double> params;                          // [ndof * kParamPad]
 
-    // PatchView over DOF d's contiguous ragged slice
+    // PatchViewT over DOF d's contiguous ragged slice
     // [sample_offset[d], sample_offset[d] + P_of[d]).
-    PatchView patch(std::size_t d) const
+    PatchViewT<D> patch(std::size_t d) const
     {
         const std::size_t off = static_cast<std::size_t>(sample_offset[d]);
-        return PatchView {P_of[d],
-                          gc.data_handle() + off,
-                          gn0.data_handle() + off,
-                          gn1.data_handle() + off,
-                          s0.data_handle() + off,
-                          s1.data_handle() + off,
-                          W_inv.data_handle() + off * 4,
-                          role.data_handle() + off,
-                          J.data_handle() + off * 24};
+        PatchViewT<D> pv;
+        pv.P = P_of[d];
+        pv.gc = gc.data_handle() + off;
+        for (int k = 0; k < D; ++k) {
+            pv.gn[k] = gn[k].data_handle() + off;
+            pv.s[k] = s[k].data_handle() + off;
+        }
+        pv.W_inv = W_inv.data_handle() + off * dim::wInv(D);
+        pv.role = role.data_handle() + off;
+        pv.J = J.data_handle() + off * dim::jSize(D);
+        return pv;
     }
 };
 
-struct StencilView {
+template <int D> struct StencilViewT {
     std::size_t num_samples;
-    View1<const int> gc, gn0, gn1;
-    View1<const double> s0, s1;
-    View2<const double> W_inv;  // [num_samples][4]
+    View1<const int> gc;
+    View1<const int> gn[D];
+    View1<const double> s[D];
+    View2<const double> W_inv;  // [num_samples][wInv]
 };
 
-class SweepDeviceContext
+template <int D> class SweepDeviceContextT
 {
   public:
-    SweepDeviceContext(sycl::queue q, const SweepContextHost& host) :
+    SweepDeviceContextT(sycl::queue q, const SweepContextHostT<D>& host) :
         q_(q), num_nodes_(host.num_nodes), X_(q, host.X)
     {
         groups_.reserve(host.groups.size());
         for (const auto& g : host.groups) {
-            groups_.push_back(DeviceGroup {g.D,
-                                           g.total_samples,
-                                           {q, g.gc},
-                                           {q, g.gn0},
-                                           {q, g.gn1},
-                                           {q, g.role},
-                                           {q, g.s0},
-                                           {q, g.s1},
-                                           {q, g.W_inv},
-                                           {q, g.J},
-                                           {q, g.dof_idx},
-                                           {q, g.tag},
-                                           {q, g.P_of},
-                                           {q, g.sample_offset},
-                                           {q, g.params}});
+            DeviceGroup dg;
+            dg.ndof = g.ndof;
+            dg.total_samples = g.total_samples;
+            dg.gc = {q, g.gc};
+            dg.role = {q, g.role};
+            for (int k = 0; k < D; ++k) {
+                dg.gn[k] = {q, g.gn[k]};
+                dg.s[k] = {q, g.s[k]};
+            }
+            dg.W_inv = {q, g.W_inv};
+            dg.J = {q, g.J};
+            dg.dof_idx = {q, g.dof_idx};
+            dg.tag = {q, g.tag};
+            dg.P_of = {q, g.P_of};
+            dg.sample_offset = {q, g.sample_offset};
+            dg.params = {q, g.params};
+            groups_.push_back(std::move(dg));
         }
         const auto& es = host.energy_stencil;
-        stencil_ = DeviceStencil {es.num_samples,
-                                  {q, es.gc},
-                                  {q, es.gn0},
-                                  {q, es.gn1},
-                                  {q, es.s0},
-                                  {q, es.s1},
-                                  {q, es.W_inv}};
+        stencil_.num_samples = es.num_samples;
+        stencil_.gc = {q, es.gc};
+        for (int k = 0; k < D; ++k) {
+            stencil_.gn[k] = {q, es.gn[k]};
+            stencil_.s[k] = {q, es.s[k]};
+        }
+        stencil_.W_inv = {q, es.W_inv};
 
         group_views_.reserve(groups_.size());
         for (const auto& dg : groups_) group_views_.push_back(dg.view());
         stencil_view_ = stencil_.view();
     }
 
-    const std::vector<GroupView>& group_views() const { return group_views_; }
-    const StencilView& stencil_view() const { return stencil_view_; }
+    const std::vector<GroupViewT<D>>& group_views() const { return group_views_; }
+    const StencilViewT<D>& stencil_view() const { return stencil_view_; }
     double* X() const { return X_.data(); }
     std::size_t num_nodes() const { return num_nodes_; }
 
@@ -132,47 +140,55 @@ class SweepDeviceContext
 
   private:
     struct DeviceGroup {
-        std::size_t D;
+        std::size_t ndof;
         std::size_t total_samples;
-        UsmBuffer<int> gc, gn0, gn1, role;
-        UsmBuffer<double> s0, s1, W_inv, J;
+        UsmBuffer<int> gc, role;
+        UsmBuffer<int> gn[D];
+        UsmBuffer<double> s[D];
+        UsmBuffer<double> W_inv, J;
         UsmBuffer<int> dof_idx, tag, P_of, sample_offset;
         UsmBuffer<double> params;
 
-        GroupView view() const
+        GroupViewT<D> view() const
         {
             const std::size_t n = total_samples;
-            return GroupView {D,
-                              View1<const int> {gc.data(), n},
-                              View1<const int> {gn0.data(), n},
-                              View1<const int> {gn1.data(), n},
-                              View1<const int> {role.data(), n},
-                              View1<const double> {s0.data(), n},
-                              View1<const double> {s1.data(), n},
-                              View1<const double> {W_inv.data(), n * 4},
-                              View1<const double> {J.data(), n * 24},
-                              View1<const int> {dof_idx.data(), D},
-                              View1<const int> {tag.data(), D},
-                              View1<const int> {P_of.data(), D},
-                              View1<const int> {sample_offset.data(), D},
-                              View1<const double> {params.data(), D * 12}};
+            GroupViewT<D> gv;
+            gv.ndof = ndof;
+            gv.gc = View1<const int> {gc.data(), n};
+            gv.role = View1<const int> {role.data(), n};
+            for (int k = 0; k < D; ++k) {
+                gv.gn[k] = View1<const int> {gn[k].data(), n};
+                gv.s[k] = View1<const double> {s[k].data(), n};
+            }
+            gv.W_inv = View1<const double> {W_inv.data(), n * dim::wInv(D)};
+            gv.J = View1<const double> {J.data(), n * dim::jSize(D)};
+            gv.dof_idx = View1<const int> {dof_idx.data(), ndof};
+            gv.tag = View1<const int> {tag.data(), ndof};
+            gv.P_of = View1<const int> {P_of.data(), ndof};
+            gv.sample_offset = View1<const int> {sample_offset.data(), ndof};
+            gv.params = View1<const double> {params.data(), ndof * kParamPad};
+            return gv;
         }
     };
 
     struct DeviceStencil {
         std::size_t num_samples;
-        UsmBuffer<int> gc, gn0, gn1;
-        UsmBuffer<double> s0, s1, W_inv;
+        UsmBuffer<int> gc;
+        UsmBuffer<int> gn[D];
+        UsmBuffer<double> s[D];
+        UsmBuffer<double> W_inv;
 
-        StencilView view() const
+        StencilViewT<D> view() const
         {
-            return StencilView {num_samples,
-                                View1<const int> {gc.data(), num_samples},
-                                View1<const int> {gn0.data(), num_samples},
-                                View1<const int> {gn1.data(), num_samples},
-                                View1<const double> {s0.data(), num_samples},
-                                View1<const double> {s1.data(), num_samples},
-                                View2<const double> {W_inv.data(), num_samples, 4}};
+            StencilViewT<D> sv;
+            sv.num_samples = num_samples;
+            sv.gc = View1<const int> {gc.data(), num_samples};
+            for (int k = 0; k < D; ++k) {
+                sv.gn[k] = View1<const int> {gn[k].data(), num_samples};
+                sv.s[k] = View1<const double> {s[k].data(), num_samples};
+            }
+            sv.W_inv = View2<const double> {W_inv.data(), num_samples, dim::wInv(D)};
+            return sv;
         }
     };
 
@@ -181,84 +197,101 @@ class SweepDeviceContext
     UsmBuffer<double> X_;
     std::vector<DeviceGroup> groups_;
     DeviceStencil stencil_;
-    std::vector<GroupView> group_views_;
-    StencilView stencil_view_ {};
+    std::vector<GroupViewT<D>> group_views_;
+    StencilViewT<D> stencil_view_ {};
 };
 
-inline void
-  sweep_group_kernel(sycl::queue& q, const GroupView& g, double* X, Objective auto objective)
+template <int D, class Obj>
+inline void sweep_group_kernel(sycl::queue& q, const GroupViewT<D>& g, double* X, Obj objective)
 {
-    if (g.D == 0) return;
-    q.parallel_for(sycl::range<1>(g.D), [=](sycl::id<1> idx) {
+    if (g.ndof == 0) return;
+    q.parallel_for(sycl::range<1>(g.ndof), [=](sycl::id<1> idx) {
         const std::size_t d = idx[0];
-        const PatchView pv = g.patch(d);
+        const PatchViewT<D> pv = g.patch(d);
         const int dof = g.dof_idx[d];
         const int tag = g.tag[d];
-        const double* params = g.params.data_handle() + d * 12;
+        const double* params = g.params.data_handle() + d * kParamPad;
 
-        // 1. patch_eval → (grad, hess, e0); 2. Newton step (tangent-reduced if
-        //    constrained).
-        const PatchResult r = patch_eval(pv, X, objective);
-        const Pt pos {X[2 * dof], X[2 * dof + 1]};
-        const Vec2 delta = newton_delta(r.grad, r.hess, pos, tag, params);
+        // 1. patch_eval → (grad, hess, e0).
+        const PatchResultT<D> r = patch_eval<D>(pv, X, objective);
+        const PtN<D> pos = load_pt<D>(X, dof);
 
-        // 3. Backtracking: halve alpha up to 10×; accept on
-        //    finite(e) && e <= e0 + 1e-12 && objective.accept_mindet(mindet).
-        double alpha = 1.0;
-        Pt cur = pos;
-        bool accepted = false;
-        for (int it = 0; it < 10 && !accepted; ++it) {
-            const Pt raw {pos[0] + alpha * delta[0], pos[1] + alpha * delta[1]};
-            const Pt trial = (tag == TAG_FREE) ? raw : project(raw, tag, params);
+        // Dispatch on the entity type ONCE per DOF: the std::visit is hoisted out
+        // of the backtracking/energy inner loops, so the Newton step, the
+        // per-trial projection, and the energy reduction below all run on a
+        // monomorphic, fully-concrete entity (no per-iteration dispatch).
+        std::visit(
+          [&](const auto& ent) {
+              using E = std::decay_t<decltype(ent)>;
 
-            double e_new = 0.0;
-            double mdet = std::numeric_limits<double>::infinity();
-            for (int p = 0; p < pv.P; ++p) {
-                auto node = [&](int ni) -> Pt {
-                    return ni == dof ? trial : Pt {X[2 * ni], X[2 * ni + 1]};
-                };
-                const Pt corner = node(pv.gc[p]);
-                const Pt nbr0 = node(pv.gn0[p]);
-                const Pt nbr1 = node(pv.gn1[p]);
-                const double a00 = pv.s0[p] * (nbr0[0] - corner[0]);
-                const double a10 = pv.s0[p] * (nbr0[1] - corner[1]);
-                const double a01 = pv.s1[p] * (nbr1[0] - corner[0]);
-                const double a11 = pv.s1[p] * (nbr1[1] - corner[1]);
-                const double detA = a00 * a11 - a01 * a10;
-                const double* w = &pv.W_inv[4 * p];
-                const VecT t {a00 * w[0] + a01 * w[2],
-                              a00 * w[1] + a01 * w[3],
-                              a10 * w[0] + a11 * w[2],
-                              a10 * w[1] + a11 * w[3]};
-                e_new += objective.value(t);
-                if (detA < mdet) mdet = detA;
-            }
+              // 2. Newton step (tangent-reduced if constrained).
+              const VecN<D> delta = newton_delta<D>(r.grad, r.hess, pos, ent);
 
-            const bool ok =
-              std::isfinite(e_new) && (e_new <= r.energy + 1e-12) && objective.accept_mindet(mdet);
-            if (ok) {
-                cur = trial;
-                accepted = true;
-            } else {
-                alpha *= 0.5;
-            }
-        }
+              // 3. Backtracking: halve alpha up to 10×; accept on
+              //    finite(e) && e <= e0 + 1e-12 && objective.accept_mindet(mindet).
+              double alpha = 1.0;
+              PtN<D> cur = pos;
+              bool accepted = false;
+              for (int it = 0; it < 10 && !accepted; ++it) {
+                  PtN<D> raw;
+                  for (int k = 0; k < D; ++k) raw[k] = pos[k] + alpha * delta[k];
+                  PtN<D> trial;
+                  if constexpr (std::is_same_v<E, Free>) {
+                      trial = raw;
+                  } else {
+                      trial = ent.project(raw);
+                  }
 
-        // 4. Scatter (race-free within colour).
-        X[2 * dof + 0] = cur[0];
-        X[2 * dof + 1] = cur[1];
+                  double e_new = 0.0;
+                  double mdet = std::numeric_limits<double>::infinity();
+                  for (int p = 0; p < pv.P; ++p) {
+                      // Substitute the trial position for the moving DOF; all other
+                      // nodes load from X. The A→T→detA math is the single source in
+                      // patch.hpp::assemble_vecT.
+                      auto node = [&](int ni) -> PtN<D> {
+                          return ni == dof ? trial : load_pt<D>(X, ni);
+                      };
+                      PtN<D> corner = node(pv.gc[p]);
+                      std::array<PtN<D>, D> nbr;
+                      std::array<double, D> sc;
+                      for (int k = 0; k < D; ++k) {
+                          nbr[k] = node(pv.gn[k][p]);
+                          sc[k] = pv.s[k][p];
+                      }
+                      double detA;
+                      const VecTN<D> t =
+                        assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[dim::wInv(D) * p], detA);
+                      e_new += objective.value(t);
+                      if (detA < mdet) mdet = detA;
+                  }
+
+                  const bool ok = std::isfinite(e_new) && (e_new <= r.energy + 1e-12) &&
+                                  objective.accept_mindet(mdet);
+                  if (ok) {
+                      cur = trial;
+                      accepted = true;
+                  } else {
+                      alpha *= 0.5;
+                  }
+              }
+
+              // 4. Scatter (race-free within colour).
+              store_pt<D>(X, dof, cur);
+          },
+          make_entity<D>(tag, params));
     });
 }
 
 // Per-sweep total energy (Σ μ) and min det A over the energy stencil, written to
 // out_e/out_m (USM scalars). Reduction identities are supplied explicitly, so no
 // host pre-initialisation of the targets is needed.
+template <int D, class Obj>
 inline void reduce_energy_mindet(sycl::queue& q,
-                                 const StencilView& es,
+                                 const StencilViewT<D>& es,
                                  const double* X,
                                  double* out_e,
                                  double* out_m,
-                                 Objective auto objective)
+                                 Obj objective)
 {
     auto e_red = sycl::reduction(out_e,
                                  0.0,
@@ -274,46 +307,44 @@ inline void reduce_energy_mindet(sycl::queue& q,
                    m_red,
                    [=](sycl::id<1> idx, auto& e_sum, auto& m_min) {
                        const std::size_t i = idx[0];
-                       const int gc = es.gc[i], gn0 = es.gn0[i], gn1 = es.gn1[i];
-                       const double cx = X[2 * gc], cy = X[2 * gc + 1];
-                       const double n0x = X[2 * gn0], n0y = X[2 * gn0 + 1];
-                       const double n1x = X[2 * gn1], n1y = X[2 * gn1 + 1];
-                       const double a00 = es.s0[i] * (n0x - cx);
-                       const double a10 = es.s0[i] * (n0y - cy);
-                       const double a01 = es.s1[i] * (n1x - cx);
-                       const double a11 = es.s1[i] * (n1y - cy);
-                       const double detA = a00 * a11 - a01 * a10;
-                       const VecT t {a00 * es.W_inv[i, 0] + a01 * es.W_inv[i, 2],
-                                     a00 * es.W_inv[i, 1] + a01 * es.W_inv[i, 3],
-                                     a10 * es.W_inv[i, 0] + a11 * es.W_inv[i, 2],
-                                     a10 * es.W_inv[i, 1] + a11 * es.W_inv[i, 3]};
+                       // W_inv is [num_samples][wInv] row-major; row i is contiguous.
+                       const double* w = es.W_inv.data_handle() + i * dim::wInv(D);
+                       PtN<D> corner = load_pt<D>(X, es.gc[i]);
+                       std::array<PtN<D>, D> nbr;
+                       std::array<double, D> sc;
+                       for (int k = 0; k < D; ++k) {
+                           nbr[k] = load_pt<D>(X, es.gn[k][i]);
+                           sc[k] = es.s[k][i];
+                       }
+                       double detA;
+                       const VecTN<D> t = assemble_vecT<D>(corner, nbr, sc, w, detA);
                        e_sum += objective.value(t);
                        m_min.combine(detA);
                    });
 }
 
-class Executor
+template <int D> class ExecutorT
 {
   public:
-    Executor(const sycl::queue& queue, const SweepContextHost& host) :
+    ExecutorT(const sycl::queue& queue, const SweepContextHostT<D>& host) :
         q_(sycl::queue(
           queue.get_context(), queue.get_device(), {sycl::property::queue::in_order()})),
         ctx_(q_, host)
     {
     }
 
-    SweepDeviceContext& ctx() { return ctx_; }
+    SweepDeviceContextT<D>& ctx() { return ctx_; }
 
     // Run n_sweeps, dispatching the objective kind once via std::visit.
     std::pair<std::vector<double>, std::vector<double>>
-      run_sweeps(int n_sweeps, const ObjectiveKind& kind = ShapeObjective {})
+      run_sweeps(int n_sweeps, const ObjectiveKindT<D>& kind = ShapeObjectiveT<D> {})
     {
         return std::visit([&](auto objective) { return run_impl(objective, n_sweeps); }, kind);
     }
 
   private:
-    std::pair<std::vector<double>, std::vector<double>> run_impl(Objective auto objective,
-                                                                 int n_sweeps)
+    template <class Obj>
+    std::pair<std::vector<double>, std::vector<double>> run_impl(Obj objective, int n_sweeps)
     {
         UsmBuffer<double> d_e(q_, static_cast<std::size_t>(n_sweeps));
         UsmBuffer<double> d_m(q_, static_cast<std::size_t>(n_sweeps));
@@ -321,13 +352,14 @@ class Executor
 
         constexpr int kSyncEvery = 32;
         for (int s = 0; s < n_sweeps; ++s) {
-            for (const auto& gv : ctx_.group_views()) sweep_group_kernel(q_, gv, X, objective);
-            reduce_energy_mindet(q_,
-                                 ctx_.stencil_view(),
-                                 X,
-                                 d_e.data() + s,
-                                 d_m.data() + s,
-                                 objective);
+            for (const auto& gv : ctx_.group_views())
+                sweep_group_kernel<D>(q_, gv, X, objective);
+            reduce_energy_mindet<D>(q_,
+                                    ctx_.stencil_view(),
+                                    X,
+                                    d_e.data() + s,
+                                    d_m.data() + s,
+                                    objective);
             if ((s + 1) % kSyncEvery == 0) q_.wait();
         }
         q_.wait();
@@ -339,7 +371,16 @@ class Executor
     }
 
     sycl::queue q_;
-    SweepDeviceContext ctx_;
+    SweepDeviceContextT<D> ctx_;
 };
+
+// D=2 legacy aliases for the binding's oracle surface and existing call sites.
+using SweepGroupHost = SweepGroupHostT<2>;
+using EnergyStencilHost = EnergyStencilHostT<2>;
+using SweepContextHost = SweepContextHostT<2>;
+using GroupView = GroupViewT<2>;
+using StencilView = StencilViewT<2>;
+using SweepDeviceContext = SweepDeviceContextT<2>;
+using Executor = ExecutorT<2>;
 
 }  // namespace egg

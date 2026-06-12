@@ -53,7 +53,7 @@ def assemble_energy_vec(X, gc, gn0, gn1, s0, s1, W_inv) -> float:
 def assemble_energy(
     grid: MultiBlockGrid,
     target_fn: Callable[..., np.ndarray],
-    metric: str = "shape",
+    metric: str = "shape_2d",
 ) -> float:
     """Compute global energy F(x) over all blocks.
 
@@ -63,7 +63,10 @@ def assemble_energy(
     target_fn : callable
         Function (cell_base, corner_offset) -> W matrix of shape (d, d).
     metric : str
-        One of "shape", "shape_2d", "shape_size".
+        One of "shape", "shape_2d", "shape_size". Defaults to ``"shape_2d"`` to
+        match the solver's fast path (:func:`assemble_energy_vec` and
+        :func:`egg.smoothing.solver.local_relaxation_sweep`), so the two energies
+        agree by default.
 
     Returns
     -------

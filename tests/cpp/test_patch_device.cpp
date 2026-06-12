@@ -127,7 +127,7 @@ void run_patch(sycl::queue& q, std::size_t M, Outputs& out)
                        d_mindet[k] = r.mindet;
 
                        double e2, md2;
-                       patch_energy_mindet(v, X, e2, md2);
+                       patch_energy_mindet<2>(v, X, e2, md2);
                        d_e2[k] = e2;
                        d_md2[k] = md2;
 
@@ -135,7 +135,7 @@ void run_patch(sycl::queue& q, std::size_t M, Outputs& out)
                        // DOF is node 0 (X[0], X[1]).
                        const Pt pos {X[0], X[1]};
                        const Vec2 del =
-                         newton_delta(r.grad, r.hess, pos, d_tag[k], &d_params[k * 12]);
+                         newton_delta<2>(r.grad, r.hess, pos, d_tag[k], &d_params[k * 12]);
                        d_delta[k * 2 + 0] = del[0];
                        d_delta[k * 2 + 1] = del[1];
                    })

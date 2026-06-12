@@ -214,9 +214,14 @@ class BlockTopology:
         rank = {i: 0 for i in range(total_nodes)}
 
         def find(x: int) -> int:
-            if parent[x] != x:
-                parent[x] = find(parent[x])
-            return parent[x]
+            # Iterative path-compression: recursion would risk Python's recursion
+            # limit on long union chains.
+            root = x
+            while parent[root] != root:
+                root = parent[root]
+            while parent[x] != root:
+                parent[x], x = root, parent[x]
+            return root
 
         def union(x: int, y: int) -> None:
             rx, ry = find(x), find(y)

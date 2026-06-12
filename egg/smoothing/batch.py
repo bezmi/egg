@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import numpy as np
 
-# d vec(C)/d vec(T) with cofactor vec(C) = [d, -c, -b, a]
+# d vec(C)/d vec(T) with cofactor vec(C) = [d, -c, -b, a].
+# MIRROR: keep in sync with egg.smoothing.metrics._HESS_P (Python) and
+# egg::kHessP in src/metric.hpp (C++). Three copies across two languages; any
+# change must be applied to all three.
 _HESS_P = np.array(
     [[0.0, 0.0, 0.0, 1.0],
      [0.0, 0.0, -1.0, 0.0],

@@ -86,13 +86,11 @@ def untangle(
     if md > margin:
         return UntangleResult(True, md, 0.0, 0, no_op=True)
 
-    eps = 1e-12
-    delta = delta0_factor * max(abs(md), eps)
-
-    X_out, md_final = cpp_untangle(
+    X_out, md_final, outer_iters, delta_final = cpp_untangle(
         ctx, grid.global_nodes,
         sweeps_per_delta=sweeps_per_delta,
         delta0_factor=delta0_factor,
+        shrink=shrink,
         max_outer=max_outer,
         margin=margin,
     )
@@ -102,4 +100,4 @@ def untangle(
         block.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]
 
     converged = md_final > margin
-    return UntangleResult(converged, md_final, float(delta), max_outer, no_op=False)
+    return UntangleResult(converged, md_final, float(delta_final), outer_iters, no_op=False)

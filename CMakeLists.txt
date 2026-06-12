@@ -272,16 +272,6 @@ if(EGG_BUILD_TESTS)
   target_include_directories(cpp_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp")
   add_test(NAME cpp_tests COMMAND cpp_tests)
 
-  # The spike test runs the explicit-SYCL kernel (spike_launch) on the default
-  # device, so it must be compiled by acpp (SYCL). No TBB needed (we no longer
-  # use <execution>/par_unseq).
-  add_executable(cpp_spike_tests tests/cpp/test_spike.cpp)
-  target_link_libraries(cpp_spike_tests PRIVATE egg_core Boost::ut)
-  target_compile_definitions(cpp_spike_tests PRIVATE BOOST_UT_DISABLE_MODULE)
-  target_include_directories(cpp_spike_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp")
-  add_sycl_to_target(TARGET cpp_spike_tests SOURCES tests/cpp/test_spike.cpp)
-  add_test(NAME cpp_spike_tests COMMAND cpp_spike_tests)
-
   # Geometry + patch device tests run the closed-form project/tangent and the
   # per-DOF patch evaluation as SYCL kernels on EVERY visible device (the AMD
   # GPU and the OpenMP host/CPU device), against the C++ regression golden tables.

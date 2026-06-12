@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core.hpp"
+
 #include <array>
 #include <cmath>
 #include <concepts>
@@ -18,7 +20,10 @@ inline constexpr Tag TAG_PLANE = 5;
 
 inline constexpr int kParamPad = 12;
 
-using Pt = std::array<double, 2>;
+// Pt is the D=2 coordinate type (PtN<2>). The projection / tangent bodies below
+// read p[0], p[1] and the 2D analytic shapes, so the entity set here is the 2D
+// one (Sphere/Plane are 2D placeholders); a 3D core supplies make_entity<3> with
+// the genuine surface projections and its own (Sphere/Plane) closed set.
 
 inline Pt project_free(const Pt& p, const double*) { return p; }
 
@@ -71,20 +76,6 @@ inline Pt project_plane(const Pt& p, const double* params)
     return Pt {p[0] - dotp * nx, p[1] - dotp * ny};
 }
 
-// Project p onto the entity (type_tag, params). In-kernel switch dispatch.
-inline Pt project(const Pt& p, Tag tag, const double* params)
-{
-    switch (tag) {
-    case TAG_LINESEG: return project_lineseg(p, params);
-    case TAG_CIRCLE: return project_circle(p, params);
-    case TAG_ELLIPSE: return project_ellipse(p, params);
-    case TAG_SPHERE: return project_circle(p, params);  // identical to circle
-    case TAG_PLANE: return project_plane(p, params);
-    case TAG_FREE:
-    default: return p;
-    }
-}
-
 inline Pt tangent_free(const Pt&, const double*) { return Pt {1.0, 0.0}; }
 
 inline Pt tangent_lineseg(const Pt&, const double* params)
@@ -126,20 +117,15 @@ inline Pt tangent_ellipse(const Pt& p, const double* params)
     return Pt {tx / norm, ty / norm};
 }
 
-// (d, 1) tangent column at p on the entity (type_tag, params).
-inline Pt tangent_space(const Pt& p, Tag tag, const double* params)
-{
-    switch (tag) {
-    case TAG_LINESEG: return tangent_lineseg(p, params);
-    case TAG_CIRCLE: return tangent_circle(p, params);
-    case TAG_ELLIPSE: return tangent_ellipse(p, params);
-    case TAG_FREE:
-    case TAG_SPHERE:
-    case TAG_PLANE:
-    default: return tangent_free(p, params);
-    }
-}
-
+// ---------------------------------------------------------------------------
+// Concept-modelled geometry entities (the single source of truth used by the
+// kernels). The per-shape free functions above hold the math once; each entity
+// struct is a thin, trivially-copyable view over its `params` that satisfies the
+// GeometryEntity concept. The closed set lives in an EntityKind variant; the
+// in-kernel dispatch is a per-DOF std::visit over make_entity (geometry is
+// per-DOF, so — unlike the run-once Objective visit — the variant is rebuilt and
+// visited inside the loop, but the projection/tangent bodies are monomorphic).
+// ---------------------------------------------------------------------------
 template <class E>
 concept GeometryEntity = requires(const E& e, const Pt& p) {
     { e.project(p) } -> std::convertible_to<Pt>;
@@ -167,7 +153,8 @@ struct Ellipse {
     Pt tangent(const Pt& p) const { return tangent_ellipse(p, params); }
 };
 
-// placeholders
+// Sphere reuses the circle projection (radial); its tangent basis is a free
+// surface direction. Plane projects onto the plane through (q, n).
 struct Sphere {
     const double* params;
     Pt project(const Pt& p) const { return project_circle(p, params); }
@@ -184,8 +171,12 @@ static_assert(GeometryEntity<Free> && GeometryEntity<LineSeg> && GeometryEntity<
 
 using EntityKind = std::variant<Free, LineSeg, Circle, Ellipse, Sphere, Plane>;
 
-// Build the entity kind for (tag, params). Mirrors the in-kernel switch; for
-// host-side std::visit over the closed set.
+// EntityKindT<D> is the per-dimension closed set; the entity *set differs by D*
+// (Circle/LineSeg/Ellipse at 2; Sphere/Plane at 3). Phase 1 supplies only the
+// D=2 set, so make_entity<D> is gated until Phase 2 adds make_entity<3>.
+template <int D> using EntityKindT = EntityKind;
+
+// The single dispatch point: build the concept-modelled entity for (tag, params).
 inline EntityKind make_entity(Tag tag, const double* params)
 {
     switch (tag) {
@@ -197,6 +188,27 @@ inline EntityKind make_entity(Tag tag, const double* params)
     case TAG_FREE:
     default: return Free {params};
     }
+}
+
+// Dimension-templated dispatch. make_entity<2> returns exactly today's variant;
+// other dimensions are gated until their entity set + projections exist.
+template <int D = kDefaultDim> inline EntityKindT<D> make_entity(Tag tag, const double* params)
+{
+    static_assert(D == 2, "make_entity: only the 2D entity set is implemented");
+    return make_entity(tag, params);
+}
+
+// Project p onto the entity (type_tag, params), dispatched through the concept
+// entities via std::visit — monomorphic per entity type, no virtuals.
+inline Pt project(const Pt& p, Tag tag, const double* params)
+{
+    return std::visit([&](const auto& e) { return e.project(p); }, make_entity(tag, params));
+}
+
+// (d, 1) tangent column at p on the entity (type_tag, params).
+inline Pt tangent_space(const Pt& p, Tag tag, const double* params)
+{
+    return std::visit([&](const auto& e) { return e.tangent(p); }, make_entity(tag, params));
 }
 
 }  // namespace egg

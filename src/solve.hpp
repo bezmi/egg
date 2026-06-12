@@ -6,19 +6,29 @@
 // Allocation-free, no throwing, no decompositions: safe inside device kernels.
 #pragma once
 
+#include "core.hpp"
+
 #include <array>
 #include <cmath>
 
 namespace egg
 {
 
-using Vec2 = std::array<double, 2>;
-using Mat2 = std::array<double, 4>;  // [h00, h01, h10, h11] row-major
+// The per-DOF Newton solve. solveNxN<D> is generic structure; the D==2 body is
+// the exact closed-form 2×2 (kept bit-identical), and a 3D core adds the D==3
+// specialization (e.g. Cholesky). Vec2/Mat2 are D=2 aliases for the call sites.
+using Vec2 = VecN<2>;  // d-vector
+using Mat2 = MatN<2>;  // d×d row-major [h00, h01, h10, h11]
 
 inline bool finite2(const Vec2& v) { return std::isfinite(v[0]) && std::isfinite(v[1]); }
 
-// Solve H x = -g for the full 2x2 (free DOF) Newton step.
-inline Vec2 solve2x2(const Mat2& H, const Vec2& g)
+// Solve H x = -g for the full D×D (free DOF) Newton step, with the JAX
+// singular/non-finite fallback. Primary template is intentionally undefined;
+// every dimension provides an explicit specialization with its closed form.
+template <int D> VecN<D> solveNxN(const MatN<D>& H, const VecN<D>& g);
+
+// D=2: the exact 2×2 closed form (bit-identical to the original solve2x2).
+template <> inline VecN<2> solveNxN<2>(const MatN<2>& H, const VecN<2>& g)
 {
     const double gnorm = std::sqrt(g[0] * g[0] + g[1] * g[1]);
     if (gnorm < 1e-15) return Vec2 {0.0, 0.0};
@@ -33,6 +43,9 @@ inline Vec2 solve2x2(const Mat2& H, const Vec2& g)
     }
     return x;
 }
+
+// Legacy name kept for the 2D call sites.
+inline Vec2 solve2x2(const Mat2& H, const Vec2& g) { return solveNxN<2>(H, g); }
 
 // Tangent-reduced scalar Newton step: solve a*x = -r (constrained DOF, 1x1).
 inline double solve1x1(double a, double r)

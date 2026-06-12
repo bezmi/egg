@@ -66,10 +66,18 @@ class Block:
 
 
 def _find(parent: dict[int, int], x: int) -> int:
-    """Union-find root lookup with path compression."""
-    if parent[x] != x:
-        parent[x] = _find(parent, parent[x])
-    return parent[x]
+    """Union-find root lookup with path compression (iterative).
+
+    Iterative to avoid hitting Python's recursion limit on pathological
+    (long-chain) inputs.
+    """
+    root = x
+    while parent[root] != root:
+        root = parent[root]
+    # Path compression: point every node on the walk straight at the root.
+    while parent[x] != root:
+        parent[x], x = root, parent[x]
+    return root
 
 
 def _union(parent: dict[int, int], rank: dict[int, int], x: int, y: int) -> None:
@@ -118,9 +126,18 @@ class MultiBlockGrid:
         return int(np.sum(self.free_mask))
 
     def pack(self) -> np.ndarray:
-        """Flatten global_nodes coordinates into a 1D optimization vector."""
-        raise NotImplementedError("Node coordinate packing deferred to M2 (TFI)")
+        """Flatten free-DOF coordinates into a 1D optimization vector.
+
+        Delegates to :func:`egg.smoothing.objective.pack_x` (the real M2
+        implementation).
+        """
+        from egg.smoothing.objective import pack_x
+        return pack_x(self)
 
     def unpack(self, x: np.ndarray) -> None:
-        """Reshape x into global_nodes and propagate to block.nodes."""
-        raise NotImplementedError("Node coordinate unpacking deferred to M2 (TFI)")
+        """Write ``x`` back into global_nodes and propagate to block.nodes.
+
+        Delegates to :func:`egg.smoothing.objective.unpack_x`.
+        """
+        from egg.smoothing.objective import unpack_x
+        unpack_x(x, self)

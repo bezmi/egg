@@ -79,16 +79,19 @@ def test_cpp_untangle_driver_self_consistent():
     es = ctx.energy_stencil
     sweeps_per_delta, max_outer, margin = 20, 8, 1e-9
 
-    X_out, md_cpp = cpp_untangle(ctx, X0.copy(), device="cpu",
-                                  sweeps_per_delta=sweeps_per_delta,
-                                  max_outer=max_outer, margin=margin)
+    X_out, md_cpp, outer_iters, delta_final = cpp_untangle(
+        ctx, X0.copy(), device="cpu",
+        sweeps_per_delta=sweeps_per_delta,
+        max_outer=max_outer, margin=margin)
 
     md = _grid_mindet(X0, es)
     delta = 2.0 * max(abs(md), 1e-12)
     md_man = md
+    iters_man = 0
     sess = CppSweepSession(ctx, X0.copy(), device="cpu")
     for _ in range(max_outer):
         _, mds = sess.run(sweeps_per_delta, phase="untangle", delta=delta)
+        iters_man += 1
         md_man = float(mds[-1])
         if md_man > margin:
             break
@@ -96,3 +99,4 @@ def test_cpp_untangle_driver_self_consistent():
 
     np.testing.assert_allclose(md_cpp, md_man, rtol=1e-8, atol=1e-10,
                                err_msg="driver final min det A mismatch vs manual")
+    assert outer_iters == iters_man, "driver outer-iter count mismatch vs manual"

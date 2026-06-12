@@ -17,9 +17,16 @@
 namespace egg
 {
 
-using VecT = std::array<double, kVecT>;          // [a, b, c, d]
-using Grad = std::array<double, kVecT>;          // dmu/dvec(T)
-using Hess = std::array<double, kVecT * kVecT>;  // 4x4 row-major
+// Flattened vec(T)-space shapes. The un-suffixed names are the D=2 aliases the
+// closed-form 2D metric and the oracle surface use; VecTN/GradN/HessN<D> from
+// core.hpp are the generic shapes the templated objectives are written over.
+using VecT = VecTN<2>;  // [a, b, c, d] for d=2
+using Grad = GradN<2>;  // dmu/dvec(T)
+using Hess = HessN<2>;  // (d²)×(d²) row-major; 4×4 for d=2
+
+// The shape_2d barrier μ = |T|²/(2 det T) − 1 and its closed-form grad/Hess are
+// the 2D metric; a 3D core supplies a 3D barrier (e.g. the condition-number form)
+// — most cleanly via dual.hpp AD over an N-generic μ.
 
 // --- generic scalar metric, reused for double / Dual<4> / Dual2<4> ---
 //
@@ -48,8 +55,11 @@ inline Grad mu_grad_closedform(const VecT& t)
                  (d / D) - (coef * a)};
 }
 
-// d vec(C)/d vec(T) with cofactor vec(C) = [d, -c, -b, a]  (metrics._HESS_P)
-inline constexpr std::array<double, 16> kHessP = {0.0,
+// d vec(C)/d vec(T) with cofactor vec(C) = [d, -c, -b, a].
+// MIRROR: keep in sync with egg.smoothing.metrics._HESS_P and
+// egg.smoothing.batch._HESS_P (Python). Cross-language, so unavoidable; any
+// change must be applied to all three copies.
+inline constexpr std::array<double, kVecT * kVecT> kHessP = {0.0,
                                                   0.0,
                                                   0.0,
                                                   1.0,  //
@@ -76,18 +86,18 @@ inline Hess mu_hess_closedform(const VecT& t)
     const double a = t[0], b = t[1], c = t[2], d = t[3];
     const double D = (a * d) - (b * c);
     const double s = (a * a) + (b * b) + (c * c) + (d * d);
-    const std::array<double, 4> tv {a, b, c, d};
-    const std::array<double, 4> cof {d, -c, -b, a};
+    const std::array<double, kVecT> tv {a, b, c, d};
+    const std::array<double, kVecT> cof {d, -c, -b, a};
     const double invD = 1.0 / D;
     const double invD2 = 1.0 / (D * D);
     const double sD3 = s / (D * D * D);
     const double s2D2 = s / (2.0 * D * D);
     Hess H {};
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
+    for (int i = 0; i < kVecT; ++i) {
+        for (int j = 0; j < kVecT; ++j) {
             const double eye = (i == j) ? 1.0 : 0.0;
-            H[(i * 4) + j] = (invD * eye) - (invD2 * ((tv[i] * cof[j]) + (cof[i] * tv[j]))) +
-                             (cof[i] * sD3 * cof[j]) - (s2D2 * kHessP[(i * 4) + j]);
+            H[(i * kVecT) + j] = (invD * eye) - (invD2 * ((tv[i] * cof[j]) + (cof[i] * tv[j]))) +
+                                 (cof[i] * sD3 * cof[j]) - (s2D2 * kHessP[(i * kVecT) + j]);
         }
     }
     return H;
@@ -96,25 +106,25 @@ inline Hess mu_hess_closedform(const VecT& t)
 // --- dual-AD gradient (forward mode, one pass with all 4 seeds) ---
 inline Grad mu_grad_dual(const VecT& t)
 {
-    using D4 = Dual<4>;
-    const D4 r = mu_shape2d(seed_dual<4>(t[0], 0),
-                            seed_dual<4>(t[1], 1),
-                            seed_dual<4>(t[2], 2),
-                            seed_dual<4>(t[3], 3));
+    using Dv = Dual<kVecT>;  // AD over the kVecT components of vec(T)
+    const Dv r = mu_shape2d(seed_dual<kVecT>(t[0], 0),
+                            seed_dual<kVecT>(t[1], 1),
+                            seed_dual<kVecT>(t[2], 2),
+                            seed_dual<kVecT>(t[3], 3));
     return Grad {r.g[0], r.g[1], r.g[2], r.g[3]};
 }
 
 // --- dual-AD Hessian (second-order forward, one pass) ---
 inline Hess mu_hess_dual(const VecT& t)
 {
-    using D4 = Dual2<4>;
-    const D4 r = mu_shape2d(seed_dual2<4>(t[0], 0),
-                            seed_dual2<4>(t[1], 1),
-                            seed_dual2<4>(t[2], 2),
-                            seed_dual2<4>(t[3], 3));
+    using Dv = Dual2<kVecT>;
+    const Dv r = mu_shape2d(seed_dual2<kVecT>(t[0], 0),
+                            seed_dual2<kVecT>(t[1], 1),
+                            seed_dual2<kVecT>(t[2], 2),
+                            seed_dual2<kVecT>(t[3], 3));
     Hess H {};
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) { H[(i * 4) + j] = r.h[i][j]; }
+    for (int i = 0; i < kVecT; ++i) {
+        for (int j = 0; j < kVecT; ++j) { H[(i * kVecT) + j] = r.h[i][j]; }
     }
     return H;
 }
@@ -148,73 +158,82 @@ inline T mu_untangle(const T& a, const T& b, const T& c, const T& d, double delt
 // hot loop) to instantiate a monomorphic, fully-concrete kernel — no virtuals,
 // no per-DOF type dispatch on device.
 // ---------------------------------------------------------------------------
-template <class M>
-concept Objective = requires(const M& m, const VecT& t, double det) {
+template <class M, int D>
+concept ObjectiveD = requires(const M& m, const VecTN<D>& t, double det) {
     { m.value(t) } -> std::convertible_to<double>;
-    { m.grad(t) } -> std::convertible_to<Grad>;
-    { m.hess(t) } -> std::convertible_to<Hess>;
+    { m.grad(t) } -> std::convertible_to<GradN<D>>;
+    { m.hess(t) } -> std::convertible_to<HessN<D>>;
     // Line-search accept test on min det A for this objective's regime.
     { m.accept_mindet(det) } -> std::convertible_to<bool>;
 };
 
-// Barrier shape_2d objective (minimises the shape-distortion metric μ).
-struct ShapeObjective {
-    [[nodiscard]] double value(const VecT& t) const { return mu_value(t); }
-    // Grad grad(const VecT& t) const { return mu_grad_dual(t); }
-    // Hess hess(const VecT& t) const { return mu_hess_dual(t); }
-    [[nodiscard]] Grad grad(const VecT& t) const { return mu_grad_closedform(t); }
-    [[nodiscard]] Hess hess(const VecT& t) const { return mu_hess_closedform(t); }
+// Barrier shape objective (minimises the shape-distortion metric μ). The closed
+// form is the 2D arithmetic; D!=2 is gated until Phase 2 supplies the 3D barrier.
+template <int D> struct ShapeObjectiveT {
+    static_assert(D == 2, "ShapeObjectiveT: 3D shape barrier not yet implemented");
+    [[nodiscard]] double value(const VecTN<D>& t) const { return mu_value(t); }
+    [[nodiscard]] GradN<D> grad(const VecTN<D>& t) const { return mu_grad_closedform(t); }
+    [[nodiscard]] HessN<D> hess(const VecTN<D>& t) const { return mu_hess_closedform(t); }
     // Barrier: a step is only valid if every cell stays positively oriented.
     [[nodiscard]] bool accept_mindet(double mindet) const { return mindet > 0.0; }
 };
 
 // δ-continuation untangle objective: surrogate value + dual-AD grad/Hess, with the
 // relaxed accept rule (the surrogate is finite on folded cells, so min det A may
-// be ≤ 0 during continuation).
-struct UntangleObjective {
+// be ≤ 0 during continuation). 2D closed/AD form; gated for D!=2 until Phase 2.
+template <int D> struct UntangleObjectiveT {
+    static_assert(D == 2, "UntangleObjectiveT: 3D untangle surrogate not yet implemented");
     double delta {0.0};
 
-    [[nodiscard]] double value(const VecT& t) const
+    [[nodiscard]] double value(const VecTN<D>& t) const
     { return mu_untangle(t[0], t[1], t[2], t[3], delta); }
-    [[nodiscard]] Grad grad(const VecT& t) const
+    [[nodiscard]] GradN<D> grad(const VecTN<D>& t) const
     {
-        using D4 = Dual<4>;
-        const D4 r = mu_untangle(seed_dual<4>(t[0], 0),
-                                 seed_dual<4>(t[1], 1),
-                                 seed_dual<4>(t[2], 2),
-                                 seed_dual<4>(t[3], 3),
+        using Dv = Dual<kVecT>;
+        const Dv r = mu_untangle(seed_dual<kVecT>(t[0], 0),
+                                 seed_dual<kVecT>(t[1], 1),
+                                 seed_dual<kVecT>(t[2], 2),
+                                 seed_dual<kVecT>(t[3], 3),
                                  delta);
-        return Grad {r.g[0], r.g[1], r.g[2], r.g[3]};
+        return GradN<D> {r.g[0], r.g[1], r.g[2], r.g[3]};
     }
-    [[nodiscard]] Hess hess(const VecT& t) const
+    [[nodiscard]] HessN<D> hess(const VecTN<D>& t) const
     {
-        using D4 = Dual2<4>;
-        const D4 r = mu_untangle(seed_dual2<4>(t[0], 0),
-                                 seed_dual2<4>(t[1], 1),
-                                 seed_dual2<4>(t[2], 2),
-                                 seed_dual2<4>(t[3], 3),
+        using Dv = Dual2<kVecT>;
+        const Dv r = mu_untangle(seed_dual2<kVecT>(t[0], 0),
+                                 seed_dual2<kVecT>(t[1], 1),
+                                 seed_dual2<kVecT>(t[2], 2),
+                                 seed_dual2<kVecT>(t[3], 3),
                                  delta);
-        Hess H {};
-        for (int i = 0; i < 4; ++i) {
-            for (int j = 0; j < 4; ++j) { H[(i * 4) + j] = r.h[i][j]; }
+        HessN<D> H {};
+        for (int i = 0; i < kVecT; ++i) {
+            for (int j = 0; j < kVecT; ++j) { H[(i * kVecT) + j] = r.h[i][j]; }
         }
         return H;
     }
     [[nodiscard]] bool accept_mindet(double) const { return true; }
 };
 
-static_assert(Objective<ShapeObjective>);
-static_assert(Objective<UntangleObjective>);
-
 // Closed set of objective kinds for std::visit dispatch.
-using ObjectiveKind = std::variant<ShapeObjective, UntangleObjective>;
+template <int D> using ObjectiveKindT = std::variant<ShapeObjectiveT<D>, UntangleObjectiveT<D>>;
 
 // Select the objective for a run. `phase == "untangle"` picks the δ-surrogate;
 // anything else (default "barrier") picks the shape barrier.
-inline ObjectiveKind make_objective(std::string_view phase, double delta)
+template <int D = kDefaultDim>
+inline ObjectiveKindT<D> make_objective(std::string_view phase, double delta)
 {
-    if (phase == "untangle") return UntangleObjective {delta};
-    return ShapeObjective {};
+    if (phase == "untangle") return UntangleObjectiveT<D> {delta};
+    return ShapeObjectiveT<D> {};
 }
+
+// D=2 legacy aliases for the oracle surface and existing call sites.
+using ShapeObjective = ShapeObjectiveT<2>;
+using UntangleObjective = UntangleObjectiveT<2>;
+using ObjectiveKind = ObjectiveKindT<2>;
+
+template <class M> concept Objective = ObjectiveD<M, 2>;
+
+static_assert(Objective<ShapeObjective>);
+static_assert(Objective<UntangleObjective>);
 
 }  // namespace egg

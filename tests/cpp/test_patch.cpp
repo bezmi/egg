@@ -65,7 +65,7 @@ static const suite<"patch"> patch_suite = [] {
         for (std::size_t k = 0; k < n; ++k) {
             const auto& s = golden::kPatchSamples[k];
             double e, md;
-            patch_energy_mindet(view_of(s), s.X.data(), e, md);
+            patch_energy_mindet<2>(view_of(s), s.X.data(), e, md);
             expect(close(e, s.energy, kTolE))
               << std::format("patch {} energy: {} vs {}", k, e, s.energy);
             expect(close(md, s.mindet, kTolE))
@@ -81,7 +81,7 @@ static const suite<"patch"> patch_suite = [] {
             const Vec2 g {s.grad[0], s.grad[1]};
             const Mat2 H {s.hess[0], s.hess[1], s.hess[2], s.hess[3]};
             const Pt pos {s.X[0], s.X[1]};  // moving DOF is node 0
-            const Vec2 d = newton_delta(g, H, pos, s.tag, s.params.data());
+            const Vec2 d = newton_delta<2>(g, H, pos, s.tag, s.params.data());
             for (int i = 0; i < 2; ++i)
                 expect(close(d[i], s.delta[i], kTolGH))
                   << std::format("patch {} (tag {}) delta[{}]: {} vs {}",

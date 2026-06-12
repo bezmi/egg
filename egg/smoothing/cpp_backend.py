@@ -265,16 +265,17 @@ def cpp_untangle(
     device: str = "auto",
     sweeps_per_delta: int = 20,
     delta0_factor: float = 2.0,
+    shrink: float = 0.5,
     max_outer: int = 60,
     margin: float = 1e-9,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float, int, float]:
     """δ-continuation untangle via the C++ backend.
 
     Same δ-continuation as the stepped loop in
     ``egg.pipeline.generate_steps`` (``untangle_direct=False``), but the whole
     schedule runs in one call here: a
     persistent device-resident session runs ``sweeps_per_delta`` untangle sweeps
-    per δ on a geometric schedule ``δ_k = δ_0 · 0.5^k`` (starting from
+    per δ on a geometric schedule ``δ_k = δ_0 · shrink^k`` (starting from
     ``delta0_factor · |min det A|``) until ``min det A > margin``.
 
     Parameters
@@ -287,6 +288,8 @@ def cpp_untangle(
         ``"auto"`` (default), ``"cpu"``, or ``"gpu"``.
     sweeps_per_delta, delta0_factor, max_outer, margin : optional
         Continuation schedule controls (defaults match the JAX driver).
+    shrink : float, optional
+        Geometric δ decrease per outer step (``δ ← shrink·δ``); default 0.5.
 
     Returns
     -------
@@ -294,19 +297,25 @@ def cpp_untangle(
         Untangled node positions (or the best found if the schedule stalls).
     mindet : float
         Final raw min det A.
+    outer_iters : int
+        Number of δ-steps actually taken.
+    delta_final : float
+        The δ value at the last step taken.
     """
     es = ctx.energy_stencil
     md = _grid_mindet(X, es)
     if md > margin:
-        return X, md
+        return X, md, 0, 0.0
 
     session = CppSweepSession(ctx, X, device=device)
     delta = delta0_factor * max(abs(md), 1e-12)
+    outer_iters = 0
     for _ in range(max_outer):
         _e, mds = session.run(sweeps_per_delta, phase="untangle", delta=delta)
+        outer_iters += 1
         md = float(np.asarray(mds)[-1])
         if md > margin:
             break
-        delta *= 0.5
+        delta *= shrink
 
-    return session.get_X(), md
+    return session.get_X(), md, outer_iters, delta

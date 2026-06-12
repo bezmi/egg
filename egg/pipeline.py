@@ -154,15 +154,17 @@ def generate_steps(
     if md <= margin:
         if untangle_direct:
             from .smoothing.cpp_backend import cpp_untangle
-            X_out, md = cpp_untangle(
+            X_out, md, outer_iters, delta_final = cpp_untangle(
                 ctx_iso, grid.global_nodes,
                 sweeps_per_delta=sweeps_per_delta,
                 delta0_factor=delta0_factor,
+                shrink=untangle_shrink,
                 max_outer=max_outer,
                 margin=margin)
             _sync(grid, X_out)
             yield ("untangle", {"min_det": md, "converged": md > margin,
-                                "direct": True})
+                                "direct": True, "outer_iters": outer_iters,
+                                "delta": delta_final})
         else:
             session = CppSweepSession(ctx_iso, grid.global_nodes, device=device)
             delta = delta0_factor * max(abs(md), 1e-12)

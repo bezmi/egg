@@ -33,8 +33,11 @@ pytestmark = pytest.mark.skipif(
     reason="egg._cpp.cpp_core not built (requires cmake build)",
 )
 
-# C++ vs NumPy parity tolerances (same sweep ordering, same algorithm)
-_RTOL_E = 1e-10
+# C++ vs NumPy parity tolerances (same sweep ordering, same algorithm).
+# Energy is a sum over ~10^4 samples, so the C++ device reduction and the NumPy
+# oracle accumulate in different orders; 1e-9 keeps the gate meaningful while
+# allowing that float64 reduction-order drift (abs diff ~1e-6 on energies ~6e3).
+_RTOL_E = 1e-9
 _RTOL_X = 1e-9
 _ATOL = 1e-12
 
@@ -123,7 +126,7 @@ def _numpy_reference(X0: np.ndarray, topo, n_sweeps: int):
                     )
                     _newton_backtrack_dof(
                         grid, int(dof_idx), g, H, float(e0), ctx_np,
-                        metric="shape_2d", quadratic_filter=False,
+                        quadratic_filter=False,
                     )
         e_val, _ = energy_and_mindet(
             grid.global_nodes,

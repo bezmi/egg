@@ -17,6 +17,8 @@ __all__ = [
     "metric_value",
 ]
 
+# MIRROR: keep in sync with egg.smoothing.batch._HESS_P (Python) and
+# egg::kHessP in src/metric.hpp (C++). Three copies across two languages.
 _HESS_P = np.array(
     [[0.0, 0.0, 0.0, 1.0],
      [0.0, 0.0, -1.0, 0.0],

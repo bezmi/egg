@@ -124,7 +124,7 @@ class TestEnergyAndMinDetEquivalence:
             stencil["gc"], stencil["gn0"], stencil["gn1"],
             stencil["s0"], stencil["s1"], stencil["W_inv"],
         )
-        e_ref, det_ref = _patch_energy_and_mindet(grid, dof_idx, ctx, "shape_2d")
+        e_ref, det_ref = _patch_energy_and_mindet(grid, dof_idx, ctx)
 
         assert abs(e_batch - e_ref) < 1e-10, (
             f"Energy mismatch: batch={e_batch}, ref={e_ref}"
@@ -153,7 +153,7 @@ class TestGradHessEquivalence:
             stencil["gc"], stencil["gn0"], stencil["gn1"],
             stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"],
         )
-        g_ref, H_ref = _patch_grad_hess(grid, dof_idx, ctx, "shape_2d")
+        g_ref, H_ref = _patch_grad_hess(grid, dof_idx, ctx)
 
         np.testing.assert_allclose(g_batch, g_ref, atol=1e-10)
         np.testing.assert_allclose(H_batch, H_ref, atol=1e-10)
@@ -493,7 +493,7 @@ class TestMultiBlock:
             stencil["gc"], stencil["gn0"], stencil["gn1"],
             stencil["s0"], stencil["s1"], stencil["W_inv"],
         )
-        e_ref, det_ref = _patch_energy_and_mindet(grid, dof_idx, ctx, "shape_2d")
+        e_ref, det_ref = _patch_energy_and_mindet(grid, dof_idx, ctx)
 
         assert abs(e_batch - e_ref) < 1e-10
         assert abs(det_batch - det_ref) < 1e-10
@@ -503,7 +503,7 @@ class TestMultiBlock:
             stencil["gc"], stencil["gn0"], stencil["gn1"],
             stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"],
         )
-        g_ref, H_ref = _patch_grad_hess(grid, dof_idx, ctx, "shape_2d")
+        g_ref, H_ref = _patch_grad_hess(grid, dof_idx, ctx)
 
         np.testing.assert_allclose(g_batch, g_ref, atol=1e-10)
         np.testing.assert_allclose(H_batch, H_ref, atol=1e-10)

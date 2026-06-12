@@ -205,25 +205,26 @@ covered by separate tests; the GPU ones skip when no GPU is visible.
 
 ### C++ tests (ctest)
 
-The compute core has standalone Boost.UT tests (metric/solve/geometry/patch/sweep,
-run on every visible SYCL device) — **pure C++, no Python install required**.
-They build from `EGG_BUILD_TESTS` (default `ON` for a direct CMake build) and
-are independent of `EGG_INPLACE`:
+The compute core has Boost.UT tests (metric/solve/geometry/patch/sweep, run on
+every visible SYCL device). There are two ways to build and run them.
+
+**(1) editable install.** The editable build
 
 ```bash
-cmake -S . -B build -DACPP_TARGETS=generic     # tests ON by default
-cmake --build build
-ctest --test-dir build --output-on-failure
+uv sync                                         # builds cpp_core + the C++ tests
+uv run pytest tests/                            # Python suite
+ctest --test-dir build/cp313-cp313-linux_x86_64 # C++ suite (the {wheel_tag} dir)
 ```
 
-> Benchmarks are off by default; enable with `-DEGG_BUILD_BENCH=ON`. They are
-> deliberately not registered with ctest (timing builds never run in the
-> correctness suite).
+**(2) Standalone, no Python install required.**
 
-To test the **packaged artifact** instead of the working tree, build a wheel
-(see [DEPLOY.md](DEPLOY.md)), install it into a clean venv, and run `pytest`
-there — this is the most representative check for CI.
+```bash
+cmake -S . -B build_cpp -DACPP_TARGETS=generic     # tests ON by default
+cmake --build build_cpp
+ctest --test-dir build_cpp --output-on-failure
+```
 
+> `ACPP_VISIBILITY_MASK=omp ctest --test-dir <build-dir>`.
 ---
 
 ## Install the library in-tree (not recommended)

@@ -271,12 +271,12 @@ def _patch_grad_hess(
     grid: MultiBlockGrid,
     dof_idx: int,
     ctx: SweepContext,
-    metric: str,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Local gradient (d,) and Hessian (d, d) for a single global DOF.
 
     Uses precomputed batched stencils to evaluate all corner samples of the DOF's
-    incident cells at once.
+    incident cells at once. The batched path is ``shape_2d``-only (see
+    :func:`local_relaxation_sweep`).
     """
     patch = ctx.dof_patches[dof_idx]
     return _batch.dof_grad_hess(
@@ -298,7 +298,6 @@ def _patch_energy_and_mindet(
     grid: MultiBlockGrid,
     dof_idx: int,
     ctx: SweepContext,
-    metric: str,
 ) -> tuple[float, float]:
     """Sum of mu and min det(A) over all corner samples of all incident cells.
 
@@ -316,7 +315,6 @@ def _patch_fused(
     grid: MultiBlockGrid,
     dof_idx: int,
     ctx: SweepContext,
-    metric: str,
 ) -> tuple[np.ndarray, np.ndarray, float, float]:
     """Combined (grad, hess, energy, mindet) in a single batch evaluation.
 
@@ -360,6 +358,12 @@ def local_relaxation_sweep(
     max_movement : float
         Maximum node movement during this sweep.
     """
+    if metric != "shape_2d":
+        raise ValueError(
+            f"local_relaxation_sweep only supports metric='shape_2d' (got {metric!r}); "
+            "the batched patch path is shape_2d-only. Use objective.assemble_energy for "
+            "the slow reference path that honours other metrics.")
+
     if ctx is None:
         ctx = build_sweep_context(grid, target_fn)
 
@@ -376,7 +380,7 @@ def local_relaxation_sweep(
         entity = grid.dof_constraints.get(dof_idx)
 
         # Compute local gradient, Hessian, and initial patch energy in one pass
-        g, H, e0, _ = _patch_fused(grid, dof_idx, ctx, metric)
+        g, H, e0, _ = _patch_fused(grid, dof_idx, ctx)
 
         # For a sliding DOF, reduce the system to the entity's tangent subspace
         if entity is None:
@@ -417,7 +421,7 @@ def local_relaxation_sweep(
                 trial = old_pos + alpha * delta
                 new_pos = trial if entity is None else np.asarray(entity.project(trial))
                 _move_node(grid, dof_idx, new_pos, ctx)
-                e_new, min_det = _patch_energy_and_mindet(grid, dof_idx, ctx, metric)
+                e_new, min_det = _patch_energy_and_mindet(grid, dof_idx, ctx)
                 if np.isfinite(e_new) and e_new <= e0 + 1e-12 and min_det > 0:
                     accepted = True
                     break
@@ -427,7 +431,7 @@ def local_relaxation_sweep(
                 trial = old_pos + alpha * delta
                 new_pos = trial if entity is None else np.asarray(entity.project(trial))
                 _move_node(grid, dof_idx, new_pos, ctx)
-                e_new, min_det = _patch_energy_and_mindet(grid, dof_idx, ctx, metric)
+                e_new, min_det = _patch_energy_and_mindet(grid, dof_idx, ctx)
                 if np.isfinite(e_new) and e_new <= e0 + 1e-12 and min_det > 0:
                     accepted = True
                     break
@@ -450,7 +454,6 @@ def _newton_backtrack_dof(
     H: np.ndarray,
     e0: float,
     ctx: SweepContext,
-    metric: str,
     quadratic_filter: bool,
 ) -> float:
     """Sequential Newton + backtracking for one DOF (NumPy).
@@ -494,7 +497,7 @@ def _newton_backtrack_dof(
         trial = old_pos + alpha * delta
         new_pos = trial if entity is None else np.asarray(entity.project(trial))
         _move_node(grid, dof_idx, new_pos, ctx)
-        e_new, min_det = _patch_energy_and_mindet(grid, dof_idx, ctx, metric)
+        e_new, min_det = _patch_energy_and_mindet(grid, dof_idx, ctx)
         if np.isfinite(e_new) and e_new <= e0 + 1e-12 and min_det > 0:
             accepted = True
             break

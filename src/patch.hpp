@@ -21,168 +21,229 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <type_traits>
+#include <variant>
 
 namespace egg
 {
 
-// Non-owning view of one DOF's stencil. Per-sample arrays are length P; W_inv is
-// P×(2×2) row-major [w00,w01,w10,w11]; J is P×(4×6) row-major (make_chain_J).
-// role ∈ {0=corner, 1=nbr0, 2=nbr1, -1=absent}. Index arrays gc/gn0/gn1 point
-// into the flat node array X (node i at X[2i], X[2i+1]).
-struct PatchView {
+// Non-owning view of one DOF's stencil, generalised to D axis-neighbours. The
+// per-corner stencil couples a corner to its D axis-neighbours (gn[k]/s[k]); for
+// D=2 gn[0]/gn[1] are the old gn0/gn1, so the indices and math are bit-identical.
+// W_inv is P×(d×d) row-major; J is P×(jRows×jCols) row-major (make_chain_J).
+// role ∈ {0=corner, 1..D=neighbour axis (role−1), -1=absent}.
+template <int D> struct PatchViewT {
     int P;
     const int* gc;
-    const int* gn0;
-    const int* gn1;
-    const double* s0;
-    const double* s1;
-    const double* W_inv;  // [P*4]
+    const int* gn[D];     // was gn0, gn1
+    const double* s[D];   // was s0, s1
+    const double* W_inv;  // [P * dim::wInv(D)]
     const int* role;
-    const double* J;  // [P*24]
+    const double* J;  // [P * dim::jSize(D)]
 };
 
-struct PatchResult {
-    Vec2 grad;  // dE/dpos (2,)
-    Mat2 hess;  // d²E/dpos² (2×2) row-major [h00,h01,h10,h11]
+template <int D> struct PatchResultT {
+    VecN<D> grad;  // dE/dpos (D,)
+    MatN<D> hess;  // d²E/dpos² (D×D) row-major
     double energy;
     double mindet;
 };
 
-// vec(T) and det(A) for sample p: A col0 = s0·(nbr0−corner), col1 = s1·(nbr1−corner),
-// T = A·W_inv. Returns vec(T)=[T00,T01,T10,T11]; writes det(A).
-inline VecT sample_vecT(const PatchView& s, const double* X, int p, double& detA)
+// Minimal energy-only view: just the sample arrays needed for vec(T) and det(A),
+// with no role/J. The energy/min-det path takes this so "doesn't use role/J" is
+// encoded in the type, not in a comment (#2). PatchViewT is a structural superset,
+// so the shared sample_vecT / patch_energy_mindet templates accept either.
+template <int D> struct StencilSampleViewT {
+    int P;
+    const int* gc;
+    const int* gn[D];
+    const double* s[D];
+    const double* W_inv;  // [P * dim::wInv(D)]
+};
+
+// det(A): generic *structure*, specialized *arithmetic* where a closed form
+// exists, so D=2 stays bit-identical (a generic LU/cofactor is not). A is row-major.
+template <int D> inline double det(const MatN<D>& A);
+template <> inline double det<2>(const MatN<2>& A) { return A[0] * A[3] - A[1] * A[2]; }
+
+// The single A→T→detA site: vec(T) and det(A) from a corner + its D axis-neighbours,
+// the per-axis scales s[k], and W_inv (row-major). A[:,k] = s[k]·(nbr[k]−corner),
+// T = A·W_inv; returns vec(T) row-major and writes det(A). For D=2 the matmul
+// accumulation order (k outer, j inner) reproduces the old unrolled T00.. exactly.
+template <int D>
+inline VecTN<D> assemble_vecT(const PtN<D>& corner,
+                              const std::array<PtN<D>, D>& nbr,
+                              const std::array<double, D>& s,
+                              const double* w,
+                              double& detA)
 {
-    const double cx = X[2 * s.gc[p]], cy = X[2 * s.gc[p] + 1];
-    const double n0x = X[2 * s.gn0[p]], n0y = X[2 * s.gn0[p] + 1];
-    const double n1x = X[2 * s.gn1[p]], n1y = X[2 * s.gn1[p] + 1];
-    // A = [[a00, a01], [a10, a11]]; col0 = (a00, a10), col1 = (a01, a11).
-    const double a00 = s.s0[p] * (n0x - cx);
-    const double a10 = s.s0[p] * (n0y - cy);
-    const double a01 = s.s1[p] * (n1x - cx);
-    const double a11 = s.s1[p] * (n1y - cy);
-    detA = a00 * a11 - a01 * a10;
-    const double* w = &s.W_inv[4 * p];  // [w00, w01, w10, w11]
-    // T[i,k] = sum_j A[i,j] w[j,k].
-    const double T00 = a00 * w[0] + a01 * w[2];
-    const double T01 = a00 * w[1] + a01 * w[3];
-    const double T10 = a10 * w[0] + a11 * w[2];
-    const double T11 = a10 * w[1] + a11 * w[3];
-    return VecT {T00, T01, T10, T11};
+    MatN<D> A;  // row-major A[i*D + k]; A[:,k] = s[k]·(nbr[k] − corner)
+    for (int i = 0; i < D; ++i)
+        for (int k = 0; k < D; ++k) A[i * D + k] = s[k] * (nbr[k][i] - corner[i]);
+    detA = det<D>(A);
+    // T[i,k] = sum_j A[i,j] w[j,k]; keep (i,k) outer, j inner.
+    VecTN<D> T;
+    for (int i = 0; i < D; ++i)
+        for (int k = 0; k < D; ++k) {
+            double acc = 0.0;
+            for (int j = 0; j < D; ++j) acc += A[i * D + j] * w[j * D + k];
+            T[i * D + k] = acc;
+        }
+    return T;
+}
+
+// vec(T) and det(A) for sample p, read from the flat node array via the view's
+// gc/gn[] indices. Generic over any view exposing gc/gn[]/s[]/W_inv.
+template <int D, class V> inline VecTN<D> sample_vecT(const V& sv, const double* X, int p, double& detA)
+{
+    const PtN<D> corner = load_pt<D>(X, sv.gc[p]);
+    std::array<PtN<D>, D> nbr;
+    std::array<double, D> s;
+    for (int k = 0; k < D; ++k) {
+        nbr[k] = load_pt<D>(X, sv.gn[k][p]);
+        s[k] = sv.s[k][p];
+    }
+    return assemble_vecT<D>(corner, nbr, s, &sv.W_inv[dim::wInv(D) * p], detA);
 }
 
 // Patch energy (sum μ) and min det(A) — the cheap trial path. Mirrors
-// batch.energy_and_mindet. Templated on the Objective (barrier / δ-untangle); the
-// default keeps the barrier shape objective for existing call sites.
-template <Objective M = ShapeObjective>
+// batch.energy_and_mindet. Templated on the dimension and the Objective.
+template <int D, class V, ObjectiveD<D> M = ShapeObjectiveT<D>>
 inline void patch_energy_mindet(
-  const PatchView& s, const double* X, double& energy, double& mindet, M objective = {})
+  const V& sv, const double* X, double& energy, double& mindet, M objective = {})
 {
     energy = 0.0;
     mindet = std::numeric_limits<double>::infinity();
-    for (int p = 0; p < s.P; ++p) {
+    for (int p = 0; p < sv.P; ++p) {
         double detA;
-        const VecT t = sample_vecT(s, X, p, detA);
+        const VecTN<D> t = sample_vecT<D>(sv, X, p, detA);
         energy += objective.value(t);
         if (detA < mindet) mindet = detA;
     }
 }
 
 // Full patch evaluation: (grad, hess, energy, mindet) in one pass. Mirrors
-// batch.patch_eval (numerically identical to the JAX patch_eval_jax). Templated
-// on the Objective; the default keeps the barrier shape objective.
-template <Objective M = ShapeObjective>
-inline PatchResult patch_eval(const PatchView& s, const double* X, M objective = {})
+// batch.patch_eval (numerically identical to the JAX patch_eval_jax). For D=2 the
+// accumulation orders match the original unrolled code, so it is bit-identical.
+template <int D, ObjectiveD<D> M = ShapeObjectiveT<D>>
+inline PatchResultT<D> patch_eval(const PatchViewT<D>& sv, const double* X, M objective = {})
 {
-    PatchResult r {};
-    r.grad = Vec2 {0.0, 0.0};
-    r.hess = Mat2 {0.0, 0.0, 0.0, 0.0};
+    constexpr int kVT = dim::vecT(D);
+    constexpr int kJC = dim::jCols(D);
+    PatchResultT<D> r {};
+    r.grad = VecN<D> {};
+    r.hess = MatN<D> {};
     r.energy = 0.0;
     r.mindet = std::numeric_limits<double>::infinity();
 
-    for (int p = 0; p < s.P; ++p) {
+    for (int p = 0; p < sv.P; ++p) {
         double detA;
-        const VecT t = sample_vecT(s, X, p, detA);
+        const VecTN<D> t = sample_vecT<D>(sv, X, p, detA);
 
         // --- energy & mindet ---
         r.energy += objective.value(t);
         if (detA < r.mindet) r.mindet = detA;
 
-        const double* w = &s.W_inv[4 * p];  // [w00, w01, w10, w11]
+        const double* w = &sv.W_inv[dim::wInv(D) * p];  // row-major d×d
 
         // --- gradient ---
-        // dmu_dT (2×2, vec order [g00,g01,g10,g11]) then dmu_dA = dmu_dT · W_inv^T.
-        const Grad g = objective.grad(t);  // [g00, g01, g10, g11]
-        // dmu_dA[i,k] = sum_j dmu_dT[i,j] · w[k,j].
-        // col0 = dmu_dA[:,0] = (dmu_dA[0,0], dmu_dA[1,0]); col1 = dmu_dA[:,1].
-        const double da00 = g[0] * w[0] + g[1] * w[1];  // i=0,k=0
-        const double da01 = g[0] * w[2] + g[1] * w[3];  // i=0,k=1
-        const double da10 = g[2] * w[0] + g[3] * w[1];  // i=1,k=0
-        const double da11 = g[2] * w[2] + g[3] * w[3];  // i=1,k=1
-        const double col0x = da00, col0y = da10;
-        const double col1x = da01, col1y = da11;
+        // dmu_dT (vec order, row-major) then dmu_dA[i,k] = sum_j dmu_dT[i,j]·w[k,j].
+        const GradN<D> g = objective.grad(t);
+        double dA[D][D];
+        for (int i = 0; i < D; ++i)
+            for (int k = 0; k < D; ++k) {
+                double acc = 0.0;
+                for (int j = 0; j < D; ++j) acc += g[i * D + j] * w[k * D + j];
+                dA[i][k] = acc;
+            }
 
-        const int role = s.role[p];
-        double cx = 0.0, cy = 0.0;  // this sample's contribution to grad
-        if (role == 0) {            // corner
-            cx = -(s.s0[p] * col0x + s.s1[p] * col1x);
-            cy = -(s.s0[p] * col0y + s.s1[p] * col1y);
-        } else if (role == 1) {  // nbr0
-            cx = s.s0[p] * col0x;
-            cy = s.s0[p] * col0y;
-        } else if (role == 2) {  // nbr1
-            cx = s.s1[p] * col1x;
-            cy = s.s1[p] * col1y;
+        const int role = sv.role[p];
+        double c[D];
+        for (int i = 0; i < D; ++i) c[i] = 0.0;
+        if (role == 0) {  // corner: c[i] = -sum_k s[k]·dA[i][k]
+            for (int i = 0; i < D; ++i) {
+                double acc = 0.0;
+                for (int k = 0; k < D; ++k) acc += sv.s[k][p] * dA[i][k];
+                c[i] = -acc;
+            }
+        } else if (role >= 1) {  // neighbour on axis (role−1)
+            const int ax = role - 1;
+            for (int i = 0; i < D; ++i) c[i] = sv.s[ax][p] * dA[i][ax];
         }  // role == -1: absent, contributes nothing
-        r.grad[0] += cx;
-        r.grad[1] += cy;
+        for (int i = 0; i < D; ++i) r.grad[i] += c[i];
 
         // --- hessian ---
-        // Select the 2 columns of J for this role (cols 2*role_safe + {0,1}); zero
-        // the whole block when the DOF is absent (role < 0). Jb is 4×2.
+        // Select the D columns of J for this role (cols D·role + {0..D-1}); zero
+        // the whole block when the DOF is absent (role < 0). Jb is kVT×D.
         if (role >= 0) {
-            const Hess H =
-              objective.hess(t);  // 4×4 row-major (barrier closed-form / untangle dual-AD)
-            const double* Jp = &s.J[24 * p];  // 4×6 row-major
-            const int c0 = 2 * role;          // first selected column
-            double Jb[4][2];
-            for (int a = 0; a < 4; ++a) {
-                Jb[a][0] = Jp[a * 6 + c0];
-                Jb[a][1] = Jp[a * 6 + c0 + 1];
-            }
-            // blk[i,j] = sum_{a,b} Jb[a,i] H[a,b] Jb[b,j]; accumulate into hess.
+            const HessN<D> H = objective.hess(t);  // (d²)×(d²) row-major
+            const double* Jp = &sv.J[dim::jSize(D) * p];  // jRows×jCols row-major
+            const int c0 = D * role;                      // first selected column
+            double Jb[kVT][D];
+            for (int a = 0; a < kVT; ++a)
+                for (int k = 0; k < D; ++k) Jb[a][k] = Jp[a * kJC + c0 + k];
             // HJb[a,j] = sum_b H[a,b] Jb[b,j].
-            double HJb[4][2];
-            for (int a = 0; a < 4; ++a)
-                for (int j = 0; j < 2; ++j) {
+            double HJb[kVT][D];
+            for (int a = 0; a < kVT; ++a)
+                for (int j = 0; j < D; ++j) {
                     double acc = 0.0;
-                    for (int b = 0; b < 4; ++b) acc += H[a * 4 + b] * Jb[b][j];
+                    for (int b = 0; b < kVT; ++b) acc += H[a * kVT + b] * Jb[b][j];
                     HJb[a][j] = acc;
                 }
-            for (int i = 0; i < 2; ++i)
-                for (int j = 0; j < 2; ++j) {
+            for (int i = 0; i < D; ++i)
+                for (int j = 0; j < D; ++j) {
                     double acc = 0.0;
-                    for (int a = 0; a < 4; ++a) acc += Jb[a][i] * HJb[a][j];
-                    r.hess[i * 2 + j] += acc;
+                    for (int a = 0; a < kVT; ++a) acc += Jb[a][i] * HJb[a][j];
+                    r.hess[i * D + j] += acc;
                 }
         }
     }
     return r;
 }
 
-// Newton step δ (2,) for one DOF. Free (tag 0) uses the full 2×2 Hessian;
-// constrained DOFs reduce onto the entity tangent basis (tag-dispatched). Mirrors
-// batch_jax._newton_delta_one. `pos` is the DOF's current position.
-inline Vec2 newton_delta(const Vec2& g, const Mat2& H, const Pt& pos, Tag tag, const double* params)
+// Newton step δ (D,) for one DOF, dispatched on a concrete (monomorphic) entity.
+// Free uses the full D×D Hessian; constrained entities reduce onto the entity
+// tangent basis (single column at D=2). Mirrors batch_jax._newton_delta_one.
+template <int D, GeometryEntity E>
+inline VecN<D> newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& pos, const E& entity)
 {
-    if (tag == TAG_FREE) return solve2x2(H, g);
-    const Pt b = tangent_space(pos, tag, params);  // (d, 1) column
-    // A_mat = bᵀ H b (scalar); rhs = bᵀ g (scalar).
-    const double Hb0 = H[0] * b[0] + H[1] * b[1];
-    const double Hb1 = H[2] * b[0] + H[3] * b[1];
-    const double A = b[0] * Hb0 + b[1] * Hb1;
-    const double rhs = b[0] * g[0] + b[1] * g[1];
-    const double step = solve1x1(A, rhs);  // -rhs/A with fallback
-    return Vec2 {b[0] * step, b[1] * step};
+    if constexpr (std::is_same_v<E, Free>) {
+        static_cast<void>(pos);
+        static_cast<void>(entity);
+        return solveNxN<D>(H, g);
+    } else {
+        const PtN<D> b = entity.tangent(pos);  // (d, 1) column
+        // A_mat = bᵀ H b (scalar); rhs = bᵀ g (scalar).
+        double Hb[D];
+        for (int i = 0; i < D; ++i) {
+            double acc = 0.0;
+            for (int j = 0; j < D; ++j) acc += H[i * D + j] * b[j];
+            Hb[i] = acc;
+        }
+        double A = 0.0, rhs = 0.0;
+        for (int i = 0; i < D; ++i) {
+            A += b[i] * Hb[i];
+            rhs += b[i] * g[i];
+        }
+        const double step = solve1x1(A, rhs);  // -rhs/A with fallback
+        VecN<D> d;
+        for (int i = 0; i < D; ++i) d[i] = b[i] * step;
+        return d;
+    }
 }
+
+// (tag, params) convenience overload for host-side / oracle callers (e.g. the
+// newton_step binding). Visits once; not on the device hot path.
+template <int D = kDefaultDim>
+inline VecN<D> newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& pos, Tag tag, const double* params)
+{
+    return std::visit([&](const auto& e) { return newton_delta<D>(g, H, pos, e); },
+                      make_entity<D>(tag, params));
+}
+
+// D=2 legacy aliases for the oracle surface and existing call sites.
+using PatchView = PatchViewT<2>;
+using StencilSampleView = StencilSampleViewT<2>;
+using PatchResult = PatchResultT<2>;
 
 }  // namespace egg
