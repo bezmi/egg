@@ -79,7 +79,7 @@ def load_control_points(vts_path):
     return C[:, :, :2].transpose(1, 0, 2)
 
 
-def build_capsule(res_i=10, res_j=10):
+def build_capsule(res_i=10, res_j=10, bl_first_height=0.0, bl_growth=1.3):
     """3 x 12 block topology with the control points as block corners."""
     outer, body, south, north = build_paths()
     C = load_control_points(Path(__file__).parent / "capsule_ctrl_pts.vts")
@@ -121,6 +121,11 @@ def build_capsule(res_i=10, res_j=10):
         b.associate(f"b{i}_{NCPJ - 2}", 1, 1, outflow)
         b.tag_boundary("outflow", f"b{i}_{NCPJ - 2}", 1, 1)
 
+    if bl_first_height > 0.0:
+        b.set_boundary_layer(
+            wall, first_height=bl_first_height, growth=bl_growth, n_layers=6
+        )
+
     topology = b.build()
     entities = {
         "inflow": inflow,
@@ -154,6 +159,11 @@ def main():
                    help="cells per block across the shock layer")
     p.add_argument("--res-j", type=int, default=10,
                    help="cells per block along the body")
+    p.add_argument("--bl-first-height", type=float, default=4.0e-4,
+                   help="first wall-normal cell height on the capsule body "
+                        "(0 disables clustering)")
+    p.add_argument("--bl-growth", type=float, default=1.3,
+                   help="boundary-layer geometric growth ratio")
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
     p.add_argument("--tmop-sweeps", type=int, default=40)
     p.add_argument("--sweeps-per-delta", type=int, default=20)
@@ -164,7 +174,10 @@ def main():
     print("FIRE II capsule forebody → TMOP smooth")
     print("=" * 56)
 
-    topo, ents = build_capsule(res_i=a.res_i, res_j=a.res_j)
+    topo, ents = build_capsule(
+        res_i=a.res_i, res_j=a.res_j,
+        bl_first_height=a.bl_first_height, bl_growth=a.bl_growth,
+    )
 
     if a.plot_topology:
         from egg.io.visualize import plot_topology
@@ -172,11 +185,29 @@ def main():
         plot_topology(topo, highlight_singularities=True, show=True)
         return
 
+    target = None
+    if a.bl_first_height > 0.0:
+        from egg.smoothing.targets import build_boundary_layer_target
+
+        # Isotropic spacings the clustering blends toward: wall-normal from
+        # the wall-block thickness, tangential from the body arc length.
+        shock_layer = 0.07
+        body_length = ents["wall"].length() if hasattr(ents["wall"], "length") \
+            else 1.4
+        interior = shock_layer / 4.0 / a.res_i
+        tangential = body_length / ((NCPJ - 1) * a.res_j)
+        target = build_boundary_layer_target(topo, interior_spacing=interior)
+        for blt in target.per_block.values():
+            blt.tangential_spacing = tangential
+        print(f"Boundary layer: first_height={a.bl_first_height} "
+              f"growth={a.bl_growth} on wall "
+              f"(interior={interior:.3e}, tangential={tangential:.3e})")
+
     grid = topo.initialize_grid()
 
     steps = generate_steps(
         grid,
-        None,
+        target,
         sweeps_per_delta=a.sweeps_per_delta,
         tmop_sweeps=a.tmop_sweeps,
         tmop_chunk=a.chunk,

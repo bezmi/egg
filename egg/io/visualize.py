@@ -174,23 +174,29 @@ def _add_entity_curve(plotter: "pv.Plotter", entity: "GeometryEntity") -> None:
     """Add the entity curve to the plotter (internal helper)."""
     import pyvista as pv
 
-    if hasattr(entity, "center") and hasattr(entity, "radius"):
+    if hasattr(entity, "segments"):  # CompositePath
+        for seg in entity.segments:
+            _add_entity_curve(plotter, seg)
+        return
+
+    if hasattr(entity, "eval"):
+        # Trimmed parametric curve: sample within its own parameter range.
+        t_vals = np.linspace(entity.t0, entity.t1, 200)
+        pts2 = np.array([entity.eval(t) for t in t_vals])
+    elif hasattr(entity, "center") and hasattr(entity, "radius"):
+        # Analytic full circle.
         angles = np.linspace(0, 2 * np.pi, 200)
-        pts = np.column_stack([
+        pts2 = np.column_stack([
             entity.center[0] + entity.radius * np.cos(angles),
             entity.center[1] + entity.radius * np.sin(angles),
-            np.zeros(200),
         ])
     elif hasattr(entity, "start") and hasattr(entity, "end"):
         t_vals = np.linspace(0, 1, 200)
-        pts = np.column_stack([
-            entity.start[0] + t_vals * (entity.end[0] - entity.start[0]),
-            entity.start[1] + t_vals * (entity.end[1] - entity.start[1]),
-            np.zeros(200),
-        ])
+        pts2 = entity.start[None, :] + t_vals[:, None] * (entity.end - entity.start)
     else:
         return
-    curve = pv.PolyData(pts)
+    pts = np.column_stack([pts2, np.zeros(len(pts2))])
+    curve = pv.lines_from_points(pts)
     plotter.add_mesh(curve, color="black", line_width=2)
 
 
