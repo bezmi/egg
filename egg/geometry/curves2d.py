@@ -181,13 +181,16 @@ class CubicBezier(_TrimmedCurve):
 
 
 class BSplineCurve(_TrimmedCurve):
-    """A non-rational B-spline curve over a knot vector and 2D control points.
+    """A B-spline / NURBS curve over a knot vector and 2D control points.
 
-    The live domain is ``[knots[degree], knots[n_ctrl]]``; the C++ side caps the
-    degree at ``kMaxBSplineDegree = 7``.
+    ``weights`` (length ``n_ctrl``) selects the rational form, evaluated via the
+    homogeneous splines ``A(t) = sum N_i w_i P_i``, ``w(t) = sum N_i w_i`` and
+    the quotient rule (mirrors the C++ ``BSplineCurveParam``); ``None`` is the
+    polynomial path. The live domain is ``[knots[degree], knots[n_ctrl]]``; the
+    C++ side caps the degree at ``kMaxBSplineDegree = 7``.
     """
 
-    def __init__(self, degree: int, knots, ctrl):
+    def __init__(self, degree: int, knots, ctrl, weights=None):
         from scipy.interpolate import BSpline as _SciBSpline
 
         self.degree = int(degree)
@@ -198,21 +201,44 @@ class BSplineCurve(_TrimmedCurve):
             raise ValueError("knot vector length must be n_ctrl + degree + 1")
         if self.degree > 7:
             raise ValueError("degree exceeds the C++ kMaxBSplineDegree = 7")
-        self._spl = _SciBSpline(self.knots, self.ctrl, self.degree)
+        self.weights = None
+        if weights is not None:
+            self.weights = np.asarray(weights, dtype=float)
+            if self.weights.shape != (n_ctrl,):
+                raise ValueError("weights length must equal n_ctrl")
+        coeffs = (self.ctrl if self.weights is None
+                  else self.weights[:, None] * self.ctrl)
+        self._spl = _SciBSpline(self.knots, coeffs, self.degree)
         self._d1 = self._spl.derivative(1)
         self._d2 = self._spl.derivative(2)
+        if self.weights is not None:
+            self._w = _SciBSpline(self.knots, self.weights, self.degree)
+            self._w1 = self._w.derivative(1)
+            self._w2 = self._w.derivative(2)
         self.t0 = float(self.knots[self.degree])
         self.t1 = float(self.knots[n_ctrl])
         self.closed = False
 
     def eval(self, t: float) -> np.ndarray:
-        return np.asarray(self._spl(t), dtype=float)
+        A = np.asarray(self._spl(t), dtype=float)
+        if self.weights is None:
+            return A
+        return A / float(self._w(t))
 
     def deriv(self, t: float) -> np.ndarray:
-        return np.asarray(self._d1(t), dtype=float)
+        A1 = np.asarray(self._d1(t), dtype=float)
+        if self.weights is None:
+            return A1
+        w = float(self._w(t))
+        return (A1 - float(self._w1(t)) * self.eval(t)) / w
 
     def deriv2(self, t: float) -> np.ndarray:
-        return np.asarray(self._d2(t), dtype=float)
+        A2 = np.asarray(self._d2(t), dtype=float)
+        if self.weights is None:
+            return A2
+        w = float(self._w(t))
+        C, C1 = self.eval(t), self.deriv(t)
+        return (A2 - 2.0 * float(self._w1(t)) * C1 - float(self._w2(t)) * C) / w
 
 
 class CompositePath(GeometryEntity):

@@ -260,3 +260,197 @@ static const suite<"newton3d"> newton3d_suite = [] {
         expect(close(d[0], 0.0) && close(d[1], 0.0) && close(d[2], -0.5));
     };
 };
+
+static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
+    // Bilinear 2x2 patch on the plane z = 0 over [0,1]^2 — S(u,v) must be the
+    // bilinear interpolant, the frame must span the plane, and invert must be
+    // the identity map (u,v) = (x, y).
+    constexpr auto bilinear = [] {
+        static const std::array<double, 4> ku {0, 0, 1, 1};
+        static const std::array<double, 12> ctrl {0,
+                                                  0,
+                                                  0,
+                                                  0,
+                                                  1,
+                                                  0,  // (iu=0, iv=0..1)
+                                                  1,
+                                                  0,
+                                                  0,
+                                                  1,
+                                                  1,
+                                                  0};  // (iu=1, iv=0..1)
+        return BSplineSurfaceParam {.pu = 1,
+                                    .pv = 1,
+                                    .nu = 2,
+                                    .nv = 2,
+                                    .knots_u = ku,
+                                    .knots_v = ku,
+                                    .ctrl = ctrl};
+    };
+
+    "bilinear patch reproduces the plane"_test = [bilinear] {
+        const BSplineSurfaceParam s = bilinear();
+        for (const auto& [u, v] :
+             std::array<std::pair<double, double>, 3> {{{0.3, 0.7}, {0.0, 1.0}, {0.5, 0.5}}}) {
+            const PtN<3> p = s.eval({u, v});
+            expect(close(p[0], u) && close(p[1], v) && close(p[2], 0.0))
+              << std::format("eval({},{}) = ({},{},{})", u, v, p[0], p[1], p[2]);
+        }
+        const auto fr = s.frame({0.3, 0.7});
+        expect(close(fr[0][0], 1.0) && close(fr[0][1], 0.0) && close(fr[0][2], 0.0));
+        expect(close(fr[1][0], 0.0) && close(fr[1][1], 1.0) && close(fr[1][2], 0.0));
+        const Param<2> q = s.invert({0.25, 0.6, 3.0});
+        expect(close(q[0], 0.25, 1e-9) && close(q[1], 0.6, 1e-9));
+    };
+
+    // A curved bicubic patch (z = bump): FD-check the frame and recover the
+    // parameters of an on-surface query through the seeded Newton inverse.
+    constexpr auto bump = [] {
+        static const std::array<double, 8> k3 {0, 0, 0, 0, 1, 1, 1, 1};
+        static std::array<double, 48> ctrl {};
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                const double x = i / 3.0, y = j / 3.0;
+                ctrl[3 * ((i * 4) + j) + 0] = x;
+                ctrl[3 * ((i * 4) + j) + 1] = y;
+                // Interior control z lifts the middle of the patch.
+                ctrl[3 * ((i * 4) + j) + 2] = (i == 0 || i == 3 || j == 0 || j == 3) ? 0.0 : 1.0;
+            }
+        }
+        return BSplineSurfaceParam {.pu = 3,
+                                    .pv = 3,
+                                    .nu = 4,
+                                    .nv = 4,
+                                    .knots_u = k3,
+                                    .knots_v = k3,
+                                    .ctrl = ctrl};
+    };
+
+    "bicubic frame matches finite differences"_test = [bump] {
+        const BSplineSurfaceParam s = bump();
+        const double h = 1e-6;
+        for (const auto& [u, v] :
+             std::array<std::pair<double, double>, 3> {{{0.3, 0.4}, {0.6, 0.2}, {0.5, 0.5}}}) {
+            const auto fr = s.frame({u, v});
+            const PtN<3> up = s.eval({u + h, v}), um = s.eval({u - h, v});
+            const PtN<3> vp = s.eval({u, v + h}), vm = s.eval({u, v - h});
+            for (int i = 0; i < 3; ++i) {
+                expect(close(fr[0][i], (up[i] - um[i]) / (2 * h), 1e-5))
+                  << std::format("S_u[{}] at ({},{})", i, u, v);
+                expect(close(fr[1][i], (vp[i] - vm[i]) / (2 * h), 1e-5))
+                  << std::format("S_v[{}] at ({},{})", i, u, v);
+            }
+        }
+    };
+
+    "Newton inverse recovers the parameters of an on-surface point"_test = [bump] {
+        const BSplineSurfaceParam s = bump();
+        for (const auto& [u, v] :
+             std::array<std::pair<double, double>, 3> {{{0.3, 0.4}, {0.7, 0.6}, {0.2, 0.8}}}) {
+            const Param<2> q = s.invert(s.eval({u, v}));
+            expect(close(q[0], u, 1e-7) && close(q[1], v, 1e-7))
+              << std::format("recovered ({},{}) vs ({},{})", q[0], q[1], u, v);
+        }
+    };
+
+    "TrimmedEntity surface frame is orthonormal and tangent"_test = [bump] {
+        const TrimmedEntity<BSplineSurfaceParam> ent {.param = bump(), .trim = {}};
+        const PtN<3> q {0.4, 0.5, 2.0};
+        const auto f = ent.project_frame(q);
+        expect(f.eff_tdim == 2_i);
+        expect(close(std::sqrt(dot(f.basis[0], f.basis[0])), 1.0, 1e-12));
+        expect(close(std::sqrt(dot(f.basis[1], f.basis[1])), 1.0, 1e-12));
+        expect(close(dot(f.basis[0], f.basis[1]), 0.0, 1e-12));
+        // Projection is a stationary foot: (S - q) ⟂ both tangent columns.
+        const VecN<3> d = f.pos - q;
+        expect(close(dot(d, f.basis[0]), 0.0, 1e-7) && close(dot(d, f.basis[1]), 0.0, 1e-7));
+    };
+
+    // Rational (NURBS) quarter-cylinder: rational quadratic quarter circle in u
+    // (weights {1, 1/sqrt2, 1}) extruded linearly in v — exact unit radius.
+    constexpr auto quarter_cyl = [] {
+        static const std::array<double, 6> ku {0, 0, 0, 1, 1, 1};
+        static const std::array<double, 4> kv {0, 0, 1, 1};
+        static const std::array<double, 18> ctrl {1,
+                                                  0,
+                                                  0,
+                                                  1,
+                                                  0,
+                                                  1,  // circle ctrl (1,0), v = 0/1
+                                                  1,
+                                                  1,
+                                                  0,
+                                                  1,
+                                                  1,
+                                                  1,  // circle ctrl (1,1)
+                                                  0,
+                                                  1,
+                                                  0,
+                                                  0,
+                                                  1,
+                                                  1};  // circle ctrl (0,1)
+        static const std::array<double, 6> w {1.0,
+                                              1.0,
+                                              1.0 / std::numbers::sqrt2,
+                                              1.0 / std::numbers::sqrt2,
+                                              1.0,
+                                              1.0};
+        return BSplineSurfaceParam {.pu = 2,
+                                    .pv = 1,
+                                    .nu = 3,
+                                    .nv = 2,
+                                    .knots_u = ku,
+                                    .knots_v = kv,
+                                    .ctrl = ctrl,
+                                    .weights = w};
+    };
+
+    "rational quarter-cylinder has exact unit radius"_test = [quarter_cyl] {
+        const BSplineSurfaceParam s = quarter_cyl();
+        for (const double u : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+            for (const double v : {0.0, 0.5, 1.0}) {
+                const PtN<3> p = s.eval({u, v});
+                expect(close(std::hypot(p[0], p[1]), 1.0, 1e-14))
+                  << std::format("radius at ({},{})", u, v);
+                expect(close(p[2], v, 1e-14));  // linear extrusion preserved
+            }
+        }
+    };
+
+    "projection onto the rational cylinder is radial"_test = [quarter_cyl] {
+        const TrimmedEntity<BSplineSurfaceParam> ent {.param = quarter_cyl(), .trim = {}};
+        const PtN<3> q {2.0, 2.0, 0.5};  // 45°, mid-height
+        const PtN<3> p = ent.project(q);
+        expect(close(std::hypot(p[0], p[1]), 1.0, 1e-9));
+        expect(close(p[0], p[1], 1e-9));  // stays at 45°
+        expect(close(p[2], 0.5, 1e-9));   // height preserved
+    };
+
+    "make_entity<3> slices the surface from the arena"_test = [quarter_cyl] {
+        const BSplineSurfaceParam ref = quarter_cyl();
+        std::vector<double> arena;
+        const auto ku_off = arena.size();
+        arena.insert(arena.end(), ref.knots_u.begin(), ref.knots_u.end());
+        const auto kv_off = arena.size();
+        arena.insert(arena.end(), ref.knots_v.begin(), ref.knots_v.end());
+        const auto ctrl_off = arena.size();
+        arena.insert(arena.end(), ref.ctrl.begin(), ref.ctrl.end());
+        const auto w_off = arena.size();
+        arena.insert(arena.end(), ref.weights.begin(), ref.weights.end());
+
+        std::array<double, kParamPad> blob {};
+        blob[0] = 2;  // pu
+        blob[1] = 1;  // pv
+        blob[2] = 3;  // nu
+        blob[3] = 2;  // nv
+        blob[4] = static_cast<double>(ku_off);
+        blob[5] = static_cast<double>(kv_off);
+        blob[6] = static_cast<double>(ctrl_off);
+        blob[7] = static_cast<double>(w_off);
+        blob[8] = 1.0;  // has_w
+        const auto ent = make_entity<3>(TAG_BSPLINESURF, blob.data(), arena.data());
+        const PtN<3> p =
+          std::visit([&](const auto& e) { return e.project(PtN<3> {2.0, 2.0, 0.5}); }, ent);
+        expect(close(std::hypot(p[0], p[1]), 1.0, 1e-9) && close(p[2], 0.5, 1e-9));
+    };
+};

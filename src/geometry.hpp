@@ -27,8 +27,9 @@ inline constexpr Tag TAG_QUADBEZIER = 8;
 inline constexpr Tag TAG_CUBICBEZIER = 9;
 inline constexpr Tag TAG_BSPLINE = 10;
 inline constexpr Tag TAG_COMPOSITE = 11;
-inline constexpr Tag TAG_CYLINDER = 12;  // 3D surface
-inline constexpr Tag TAG_LINE3 = 13;     // 3D edge curve
+inline constexpr Tag TAG_CYLINDER = 12;     // 3D surface
+inline constexpr Tag TAG_LINE3 = 13;        // 3D edge curve
+inline constexpr Tag TAG_BSPLINESURF = 14;  // 3D tensor-product B-spline/NURBS surface
 
 inline constexpr int kParamPad = 12;
 /// @brief Arena record size of one composite-path segment: `[tag, params(kParamPad)]`.
@@ -541,112 +542,146 @@ inline constexpr int kMaxBSplineDegree = 7;
 /// @brief Leading dimension of the de Boor basis/derivative work arrays.
 inline constexpr int kBSplineCap = kMaxBSplineDegree + 1;
 
-/// @brief A non-rational B-spline curve over a knot vector and a flat control net.
+/// @brief Index of the knot span containing @p u (clamped to the live domain).
+/// @param degree Basis degree @f$ p @f$.
+/// @param n_ctrl Number of control points along this direction.
+/// @param knots Knot vector, length @c n_ctrl+degree+1, non-decreasing.
+/// @param u Parameter.
+/// @return The span index @f$ i @f$ with @f$ knots[i] \le u < knots[i+1] @f$.
+inline int bspline_find_span(int degree, int n_ctrl, std::span<const double> knots, double u)
+{
+    const int p = degree;
+    const int n = n_ctrl - 1;
+    if (u >= knots[n + 1]) { return n; }
+    if (u <= knots[p]) { return p; }
+    int lo = p, hi = n + 1, mid = (lo + hi) / 2;
+    while (u < knots[mid] || u >= knots[mid + 1]) {
+        if (u < knots[mid]) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+        mid = (lo + hi) / 2;
+    }
+    return mid;
+}
+
+/// @brief Nonzero basis functions and their derivatives at @p u (NURBS book A2.3).
 ///
-/// The control points and knots live in spans over a device arena (never owned),
-/// so the type stays trivially copyable. Evaluation and derivatives use the
-/// de Boor basis-function recurrence (the basis derivatives are also reused by the
-/// tensor-product surface evaluation). Weights/NURBS are a future extension — the
-/// control span is interleaved @f$ (x, y) @f$ pairs, with no weight column yet.
+/// Written once at "one parametric direction" arity: the curve uses it directly
+/// and the tensor-product surface calls it per direction.
+/// @param degree Basis degree @f$ p @f$.
+/// @param knots Knot vector.
+/// @param span Knot span containing @p u (from @ref bspline_find_span).
+/// @param u Parameter.
+/// @param nd Highest derivative order to compute.
+/// @param ders Output: `ders[k][j]` is the k-th derivative of the j-th nonzero
+///             basis function, @f$ k = 0..nd @f$, @f$ j = 0..degree @f$.
+inline void bspline_basis_ders(
+  int degree, std::span<const double> knots, int span, double u, int nd, double ders[][kBSplineCap])
+{
+    const int p = degree;
+    double ndu[kBSplineCap][kBSplineCap];
+    double a[2][kBSplineCap];
+    double left[kBSplineCap], right[kBSplineCap];
+    ndu[0][0] = 1.0;
+    for (int j = 1; j <= p; ++j) {
+        left[j] = u - knots[span + 1 - j];
+        right[j] = knots[span + j] - u;
+        double saved = 0.0;
+        for (int r = 0; r < j; ++r) {
+            ndu[j][r] = right[r + 1] + left[j - r];
+            const double temp = ndu[r][j - 1] / ndu[j][r];
+            ndu[r][j] = saved + (right[r + 1] * temp);
+            saved = left[j - r] * temp;
+        }
+        ndu[j][j] = saved;
+    }
+    for (int j = 0; j <= p; ++j) { ders[0][j] = ndu[j][p]; }
+    for (int r = 0; r <= p; ++r) {
+        int s1 = 0, s2 = 1;
+        a[0][0] = 1.0;
+        for (int k = 1; k <= nd; ++k) {
+            double d = 0.0;
+            const int rk = r - k, pk = p - k;
+            if (r >= k) {
+                a[s2][0] = a[s1][0] / ndu[pk + 1][rk];
+                d = a[s2][0] * ndu[rk][pk];
+            }
+            const int j1 = (rk >= -1) ? 1 : -rk;
+            const int j2 = (r - 1 <= pk) ? k - 1 : p - r;
+            for (int j = j1; j <= j2; ++j) {
+                a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[pk + 1][rk + j];
+                d += a[s2][j] * ndu[rk + j][pk];
+            }
+            if (r <= pk) {
+                a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r];
+                d += a[s2][k] * ndu[r][pk];
+            }
+            ders[k][r] = d;
+            const int tmp = s1;
+            s1 = s2;
+            s2 = tmp;
+        }
+    }
+    int fac = p;
+    for (int k = 1; k <= nd; ++k) {
+        for (int j = 0; j <= p; ++j) { ders[k][j] *= fac; }
+        fac *= (p - k);
+    }
+}
+
+/// @brief A B-spline / NURBS curve over a knot vector and a flat control net.
+///
+/// The control points, knots, and (optional) weights live in spans over a
+/// device arena (never owned), so the type stays trivially copyable. Evaluation
+/// and derivatives use the de Boor basis-function recurrence. An empty
+/// @c weights span selects the polynomial path; a non-empty one (length
+/// @c n_ctrl) evaluates the rational form via homogeneous sums
+/// @f$ A(u) = \sum N_i w_i P_i @f$, @f$ w(u) = \sum N_i w_i @f$ and the
+/// quotient rule for @f$ C = A/w @f$ and its first two derivatives.
 struct BSplineCurveParam {
     static constexpr int edim = 2, idim = 1;
-    int degree;                     ///< Polynomial degree @f$ p @f$.
-    int n_ctrl;                     ///< Number of control points @f$ n+1 @f$.
-    std::span<const double> knots;  ///< Knot vector, length @c n_ctrl+degree+1, non-decreasing.
-    std::span<const double> ctrl;   ///< Control points, length @c 2*n_ctrl (x,y interleaved).
+    int degree;                       ///< Basis degree @f$ p @f$.
+    int n_ctrl;                       ///< Number of control points @f$ n+1 @f$.
+    std::span<const double> knots;    ///< Knot vector, length @c n_ctrl+degree+1.
+    std::span<const double> ctrl;     ///< Control points, length @c 2*n_ctrl (x,y interleaved).
+    std::span<const double> weights;  ///< NURBS weights, length @c n_ctrl, or empty (polynomial).
 
     /// @brief Control point @p i as a 2D point.
     [[nodiscard]] PtN<2> cp(int i) const { return {ctrl[2 * i], ctrl[(2 * i) + 1]}; }
 
-    /// @brief Index of the knot span containing @p u (clamped to the live domain).
-    /// @param u Curve parameter.
-    /// @return The span index @f$ i @f$ with @f$ knots[i] \le u < knots[i+1] @f$.
-    [[nodiscard]] int find_span(double u) const
-    {
-        const int p = degree;
-        const int n = n_ctrl - 1;
-        if (u >= knots[n + 1]) { return n; }
-        if (u <= knots[p]) { return p; }
-        int lo = p, hi = n + 1, mid = (lo + hi) / 2;
-        while (u < knots[mid] || u >= knots[mid + 1]) {
-            if (u < knots[mid]) {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
-            mid = (lo + hi) / 2;
-        }
-        return mid;
-    }
-
-    /// @brief Nonzero basis functions and their derivatives at @p u (NURBS book A2.3).
-    /// @param span Knot span containing @p u (from @ref find_span).
-    /// @param u Curve parameter.
-    /// @param nd Highest derivative order to compute.
-    /// @param ders Output: `ders[k][j]` is the k-th derivative of the j-th nonzero
-    ///             basis function, @f$ k = 0..nd @f$, @f$ j = 0..degree @f$.
-    void basis_ders(int span, double u, int nd, double ders[][kBSplineCap]) const
-    {
-        const int p = degree;
-        double ndu[kBSplineCap][kBSplineCap];
-        double a[2][kBSplineCap];
-        double left[kBSplineCap], right[kBSplineCap];
-        ndu[0][0] = 1.0;
-        for (int j = 1; j <= p; ++j) {
-            left[j] = u - knots[span + 1 - j];
-            right[j] = knots[span + j] - u;
-            double saved = 0.0;
-            for (int r = 0; r < j; ++r) {
-                ndu[j][r] = right[r + 1] + left[j - r];
-                const double temp = ndu[r][j - 1] / ndu[j][r];
-                ndu[r][j] = saved + (right[r + 1] * temp);
-                saved = left[j - r] * temp;
-            }
-            ndu[j][j] = saved;
-        }
-        for (int j = 0; j <= p; ++j) { ders[0][j] = ndu[j][p]; }
-        for (int r = 0; r <= p; ++r) {
-            int s1 = 0, s2 = 1;
-            a[0][0] = 1.0;
-            for (int k = 1; k <= nd; ++k) {
-                double d = 0.0;
-                const int rk = r - k, pk = p - k;
-                if (r >= k) {
-                    a[s2][0] = a[s1][0] / ndu[pk + 1][rk];
-                    d = a[s2][0] * ndu[rk][pk];
-                }
-                const int j1 = (rk >= -1) ? 1 : -rk;
-                const int j2 = (r - 1 <= pk) ? k - 1 : p - r;
-                for (int j = j1; j <= j2; ++j) {
-                    a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[pk + 1][rk + j];
-                    d += a[s2][j] * ndu[rk + j][pk];
-                }
-                if (r <= pk) {
-                    a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r];
-                    d += a[s2][k] * ndu[r][pk];
-                }
-                ders[k][r] = d;
-                const int tmp = s1;
-                s1 = s2;
-                s2 = tmp;
-            }
-        }
-        int fac = p;
-        for (int k = 1; k <= nd; ++k) {
-            for (int j = 0; j <= p; ++j) { ders[k][j] *= fac; }
-            fac *= (p - k);
-        }
-    }
-
     /// @brief The @p order-th derivative point at @p u (order 0 = the curve point).
     [[nodiscard]] PtN<2> point_at(double u, int order) const
     {
-        const int span = find_span(u);
+        const int span = bspline_find_span(degree, n_ctrl, knots, u);
         double ders[3][kBSplineCap];
-        basis_ders(span, u, order, ders);
-        PtN<2> acc {0.0, 0.0};
-        for (int j = 0; j <= degree; ++j) { acc = acc + (ders[order][j] * cp(span - degree + j)); }
-        return acc;
+        bspline_basis_ders(degree, knots, span, u, order, ders);
+        if (weights.empty()) {
+            PtN<2> acc {0.0, 0.0};
+            for (int j = 0; j <= degree; ++j) {
+                acc = acc + (ders[order][j] * cp(span - degree + j));
+            }
+            return acc;
+        }
+        // Rational: homogeneous derivatives A^(k) = Σ N^(k) w P, w^(k) = Σ N^(k) w,
+        // then the quotient rule (orders 0..2):
+        //   C = A/w; C' = (A' − w'C)/w; C'' = (A'' − 2w'C' − w''C)/w.
+        PtN<2> A[3] {};
+        double w[3] {};
+        for (int k = 0; k <= order; ++k) {
+            for (int j = 0; j <= degree; ++j) {
+                const int i = span - degree + j;
+                const double nw = ders[k][j] * weights[i];
+                A[k] = A[k] + (nw * cp(i));
+                w[k] += nw;
+            }
+        }
+        PtN<2> C[3];
+        C[0] = (1.0 / w[0]) * A[0];
+        if (order >= 1) { C[1] = (1.0 / w[0]) * (A[1] - w[1] * C[0]); }
+        if (order >= 2) { C[2] = (1.0 / w[0]) * (A[2] - 2.0 * w[1] * C[1] - w[2] * C[0]); }
+        return C[order];
     }
 
     /// @brief Evaluate the curve point @f$ C(u) @f$.
@@ -793,12 +828,158 @@ struct Line3Param {
     [[nodiscard]] std::array<VecN<3>, 1> frame(const Param<1>&) const { return {p1 - p0}; }
 };
 
+/// @brief A tensor-product B-spline / NURBS surface @f$ S(u,v) @f$ embedded in 3D.
+///
+/// Knots, the control net, and (optional) weights live in spans over a device
+/// arena (never owned). The control net is row-major over @f$ (i_u, i_v) @f$
+/// with xyz interleaved. An empty @c weights span selects the polynomial path;
+/// a non-empty one (length @c nu*nv) evaluates the rational form via the
+/// homogeneous sums @f$ A(u,v) = \sum N_i N_j w_{ij} P_{ij} @f$,
+/// @f$ w(u,v) = \sum N_i N_j w_{ij} @f$ and the bivariate quotient rule.
+/// The inverse is a coarse-grid-seeded Newton iteration on the nearest-foot
+/// stationarity @f$ (S-p)\cdot S_u = (S-p)\cdot S_v = 0 @f$ (the surface-arity
+/// instantiation of the curve projector).
+struct BSplineSurfaceParam {
+    static constexpr int edim = 3, idim = 2;
+    int pu, pv;                       ///< Basis degrees in u and v.
+    int nu, nv;                       ///< Control-net extents in u and v.
+    std::span<const double> knots_u;  ///< Knot vector in u, length @c nu+pu+1.
+    std::span<const double> knots_v;  ///< Knot vector in v, length @c nv+pv+1.
+    std::span<const double> ctrl;     ///< Control net, length @c 3*nu*nv (xyz interleaved).
+    std::span<const double> weights;  ///< NURBS weights, length @c nu*nv, or empty.
+
+    /// @brief Control point @f$ P_{i_u, i_v} @f$.
+    [[nodiscard]] PtN<3> cp(int iu, int iv) const
+    {
+        const int b = 3 * ((iu * nv) + iv);
+        return {ctrl[b], ctrl[b + 1], ctrl[b + 2]};
+    }
+
+    /// @brief All partial derivatives @f$ S^{(a,b)} = \partial^{a+b}S/\partial u^a \partial v^b @f$
+    ///        for @f$ a, b \le nd @f$ (the fused evaluation all callers share).
+    /// @param q Surface parameters @f$ (u, v) @f$.
+    /// @param nd Highest per-direction derivative order (0, 1, or 2).
+    /// @param S Output: `S[a][b]` is @f$ S^{(a,b)} @f$; entries with
+    ///          @f$ a + b > nd \cdot 2 @f$ beyond what the quotient rule below
+    ///          fills are untouched.
+    void ders(const Param<2>& q, int nd, PtN<3> S[3][3]) const
+    {
+        const int su = bspline_find_span(pu, nu, knots_u, q[0]);
+        const int sv = bspline_find_span(pv, nv, knots_v, q[1]);
+        double du[3][kBSplineCap], dv[3][kBSplineCap];
+        bspline_basis_ders(pu, knots_u, su, q[0], nd, du);
+        bspline_basis_ders(pv, knots_v, sv, q[1], nd, dv);
+
+        // Homogeneous tensor-product sums A^(a,b) (and w^(a,b) when rational).
+        PtN<3> A[3][3] {};
+        double w[3][3] {};
+        for (int a = 0; a <= nd; ++a) {
+            for (int b = 0; b <= nd; ++b) {
+                PtN<3> acc {};
+                double wacc = 0.0;
+                for (int i = 0; i <= pu; ++i) {
+                    const int iu = su - pu + i;
+                    for (int j = 0; j <= pv; ++j) {
+                        const int iv = sv - pv + j;
+                        const double nij = du[a][i] * dv[b][j];
+                        if (weights.empty()) {
+                            acc = acc + (nij * cp(iu, iv));
+                        } else {
+                            const double nw = nij * weights[(iu * nv) + iv];
+                            acc = acc + (nw * cp(iu, iv));
+                            wacc += nw;
+                        }
+                    }
+                }
+                A[a][b] = acc;
+                w[a][b] = wacc;
+            }
+        }
+        if (weights.empty()) {
+            for (int a = 0; a <= nd; ++a) {
+                for (int b = 0; b <= nd; ++b) { S[a][b] = A[a][b]; }
+            }
+            return;
+        }
+        // Bivariate quotient rule for S = A/w, up to second order per direction.
+        const double iw = 1.0 / w[0][0];
+        S[0][0] = iw * A[0][0];
+        if (nd >= 1) {
+            S[1][0] = iw * (A[1][0] - w[1][0] * S[0][0]);
+            S[0][1] = iw * (A[0][1] - w[0][1] * S[0][0]);
+            S[1][1] = iw * (A[1][1] - w[1][0] * S[0][1] - w[0][1] * S[1][0] - w[1][1] * S[0][0]);
+        }
+        if (nd >= 2) {
+            S[2][0] = iw * (A[2][0] - 2.0 * w[1][0] * S[1][0] - w[2][0] * S[0][0]);
+            S[0][2] = iw * (A[0][2] - 2.0 * w[0][1] * S[0][1] - w[0][2] * S[0][0]);
+        }
+    }
+
+    /// @brief Evaluate the surface point @f$ S(u, v) @f$.
+    [[nodiscard]] PtN<3> eval(const Param<2>& q) const
+    {
+        PtN<3> S[3][3];
+        ders(q, 0, S);
+        return S[0][0];
+    }
+
+    /// @brief The raw tangent columns @f$ \{S_u, S_v\} @f$.
+    [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
+    {
+        PtN<3> S[3][3];
+        ders(q, 1, S);
+        return {S[1][0], S[0][1]};
+    }
+
+    /// @brief Inverse: coarse-grid-seeded Newton on the nearest-foot stationarity.
+    ///
+    /// Seeds from an 8×8 sample of the live domain, then iterates Newton on
+    /// @f$ F = ((S-p)\cdot S_u, (S-p)\cdot S_v) @f$ with the exact Jacobian
+    /// (needs the second partials), clamping each iterate to the domain. A
+    /// near-singular Jacobian (e.g. at a degenerate corner) stops early.
+    [[nodiscard]] Param<2> invert(const PtN<3>& p) const
+    {
+        const double u0 = knots_u[pu], u1 = knots_u[nu];
+        const double v0 = knots_v[pv], v1 = knots_v[nv];
+        constexpr int kSeed = 8;
+        Param<2> q {u0, v0};
+        double best = std::numeric_limits<double>::infinity();
+        for (int i = 0; i <= kSeed; ++i) {
+            for (int j = 0; j <= kSeed; ++j) {
+                const Param<2> t {u0 + (((u1 - u0) * i) / kSeed), v0 + (((v1 - v0) * j) / kSeed)};
+                const VecN<3> d = eval(t) - p;
+                const double dd = dot(d, d);
+                if (dd < best) {
+                    best = dd;
+                    q = t;
+                }
+            }
+        }
+        for (int it = 0; it < 12; ++it) {
+            PtN<3> S[3][3];
+            ders(q, 2, S);
+            const VecN<3> d = S[0][0] - p;
+            const double f1 = dot(d, S[1][0]), f2 = dot(d, S[0][1]);
+            const double j11 = dot(S[1][0], S[1][0]) + dot(d, S[2][0]);
+            const double j12 = dot(S[1][0], S[0][1]) + dot(d, S[1][1]);
+            const double j22 = dot(S[0][1], S[0][1]) + dot(d, S[0][2]);
+            const double det = (j11 * j22) - (j12 * j12);
+            if (std::fabs(det) < 1e-30) { break; }
+            q[0] = std::clamp(q[0] - (((j22 * f1) - (j12 * f2)) / det), u0, u1);
+            q[1] = std::clamp(q[1] - (((-j12 * f1) + (j11 * f2)) / det), v0, v1);
+        }
+        return q;
+    }
+};
+
 static_assert(Parametrization<PlaneParam> && Parametrization<SphereParam> &&
-              Parametrization<CylinderParam> && Parametrization<Line3Param>);
+              Parametrization<CylinderParam> && Parametrization<Line3Param> &&
+              Parametrization<BSplineSurfaceParam>);
 static_assert(GeometryEntity<Free<3>> && GeometryEntity<TrimmedEntity<PlaneParam>> &&
               GeometryEntity<TrimmedEntity<SphereParam>> &&
               GeometryEntity<TrimmedEntity<CylinderParam>> &&
-              GeometryEntity<TrimmedEntity<Line3Param>>);
+              GeometryEntity<TrimmedEntity<Line3Param>> &&
+              GeometryEntity<TrimmedEntity<BSplineSurfaceParam>>);
 
 static_assert(Parametrization<LineParam> && Parametrization<CircleArcParam> &&
               Parametrization<EllipseArcParam> && Parametrization<QuadBezierParam> &&
@@ -834,7 +1015,8 @@ template <> struct EntityKind<3> {
                               TrimmedEntity<PlaneParam>,
                               TrimmedEntity<SphereParam>,
                               TrimmedEntity<CylinderParam>,
-                              TrimmedEntity<Line3Param>>;
+                              TrimmedEntity<Line3Param>,
+                              TrimmedEntity<BSplineSurfaceParam>>;
 };
 /// @brief Convenience alias for the entity variant at embedding dimension @p D.
 template <int D> using EntityKindT = typename EntityKind<D>::type;
@@ -878,8 +1060,9 @@ inline EntityKindT<2> make_entity(Tag tag, const double* params, const double* a
                            {params[6], params[7]}}}},
           .trim = {.t0 = params[8], .t1 = params[9], .closed = false}};
     case TAG_BSPLINE: {
-        // Blob: [degree, n_ctrl, knot_off, ctrl_off, t0, t1]; knots/control points
-        // live in the arena. Counts derive from degree and n_ctrl.
+        // Blob: [degree, n_ctrl, knot_off, ctrl_off, t0, t1, w_off, has_w];
+        // knots/control points/weights live in the arena. Counts derive from
+        // degree and n_ctrl; has_w == 0 selects the polynomial path.
         const int degree = static_cast<int>(params[0]);
         const int n_ctrl = static_cast<int>(params[1]);
         const auto knot_off = static_cast<std::size_t>(params[2]);
@@ -887,11 +1070,16 @@ inline EntityKindT<2> make_entity(Tag tag, const double* params, const double* a
         const auto n_knots =
           static_cast<std::size_t>(n_ctrl) + static_cast<std::size_t>(degree) + 1;
         const auto n_ctrl_d = 2 * static_cast<std::size_t>(n_ctrl);
+        const bool has_w = params[7] != 0.0;
+        const auto w_off = static_cast<std::size_t>(params[6]);
         return TrimmedEntity<BSplineCurveParam> {
           .param = {.degree = degree,
                     .n_ctrl = n_ctrl,
                     .knots = {arena + knot_off, n_knots},
-                    .ctrl = {arena + ctrl_off, n_ctrl_d}},
+                    .ctrl = {arena + ctrl_off, n_ctrl_d},
+                    .weights = has_w ? std::span<const double> {arena + w_off,
+                                                                static_cast<std::size_t>(n_ctrl)}
+                                     : std::span<const double> {}},
           .trim = {.t0 = params[4], .t1 = params[5], .closed = false}};
     }
     case TAG_COMPOSITE: {
@@ -950,8 +1138,10 @@ inline Frame<2, 1> CompositePath::project_frame(const Pt& p) const
 /// importer bakes UV trim polygons into the arena.
 /// @param tag Entity type tag (`TAG_*`).
 /// @param params Flat parameter blob (`kParamPad` doubles per DOF).
+/// @param arena Base of the per-group double arena for span-backed entities
+///              (the B-spline surface); fixed-size entities ignore it.
 /// @return The typed entity variant.
-inline EntityKindT<3> make_entity3(Tag tag, const double* params)
+inline EntityKindT<3> make_entity3(Tag tag, const double* params, const double* arena = nullptr)
 {
     const auto pt = [&](int i) { return PtN<3> {params[i], params[i + 1], params[i + 2]}; };
     switch (tag) {
@@ -978,6 +1168,31 @@ inline EntityKindT<3> make_entity3(Tag tag, const double* params)
         return TrimmedEntity<Line3Param> {
           .param = {.p0 = pt(0), .p1 = pt(3)},
           .trim = {.t0 = params[6], .t1 = params[7], .closed = false}};
+    case TAG_BSPLINESURF: {
+        // Blob: [pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w];
+        // knots/control net/weights live in the arena.
+        const int pu = static_cast<int>(params[0]);
+        const int pv = static_cast<int>(params[1]);
+        const int nu = static_cast<int>(params[2]);
+        const int nv = static_cast<int>(params[3]);
+        const auto ku_off = static_cast<std::size_t>(params[4]);
+        const auto kv_off = static_cast<std::size_t>(params[5]);
+        const auto ctrl_off = static_cast<std::size_t>(params[6]);
+        const auto w_off = static_cast<std::size_t>(params[7]);
+        const bool has_w = params[8] != 0.0;
+        const auto n_net = static_cast<std::size_t>(nu) * static_cast<std::size_t>(nv);
+        return TrimmedEntity<BSplineSurfaceParam> {
+          .param = {.pu = pu,
+                    .pv = pv,
+                    .nu = nu,
+                    .nv = nv,
+                    .knots_u = {arena + ku_off, static_cast<std::size_t>(nu + pu) + 1},
+                    .knots_v = {arena + kv_off, static_cast<std::size_t>(nv + pv) + 1},
+                    .ctrl = {arena + ctrl_off, 3 * n_net},
+                    .weights = has_w ? std::span<const double> {arena + w_off, n_net}
+                                     : std::span<const double> {}},
+          .trim = {}};
+    }
     case TAG_FREE:
     default: return Free<3> {};
     }
@@ -996,7 +1211,7 @@ inline EntityKindT<D> make_entity(Tag tag, const double* params, const double* a
     if constexpr (D == 2) {
         return make_entity(tag, params, arena);
     } else {
-        return make_entity3(tag, params);
+        return make_entity3(tag, params, arena);
     }
 }
 
