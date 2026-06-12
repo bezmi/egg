@@ -8,7 +8,6 @@
 
 #include "core.hpp"
 
-#include <array>
 #include <cmath>
 
 namespace egg
@@ -30,13 +29,13 @@ template <int D> VecN<D> solveNxN(const MatN<D>& H, const VecN<D>& g);
 // D=2: the exact 2×2 closed form (bit-identical to the original solve2x2).
 template <> inline VecN<2> solveNxN<2>(const MatN<2>& H, const VecN<2>& g)
 {
-    const double gnorm = std::sqrt(g[0] * g[0] + g[1] * g[1]);
-    if (gnorm < 1e-15) return Vec2 {0.0, 0.0};
+    const double gnorm = std::sqrt((g[0] * g[0]) + (g[1] * g[1]));
+    if (gnorm < 1e-15) { return Vec2 {0.0, 0.0}; }
 
-    const double det = H[0] * H[3] - H[1] * H[2];
+    const double det = (H[0] * H[3]) - (H[1] * H[2]);
     // x = -H^{-1} g = -(1/det) adj(H) g, adj(H) = [[h11,-h01],[-h10,h00]]
     const double inv = 1.0 / det;
-    Vec2 x {-inv * (H[3] * g[0] - H[1] * g[1]), -inv * (-H[2] * g[0] + H[0] * g[1])};
+    Vec2 x {-inv * ((H[3] * g[0]) - (H[1] * g[1])), -inv * ((-H[2] * g[0]) + (H[0] * g[1]))};
     if (!finite2(x)) {
         const double c = -0.1 / gnorm;
         return Vec2 {c * g[0], c * g[1]};
@@ -51,9 +50,9 @@ inline Vec2 solve2x2(const Mat2& H, const Vec2& g) { return solveNxN<2>(H, g); }
 inline double solve1x1(double a, double r)
 {
     const double rnorm = std::abs(r);
-    if (rnorm < 1e-15) return 0.0;
+    if (rnorm < 1e-15) { return 0.0; }
     const double x = -r / a;
-    if (!std::isfinite(x)) return -0.1 * r / rnorm;
+    if (!std::isfinite(x)) { return -0.1 * r / rnorm; }
     return x;
 }
 

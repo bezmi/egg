@@ -60,21 +60,21 @@ inline Grad mu_grad_closedform(const VecT& t)
 // egg.smoothing.batch._HESS_P (Python). Cross-language, so unavoidable; any
 // change must be applied to all three copies.
 inline constexpr std::array<double, kVecT * kVecT> kHessP = {0.0,
-                                                  0.0,
-                                                  0.0,
-                                                  1.0,  //
-                                                  0.0,
-                                                  0.0,
-                                                  -1.0,
-                                                  0.0,  //
-                                                  0.0,
-                                                  -1.0,
-                                                  0.0,
-                                                  0.0,  //
-                                                  1.0,
-                                                  0.0,
-                                                  0.0,
-                                                  0.0};
+                                                             0.0,
+                                                             0.0,
+                                                             1.0,  //
+                                                             0.0,
+                                                             0.0,
+                                                             -1.0,
+                                                             0.0,  //
+                                                             0.0,
+                                                             -1.0,
+                                                             0.0,
+                                                             0.0,  //
+                                                             1.0,
+                                                             0.0,
+                                                             0.0,
+                                                             0.0};
 
 // --- closed-form Hessian (matches _shape2d_hess_T) ---
 //   H = (1/D) I
@@ -222,7 +222,7 @@ template <int D> using ObjectiveKindT = std::variant<ShapeObjectiveT<D>, Untangl
 template <int D = kDefaultDim>
 inline ObjectiveKindT<D> make_objective(std::string_view phase, double delta)
 {
-    if (phase == "untangle") return UntangleObjectiveT<D> {delta};
+    if (phase == "untangle") { return UntangleObjectiveT<D> {delta}; }
     return ShapeObjectiveT<D> {};
 }
 
@@ -231,7 +231,8 @@ using ShapeObjective = ShapeObjectiveT<2>;
 using UntangleObjective = UntangleObjectiveT<2>;
 using ObjectiveKind = ObjectiveKindT<2>;
 
-template <class M> concept Objective = ObjectiveD<M, 2>;
+template <class M>
+concept Objective = ObjectiveD<M, 2>;
 
 static_assert(Objective<ShapeObjective>);
 static_assert(Objective<UntangleObjective>);

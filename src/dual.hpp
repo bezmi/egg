@@ -12,7 +12,6 @@
 
 #include <array>
 #include <cmath>
-#include <cstddef>
 
 namespace egg
 {
@@ -31,7 +30,7 @@ template <int N> constexpr Dual<N> operator+(const Dual<N>& a, const Dual<N>& b)
 {
     Dual<N> r;
     r.v = a.v + b.v;
-    for (int i = 0; i < N; ++i) r.g[i] = a.g[i] + b.g[i];
+    for (int i = 0; i < N; ++i) { r.g[i] = a.g[i] + b.g[i]; }
     return r;
 }
 
@@ -39,7 +38,7 @@ template <int N> constexpr Dual<N> operator-(const Dual<N>& a, const Dual<N>& b)
 {
     Dual<N> r;
     r.v = a.v - b.v;
-    for (int i = 0; i < N; ++i) r.g[i] = a.g[i] - b.g[i];
+    for (int i = 0; i < N; ++i) { r.g[i] = a.g[i] - b.g[i]; }
     return r;
 }
 
@@ -47,7 +46,7 @@ template <int N> constexpr Dual<N> operator-(const Dual<N>& a)
 {
     Dual<N> r;
     r.v = -a.v;
-    for (int i = 0; i < N; ++i) r.g[i] = -a.g[i];
+    for (int i = 0; i < N; ++i) { r.g[i] = -a.g[i]; }
     return r;
 }
 
@@ -55,7 +54,7 @@ template <int N> constexpr Dual<N> operator*(const Dual<N>& a, const Dual<N>& b)
 {
     Dual<N> r;
     r.v = a.v * b.v;
-    for (int i = 0; i < N; ++i) r.g[i] = a.g[i] * b.v + a.v * b.g[i];
+    for (int i = 0; i < N; ++i) { r.g[i] = a.g[i] * b.v + a.v * b.g[i]; }
     return r;
 }
 
@@ -64,7 +63,9 @@ template <int N> constexpr Dual<N> operator/(const Dual<N>& a, const Dual<N>& b)
     Dual<N> r;
     const double inv = 1.0 / b.v;
     r.v = a.v * inv;
-    for (int i = 0; i < N; ++i) r.g[i] = (a.g[i] - r.v * b.g[i]) * inv;  // (a' - (a/b) b') / b
+    for (int i = 0; i < N; ++i) {
+        r.g[i] = (a.g[i] - r.v * b.g[i]) * inv;  // (a' - (a/b) b') / b
+    }
     return r;
 }
 
@@ -79,7 +80,7 @@ template <int N> inline Dual<N> sqrt(const Dual<N>& a)
     Dual<N> r;
     r.v = std::sqrt(a.v);
     const double coef = 0.5 / r.v;
-    for (int i = 0; i < N; ++i) r.g[i] = coef * a.g[i];
+    for (int i = 0; i < N; ++i) { r.g[i] = coef * a.g[i]; }
     return r;
 }
 
@@ -107,7 +108,7 @@ template <int N> constexpr Dual2<N> operator+(const Dual2<N>& a, const Dual2<N>&
     r.v = a.v + b.v;
     for (int i = 0; i < N; ++i) {
         r.g[i] = a.g[i] + b.g[i];
-        for (int j = 0; j < N; ++j) r.h[i][j] = a.h[i][j] + b.h[i][j];
+        for (int j = 0; j < N; ++j) { r.h[i][j] = a.h[i][j] + b.h[i][j]; }
     }
     return r;
 }
@@ -118,7 +119,7 @@ template <int N> constexpr Dual2<N> operator-(const Dual2<N>& a, const Dual2<N>&
     r.v = a.v - b.v;
     for (int i = 0; i < N; ++i) {
         r.g[i] = a.g[i] - b.g[i];
-        for (int j = 0; j < N; ++j) r.h[i][j] = a.h[i][j] - b.h[i][j];
+        for (int j = 0; j < N; ++j) { r.h[i][j] = a.h[i][j] - b.h[i][j]; }
     }
     return r;
 }
@@ -129,7 +130,7 @@ template <int N> constexpr Dual2<N> operator-(const Dual2<N>& a)
     r.v = -a.v;
     for (int i = 0; i < N; ++i) {
         r.g[i] = -a.g[i];
-        for (int j = 0; j < N; ++j) r.h[i][j] = -a.h[i][j];
+        for (int j = 0; j < N; ++j) { r.h[i][j] = -a.h[i][j]; }
     }
     return r;
 }
@@ -138,11 +139,13 @@ template <int N> constexpr Dual2<N> operator*(const Dual2<N>& a, const Dual2<N>&
 {
     Dual2<N> r;
     r.v = a.v * b.v;
-    for (int i = 0; i < N; ++i) r.g[i] = a.g[i] * b.v + a.v * b.g[i];
-    for (int i = 0; i < N; ++i)
-        for (int j = 0; j < N; ++j)
+    for (int i = 0; i < N; ++i) { r.g[i] = a.g[i] * b.v + a.v * b.g[i]; }
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
             // (a b)'' = a'' b + a' b' + a' b' + a b''
             r.h[i][j] = a.h[i][j] * b.v + a.g[i] * b.g[j] + a.g[j] * b.g[i] + a.v * b.h[i][j];
+        }
+    }
     return r;
 }
 
@@ -154,10 +157,12 @@ template <int N> constexpr Dual2<N> operator/(const Dual2<N>& a, const Dual2<N>&
     Dual2<N> r;
     const double inv = 1.0 / b.v;
     r.v = a.v * inv;
-    for (int i = 0; i < N; ++i) r.g[i] = (a.g[i] - r.v * b.g[i]) * inv;
-    for (int i = 0; i < N; ++i)
-        for (int j = 0; j < N; ++j)
+    for (int i = 0; i < N; ++i) { r.g[i] = (a.g[i] - r.v * b.g[i]) * inv; }
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
             r.h[i][j] = (a.h[i][j] - r.g[i] * b.g[j] - r.g[j] * b.g[i] - r.v * b.h[i][j]) * inv;
+        }
+    }
     return r;
 }
 
@@ -176,9 +181,10 @@ template <int N> inline Dual2<N> sqrt(const Dual2<N>& a)
     Dual2<N> r;
     r.v = std::sqrt(a.v);
     const double inv2f = 0.5 / r.v;
-    for (int i = 0; i < N; ++i) r.g[i] = inv2f * a.g[i];
-    for (int i = 0; i < N; ++i)
-        for (int j = 0; j < N; ++j) r.h[i][j] = inv2f * (a.h[i][j] - 2.0 * r.g[i] * r.g[j]);
+    for (int i = 0; i < N; ++i) { r.g[i] = inv2f * a.g[i]; }
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) { r.h[i][j] = inv2f * (a.h[i][j] - 2.0 * r.g[i] * r.g[j]); }
+    }
     return r;
 }
 

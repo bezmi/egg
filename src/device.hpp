@@ -1,11 +1,12 @@
 #pragma once
 
-#include "core.hpp"
-
 #include <cstddef>
+#include <experimental/mdspan>
 #include <sycl/sycl.hpp>
 #include <utility>
 #include <vector>
+
+namespace stdex = std::experimental;
 
 namespace egg
 {
@@ -30,7 +31,7 @@ template <class T> class UsmBuffer
     // Allocate and upload a host vector in one step.
     UsmBuffer(sycl::queue q, const std::vector<T>& host) : UsmBuffer(q, host.size())
     {
-        if (n_) q_.memcpy(ptr_, host.data(), n_ * sizeof(T)).wait();
+        if (n_) { q_.memcpy(ptr_, host.data(), n_ * sizeof(T)).wait(); }
     }
 
     ~UsmBuffer() { reset(); }
@@ -50,21 +51,19 @@ template <class T> class UsmBuffer
     T* data() const { return ptr_; }
     std::size_t size() const { return n_; }
 
-    // Upload/download enqueue work on the queue (and block on it), so they are
-    // non-const actions, not observers — hence no `mutable` queue is needed.
     void upload(const std::vector<T>& host)
     {
-        if (host.size()) q_.memcpy(ptr_, host.data(), host.size() * sizeof(T)).wait();
+        if (host.size()) { q_.memcpy(ptr_, host.data(), host.size() * sizeof(T)).wait(); }
     }
     void download(T* host)
     {
-        if (n_) q_.memcpy(host, ptr_, n_ * sizeof(T)).wait();
+        if (n_) { q_.memcpy(host, ptr_, n_ * sizeof(T)).wait(); }
     }
 
   private:
     void reset()
     {
-        if (ptr_) sycl::free(ptr_, q_);
+        if (ptr_) { sycl::free(ptr_, q_); }
         ptr_ = nullptr;
         n_ = 0;
     }

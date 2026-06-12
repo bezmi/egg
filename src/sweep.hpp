@@ -6,6 +6,7 @@
 #include "metric.hpp"
 #include "patch.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <functional>
@@ -23,24 +24,24 @@ namespace egg
 // and only the dimensions whose math exists (D=2 in Phase 1) are instantiated.
 
 template <int D> struct SweepGroupHostT {
-    std::size_t ndof;                   // DOFs in this colour
-    std::size_t total_samples;          // Σ P_of[d]
-    std::vector<int> gc;                // [total_samples]
-    std::vector<int> gn[D];             // [total_samples] per axis (was gn0, gn1)
-    std::vector<double> s[D];           // [total_samples] per axis (was s0, s1)
-    std::vector<double> W_inv;          // [total_samples * dim::wInv(D)]
-    std::vector<int> role;              // [total_samples]
-    std::vector<double> J;              // [total_samples * dim::jSize(D)]
-    std::vector<int> dof_idx;           // [ndof]
-    std::vector<int> tag;               // [ndof]
-    std::vector<int> P_of;              // [ndof]  patch size per DOF
-    std::vector<int> sample_offset;     // [ndof]  exclusive prefix sum of P_of
-    std::vector<double> params;         // [ndof * kParamPad]
+    std::size_t ndof;                // DOFs in this colour
+    std::size_t total_samples;       // Σ P_of[d]
+    std::vector<int> gc;             // [total_samples]
+    std::vector<int> gn[D];          // [total_samples] per axis (was gn0, gn1)
+    std::vector<double> s[D];        // [total_samples] per axis (was s0, s1)
+    std::vector<double> W_inv;       // [total_samples * dim::wInv(D)]
+    std::vector<int> role;           // [total_samples]
+    std::vector<double> J;           // [total_samples * dim::jSize(D)]
+    std::vector<int> dof_idx;        // [ndof]
+    std::vector<int> tag;            // [ndof]
+    std::vector<int> P_of;           // [ndof]  patch size per DOF
+    std::vector<int> sample_offset;  // [ndof]  exclusive prefix sum of P_of
+    std::vector<double> params;      // [ndof * kParamPad]
 };
 
 template <int D> struct EnergyStencilHostT {
     std::size_t num_samples;
-    std::vector<int> gc;        // [num_samples]
+    std::vector<int> gc;  // [num_samples]
     std::vector<int> gn[D];
     std::vector<double> s[D];
     std::vector<double> W_inv;  // [num_samples * dim::wInv(D)]
@@ -67,7 +68,7 @@ template <int D> struct GroupViewT {
     // [sample_offset[d], sample_offset[d] + P_of[d]).
     PatchViewT<D> patch(std::size_t d) const
     {
-        const std::size_t off = static_cast<std::size_t>(sample_offset[d]);
+        const auto off = static_cast<std::size_t>(sample_offset[d]);
         PatchViewT<D> pv;
         pv.P = P_of[d];
         pv.gc = gc.data_handle() + off;
@@ -75,9 +76,9 @@ template <int D> struct GroupViewT {
             pv.gn[k] = gn[k].data_handle() + off;
             pv.s[k] = s[k].data_handle() + off;
         }
-        pv.W_inv = W_inv.data_handle() + off * dim::wInv(D);
+        pv.W_inv = W_inv.data_handle() + (off * dim::wInv(D));
         pv.role = role.data_handle() + off;
-        pv.J = J.data_handle() + off * dim::jSize(D);
+        pv.J = J.data_handle() + (off * dim::jSize(D));
         return pv;
     }
 };
@@ -126,7 +127,7 @@ template <int D> class SweepDeviceContextT
         stencil_.W_inv = {q, es.W_inv};
 
         group_views_.reserve(groups_.size());
-        for (const auto& dg : groups_) group_views_.push_back(dg.view());
+        for (const auto& dg : groups_) { group_views_.push_back(dg.view()); }
         stencil_view_ = stencil_.view();
     }
 
@@ -204,7 +205,7 @@ template <int D> class SweepDeviceContextT
 template <int D, class Obj>
 inline void sweep_group_kernel(sycl::queue& q, const GroupViewT<D>& g, double* X, Obj objective)
 {
-    if (g.ndof == 0) return;
+    if (g.ndof == 0) { return; }
     q.parallel_for(sycl::range<1>(g.ndof), [=](sycl::id<1> idx) {
         const std::size_t d = idx[0];
         const PatchViewT<D> pv = g.patch(d);
@@ -234,7 +235,7 @@ inline void sweep_group_kernel(sycl::queue& q, const GroupViewT<D>& g, double* X
               bool accepted = false;
               for (int it = 0; it < 10 && !accepted; ++it) {
                   PtN<D> raw;
-                  for (int k = 0; k < D; ++k) raw[k] = pos[k] + alpha * delta[k];
+                  for (int k = 0; k < D; ++k) { raw[k] = pos[k] + alpha * delta[k]; }
                   PtN<D> trial;
                   if constexpr (std::is_same_v<E, Free>) {
                       trial = raw;
@@ -262,7 +263,7 @@ inline void sweep_group_kernel(sycl::queue& q, const GroupViewT<D>& g, double* X
                       const VecTN<D> t =
                         assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[dim::wInv(D) * p], detA);
                       e_new += objective.value(t);
-                      if (detA < mdet) mdet = detA;
+                      mdet = std::min(detA, mdet);
                   }
 
                   const bool ok = std::isfinite(e_new) && (e_new <= r.energy + 1e-12) &&
@@ -295,7 +296,7 @@ inline void reduce_energy_mindet(sycl::queue& q,
 {
     auto e_red = sycl::reduction(out_e,
                                  0.0,
-                                 std::plus<double>(),
+                                 std::plus<>(),
                                  sycl::property::reduction::initialize_to_identity {});
     auto m_red = sycl::reduction(out_m,
                                  std::numeric_limits<double>::infinity(),
@@ -352,15 +353,16 @@ template <int D> class ExecutorT
 
         constexpr int kSyncEvery = 32;
         for (int s = 0; s < n_sweeps; ++s) {
-            for (const auto& gv : ctx_.group_views())
+            for (const auto& gv : ctx_.group_views()) {
                 sweep_group_kernel<D>(q_, gv, X, objective);
+            }
             reduce_energy_mindet<D>(q_,
                                     ctx_.stencil_view(),
                                     X,
                                     d_e.data() + s,
                                     d_m.data() + s,
                                     objective);
-            if ((s + 1) % kSyncEvery == 0) q_.wait();
+            if ((s + 1) % kSyncEvery == 0) { q_.wait(); }
         }
         q_.wait();
 

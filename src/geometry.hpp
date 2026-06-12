@@ -2,7 +2,6 @@
 
 #include "core.hpp"
 
-#include <array>
 #include <cmath>
 #include <concepts>
 #include <variant>
@@ -32,10 +31,11 @@ inline Pt project_lineseg(const Pt& p, const double* params)
     const double sx = params[0], sy = params[1];
     const double ex = params[2], ey = params[3];
     const double abx = ex - sx, aby = ey - sy;
-    const double ab_sq = abx * abx + aby * aby;
-    double t = ((p[0] - sx) * abx + (p[1] - sy) * aby) / std::fmax(ab_sq, 1e-30);
-    t = t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t);  // clip to [0, 1]
-    return Pt {sx + t * abx, sy + t * aby};
+    const double ab_sq = (abx * abx) + (aby * aby);
+    double t = (((p[0] - sx) * abx) + ((p[1] - sy) * aby)) / std::fmax(ab_sq, 1e-30);
+    t = t < 0.0 ? 0.0 : t;
+    t = t > 1.0 ? 1.0 : t;  // clip to [0, 1]
+    return Pt {sx + (t * abx), sy + (t * aby)};
 }
 
 inline Pt project_circle(const Pt& p, const double* params)
@@ -43,9 +43,11 @@ inline Pt project_circle(const Pt& p, const double* params)
     const double cx = params[0], cy = params[1];
     const double r = params[2];  // params[d] = params[2]
     const double dx = p[0] - cx, dy = p[1] - cy;
-    const double dist = std::sqrt(dx * dx + dy * dy);
-    if (dist < 1e-15) return Pt {cx + r, cy};  // arbitrary on-circle point
-    return Pt {cx + r * dx / dist, cy + r * dy / dist};
+    const double dist = std::sqrt((dx * dx) + (dy * dy));
+    if (dist < 1e-15) {
+        return Pt {cx + r, cy};  // arbitrary on-circle point
+    }
+    return Pt {cx + (r * dx / dist), cy + (r * dy / dist)};
 }
 
 inline Pt project_ellipse(const Pt& p, const double* params)
@@ -54,26 +56,26 @@ inline Pt project_ellipse(const Pt& p, const double* params)
     const double rx = params[2], ry = params[3];
     const double dx = p[0] - cx, dy = p[1] - cy;
     const double sx = dx / rx, sy = dy / ry;
-    const double dist = std::sqrt(sx * sx + sy * sy);
+    const double dist = std::sqrt((sx * sx) + (sy * sy));
     double ux, uy;
     if (dist < 1e-15) {
-        ux = uy = 1.0 / std::sqrt(2.0);  // ones(d)/sqrt(d), d = 2
+        ux = uy = 1.0 / std::numbers::sqrt2;  // ones(d)/sqrt(d), d = 2
     } else {
         ux = sx / dist;
         uy = sy / dist;
     }
-    return Pt {cx + ux * rx, cy + uy * ry};
+    return Pt {cx + (ux * rx), cy + (uy * ry)};
 }
 
 inline Pt project_plane(const Pt& p, const double* params)
 {
     const double qx = params[0], qy = params[1];
     double nx = params[2], ny = params[3];
-    const double nn = std::sqrt(nx * nx + ny * ny);
+    const double nn = std::sqrt((nx * nx) + (ny * ny));
     nx /= nn;
     ny /= nn;
-    const double dotp = (p[0] - qx) * nx + (p[1] - qy) * ny;
-    return Pt {p[0] - dotp * nx, p[1] - dotp * ny};
+    const double dotp = ((p[0] - qx) * nx) + ((p[1] - qy) * ny);
+    return Pt {p[0] - (dotp * nx), p[1] - (dotp * ny)};
 }
 
 inline Pt tangent_free(const Pt&, const double*) { return Pt {1.0, 0.0}; }
@@ -82,8 +84,10 @@ inline Pt tangent_lineseg(const Pt&, const double* params)
 {
     const double abx = params[2] - params[0];
     const double aby = params[3] - params[1];
-    const double norm = std::sqrt(abx * abx + aby * aby);
-    if (norm < 1e-15) return Pt {1.0, 0.0};  // eye[:, 0]
+    const double norm = std::sqrt((abx * abx) + (aby * aby));
+    if (norm < 1e-15) {
+        return Pt {1.0, 0.0};  // eye[:, 0]
+    }
     return Pt {abx / norm, aby / norm};
 }
 
@@ -91,7 +95,7 @@ inline Pt tangent_circle(const Pt& p, const double* params)
 {
     const double cx = params[0], cy = params[1];
     const double dx = p[0] - cx, dy = p[1] - cy;
-    const double rn = std::sqrt(dx * dx + dy * dy);
+    const double rn = std::sqrt((dx * dx) + (dy * dy));
     double nx, ny;
     if (rn < 1e-15) {
         nx = 1.0;
@@ -112,7 +116,7 @@ inline Pt tangent_ellipse(const Pt& p, const double* params)
     const double angle = std::atan2(dy / ry, dx / rx);
     double tx = -rx * std::sin(angle);
     double ty = ry * std::cos(angle);
-    const double norm = std::sqrt(tx * tx + ty * ty);
+    const double norm = std::sqrt((tx * tx) + (ty * ty));
     if (norm < 1e-15) return Pt {1.0, 0.0};
     return Pt {tx / norm, ty / norm};
 }

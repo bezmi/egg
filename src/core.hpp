@@ -1,14 +1,10 @@
 #pragma once
 
 #include <array>
-#include <cstddef>
 #include <experimental/mdspan>
 
 namespace egg
 {
-
-// for kokkos mdspan
-namespace stdex = std::experimental;
 
 // ---------------------------------------------------------------------------
 // Spatial dimension of the core (the single knob). The 2D pipeline wires
@@ -26,13 +22,13 @@ namespace stdex = std::experimental;
 // those survive below only as D=2 convenience aliases for the oracle surface.)
 namespace dim
 {
-inline constexpr int vecT(int D) { return D * D; }              // 4 / 9
-inline constexpr int corners(int D) { return 1 << D; }          // 4 / 8
-inline constexpr int nbrs(int D) { return D; }                  // 2 / 3
-inline constexpr int wInv(int D) { return D * D; }              // 4 / 9
-inline constexpr int jRows(int D) { return D * D; }             // 4 / 9
-inline constexpr int jCols(int D) { return D * (D + 1); }       // 6 / 12
-inline constexpr int jSize(int D) { return jRows(D) * jCols(D); }  // 24 / 108
+constexpr int vecT(int D) { return D * D; }                 // 4 / 9
+constexpr int corners(int D) { return 1 << D; }             // 4 / 8
+constexpr int nbrs(int D) { return D; }                     // 2 / 3
+constexpr int wInv(int D) { return D * D; }                 // 4 / 9
+constexpr int jRows(int D) { return D * D; }                // 4 / 9
+constexpr int jCols(int D) { return D * (D + 1); }          // 6 / 12
+constexpr int jSize(int D) { return jRows(D) * jCols(D); }  // 24 / 108
 }  // namespace dim
 
 // Size-algebra lock: catches a wrong size formula before any 3D kernel exists.
@@ -75,13 +71,13 @@ inline constexpr int kJSize = dim::jSize(kDefaultDim);
 template <int D = kDefaultDim> inline PtN<D> load_pt(const double* X, int i)
 {
     PtN<D> p;
-    for (int k = 0; k < D; ++k) p[k] = X[D * i + k];
+    for (int k = 0; k < D; ++k) { p[k] = X[(D * i) + k]; }
     return p;
 }
 
 template <int D = kDefaultDim> inline void store_pt(double* X, int i, const PtN<D>& p)
 {
-    for (int k = 0; k < D; ++k) X[D * i + k] = p[k];
+    for (int k = 0; k < D; ++k) { X[(D * i) + k] = p[k]; }
 }
 
 }  // namespace egg
