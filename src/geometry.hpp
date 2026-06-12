@@ -134,36 +134,36 @@ concept GeometryEntity = requires(const E& e, const Pt& p) {
 
 struct Free {
     const double* params;
-    Pt project(const Pt& p) const { return project_free(p, params); }
-    Pt tangent(const Pt& p) const { return tangent_free(p, params); }
+    [[nodiscard]] Pt project(const Pt& p) const { return project_free(p, params); }
+    [[nodiscard]] Pt tangent(const Pt& p) const { return tangent_free(p, params); }
 };
 struct LineSeg {
     const double* params;
-    Pt project(const Pt& p) const { return project_lineseg(p, params); }
-    Pt tangent(const Pt& p) const { return tangent_lineseg(p, params); }
+    [[nodiscard]] Pt project(const Pt& p) const { return project_lineseg(p, params); }
+    [[nodiscard]] Pt tangent(const Pt& p) const { return tangent_lineseg(p, params); }
 };
 struct Circle {
     const double* params;
-    Pt project(const Pt& p) const { return project_circle(p, params); }
-    Pt tangent(const Pt& p) const { return tangent_circle(p, params); }
+    [[nodiscard]] Pt project(const Pt& p) const { return project_circle(p, params); }
+    [[nodiscard]] Pt tangent(const Pt& p) const { return tangent_circle(p, params); }
 };
 struct Ellipse {
     const double* params;
-    Pt project(const Pt& p) const { return project_ellipse(p, params); }
-    Pt tangent(const Pt& p) const { return tangent_ellipse(p, params); }
+    [[nodiscard]] Pt project(const Pt& p) const { return project_ellipse(p, params); }
+    [[nodiscard]] Pt tangent(const Pt& p) const { return tangent_ellipse(p, params); }
 };
 
 // Sphere reuses the circle projection (radial); its tangent basis is a free
 // surface direction. Plane projects onto the plane through (q, n).
 struct Sphere {
     const double* params;
-    Pt project(const Pt& p) const { return project_circle(p, params); }
-    Pt tangent(const Pt& p) const { return tangent_free(p, params); }
+    [[nodiscard]] Pt project(const Pt& p) const { return project_circle(p, params); }
+    [[nodiscard]] Pt tangent(const Pt& p) const { return tangent_free(p, params); }
 };
 struct Plane {
     const double* params;
-    Pt project(const Pt& p) const { return project_plane(p, params); }
-    Pt tangent(const Pt& p) const { return tangent_free(p, params); }
+    [[nodiscard]] Pt project(const Pt& p) const { return project_plane(p, params); }
+    [[nodiscard]] Pt tangent(const Pt& p) const { return tangent_free(p, params); }
 };
 
 static_assert(GeometryEntity<Free> && GeometryEntity<LineSeg> && GeometryEntity<Circle> &&

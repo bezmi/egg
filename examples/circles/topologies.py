@@ -1,11 +1,3 @@
-"""Reusable rough-topology builders for the pipeline demos and tests.
-
-``build_circle_in_rectangle`` declares the single-circle O-grid (the Phase-4
-topology); with ``rough=True`` the inner O-ring corners are placed crossed so the
-TFI start is *folded* (``min det A < 0``), exercising the δ-continuation
-untangler. ``set_boundary_layer`` optionally attaches per-wall clustering targets.
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -32,7 +24,6 @@ _INNER_ROUGH = [
 
 
 def build_circle_in_rectangle(rough: bool = False, R: int = 1):
-    """Single-circle O-grid topology (Phase-4). ``rough`` → folded TFI start."""
     circle = Circle(center=(2.0, 2.0), radius=0.8)
     bottom = LineSegment(start=(0.0, 0.0), end=(4.0, 0.0))
     right = LineSegment(start=(4.0, 0.0), end=(4.0, 4.0))

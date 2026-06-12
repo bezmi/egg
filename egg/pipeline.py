@@ -160,6 +160,7 @@ def generate_steps(
                 delta0_factor=delta0_factor,
                 shrink=untangle_shrink,
                 max_outer=max_outer,
+                device=device,
                 margin=margin)
             _sync(grid, X_out)
             yield ("untangle", {"min_det": md, "converged": md > margin,
@@ -197,9 +198,11 @@ def generate_steps(
     project_nodes(grid, grid.dof_constraints)
 
     # Terminal summary AFTER the closing boundary snap, so the reported/plotted
-    # final numbers reflect the snapped mesh.
+    # final numbers reflect the snapped mesh. Energy is scored on the SAME
+    # context TMOP optimised (tmop_ctx) — for a BL/anisotropic target the
+    # isotropic stencil reports a different (higher) objective on the same mesh.
     yield ("final", {"min_det": grid_min_det(grid.global_nodes, es),
-                     "energy": _energy(grid, es)})
+                     "energy": _energy(grid, tmop_ctx.energy_stencil)})
 
 
 def _fmt_info(info: dict) -> str:
