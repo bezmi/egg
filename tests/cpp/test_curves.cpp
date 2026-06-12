@@ -208,3 +208,89 @@ static const suite<"bspline"> bspline_suite = [] {
                          expref[1]);
     };
 };
+
+static const suite<"composite"> composite_suite = [] {
+    // Pack one segment record [tag, params(kParamPad)] into the arena.
+    constexpr auto push_rec =
+      [](std::vector<double>& arena, Tag tag, std::initializer_list<double> params) {
+          arena.push_back(static_cast<double>(tag));
+          std::size_t n = 0;
+          for (const double v : params) {
+              arena.push_back(v);
+              ++n;
+          }
+          for (; n < kParamPad; ++n) { arena.push_back(0.0); }
+      };
+
+    // L-shaped path: (0,0)->(1,0) then (1,0)->(1,1).
+    constexpr auto make_L = [push_rec](std::vector<double>& arena) {
+        push_rec(arena, TAG_LINESEG, {0.0, 0.0, 1.0, 0.0});
+        push_rec(arena, TAG_LINESEG, {1.0, 0.0, 1.0, 1.0});
+        return CompositePath {.n_segs = 2,
+                              .recs = {arena.data(), arena.size()},
+                              .arena = arena.data()};
+    };
+
+    "nearest-segment selection picks the right sub-chart"_test = [make_L] {
+        std::vector<double> arena;
+        const CompositePath path = make_L(arena);
+        const PtN<2> a = path.project({0.4, -0.5});
+        expect(close(a[0], 0.4) && close(a[1], 0.0)) << std::format("({},{})", a[0], a[1]);
+        const PtN<2> b = path.project({1.5, 0.6});
+        expect(close(b[0], 1.0) && close(b[1], 0.6)) << std::format("({},{})", b[0], b[1]);
+    };
+
+    "tangent is the matched segment's"_test = [make_L] {
+        std::vector<double> arena;
+        const CompositePath path = make_L(arena);
+        const VecN<2> t0 = path.tangent_basis({0.4, -0.5})[0];
+        expect(close(t0[0], 1.0) && close(t0[1], 0.0)) << "horizontal segment tangent";
+        const VecN<2> t1 = path.tangent_basis({1.5, 0.6})[0];
+        expect(close(t1[0], 0.0) && close(t1[1], 1.0)) << "vertical segment tangent";
+    };
+
+    "interior joint stays slidable (eff_tdim == 1)"_test = [make_L] {
+        std::vector<double> arena;
+        const CompositePath path = make_L(arena);
+        // Outside the corner: both segments clamp to the joint (1,0).
+        const auto f = path.project_frame({1.4, -0.5});
+        expect(close(f.pos[0], 1.0) && close(f.pos[1], 0.0))
+          << std::format("joint ({},{})", f.pos[0], f.pos[1]);
+        expect(f.eff_tdim == 1_i);
+    };
+
+    "mixed segment types: line + circular arc"_test = [push_rec] {
+        // Line (0,0)->(1,0), then a quarter arc centred at (1,1), radius 1,
+        // from angle -pi/2 (point (1,0)) to 0 (point (2,1)).
+        std::vector<double> arena;
+        push_rec(arena, TAG_LINESEG, {0.0, 0.0, 1.0, 0.0});
+        push_rec(arena, TAG_CIRCLEARC, {1.0, 1.0, 1.0, -std::numbers::pi / 2, 0.0, 0.0});
+        const CompositePath path {.n_segs = 2,
+                                  .recs = {arena.data(), arena.size()},
+                                  .arena = arena.data()};
+        // Query near the arc: radially projects onto the circle.
+        const PtN<2> q {2.5, 0.0};
+        const PtN<2> pr = path.project(q);
+        const double rr = std::hypot(pr[0] - 1.0, pr[1] - 1.0);
+        expect(close(rr, 1.0)) << std::format("on-arc radius {}", rr);
+        // Query near the line.
+        const PtN<2> pl = path.project({0.3, 0.2});
+        expect(close(pl[0], 0.3) && close(pl[1], 0.0));
+    };
+
+    "make_entity decodes the composite blob from the arena"_test = [push_rec] {
+        std::vector<double> arena;
+        arena.push_back(99.0);  // padding so rec_off != 0
+        const auto rec_off = arena.size();
+        push_rec(arena, TAG_LINESEG, {0.0, 0.0, 1.0, 0.0});
+        push_rec(arena, TAG_LINESEG, {1.0, 0.0, 1.0, 1.0});
+
+        std::array<double, kParamPad> blob {};
+        blob[0] = 2.0;
+        blob[1] = static_cast<double>(rec_off);
+        const auto ent = make_entity(TAG_COMPOSITE, blob.data(), arena.data());
+        const PtN<2> q {1.5, 0.6};
+        const PtN<2> pr = std::visit([&](const auto& e) { return e.project(q); }, ent);
+        expect(close(pr[0], 1.0) && close(pr[1], 0.6)) << std::format("({},{})", pr[0], pr[1]);
+    };
+};

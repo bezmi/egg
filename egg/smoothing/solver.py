@@ -75,6 +75,10 @@ class SweepContext:
     colour_P_groups: dict[tuple[int, int], list[int]]
     dof_constraint_tags: np.ndarray  # (M,) int32 entity type tag per DOF
     dof_constraint_params: np.ndarray  # (M, PARAM_PAD_SIZE) float64 per DOF
+    # Variable-length entity data (B-spline knots/nets, composite-path segment
+    # records); offsets in dof_constraint_params index into this. Empty when
+    # only fixed-size entities are present.
+    entity_arena: np.ndarray = None  # (A,) float64
     # Lazily-built, position-independent stacked patch arrays per (colour, P) group.
     # Position-independent (indices/W_inv/J/role), so cached once and reused across
     # all sweeps. Populated on first sweep.
@@ -255,8 +259,9 @@ def build_sweep_context(
 
     dof_constraint_tags = np.zeros(M, dtype=np.int32)
     dof_constraint_params = np.zeros((M, PARAM_PAD_SIZE), dtype=np.float64)
+    arena: list[float] = []
     for dof_idx, entity in grid.dof_constraints.items():
-        tag, params = encode_entity(entity, d=d)
+        tag, params = encode_entity(entity, d=d, arena=arena)
         dof_constraint_tags[dof_idx] = tag
         dof_constraint_params[dof_idx] = params
 
@@ -264,6 +269,7 @@ def build_sweep_context(
         dof_to_cells, dof_to_locals, w_inv, dof_patches, energy_stencil,
         dof_colours, dof_patch_sizes, colour_P_groups,
         dof_constraint_tags, dof_constraint_params,
+        np.asarray(arena, dtype=np.float64),
     )
 
 
