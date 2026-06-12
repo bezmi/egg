@@ -273,6 +273,34 @@ def _draw_sections(axes, X, sec_edges, title=""):
         ax_plot.set_aspect("equal")
 
 
+def _draw_wire3d(ax, X, edges, title=""):
+    """Full 3D wireframe (all hex edges), dome-example style."""
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
+
+    ax.cla()
+    segs = X[np.asarray(edges)]  # (E, 2, 3)
+    ax.add_collection3d(Line3DCollection(segs, colors="b", linewidths=0.25))
+    ax.set_xlim(-1, 1)
+    ax.set_ylim(-1, 1)
+    ax.set_zlim(-1, 1)
+    ax.set_title(title)
+    ax.set_box_aspect((1, 1, 1))
+
+
+def _make_axes(plot3d):
+    """Figure with the two section panes (+ an optional 3D pane)."""
+    import matplotlib.pyplot as plt
+
+    if plot3d:
+        fig = plt.figure(figsize=(16, 5.5))
+        sec = [fig.add_subplot(1, 3, 1), fig.add_subplot(1, 3, 2)]
+        ax3d = fig.add_subplot(1, 3, 3, projection="3d")
+    else:
+        fig, sec = plt.subplots(1, 2, figsize=(11, 5.5))
+        ax3d = None
+    return fig, sec, ax3d
+
+
 def _plot_energy(energies, mindets):
     import matplotlib.pyplot as plt
 
@@ -304,6 +332,9 @@ def main():
                    help="matplotlib final XY/YZ section plots")
     p.add_argument("--plot-energy", action="store_true",
                    help="matplotlib energy + min-det convergence curves")
+    p.add_argument("--plot-3d", action="store_true",
+                   help="add a 3D wireframe pane to the live/final plots "
+                        "(dome-example style)")
     a = p.parse_args()
 
     print("=" * 56)
@@ -313,7 +344,8 @@ def main():
     X, blocks = build_grid(a.n, a.m, a.r0)
     tags, params, fixed = classify(X, a.r0)
     ctx = build_context(X, blocks, tags, params, fixed)
-    sections = section_edges(X, grid_edges(blocks))
+    edges = grid_edges(blocks)
+    sections = section_edges(X, edges)
     n_sphere = int((tags == TAG_SPHERE).sum())
     print(f"nodes={X.shape[0]} sphere={n_sphere} "
           f"plane={(tags == TAG_PLANE).sum()} edge={(tags == TAG_LINE3).sum()} "
@@ -322,13 +354,15 @@ def main():
     session = cpp_core.CppSweepSession(ctx, X.ravel(), device=a.device, dim=3)
     energies, mindets = [], []
 
-    live = None
+    live = live3d = None
     if a.plot_live:
         import matplotlib.pyplot as plt
 
         plt.ion()
-        fig, live = plt.subplots(1, 2, figsize=(11, 5.5))
+        fig, live, live3d = _make_axes(a.plot_3d)
         _draw_sections(live, X, sections, "sweep 0")
+        if live3d is not None:
+            _draw_wire3d(live3d, X, edges, "sweep 0")
         plt.pause(0.01)
 
     done = 0
@@ -343,8 +377,10 @@ def main():
         if live is not None:
             import matplotlib.pyplot as plt
 
-            _draw_sections(live, session.get_X().reshape(-1, 3), sections,
-                           f"sweep {done}")
+            X_cur = session.get_X().reshape(-1, 3)
+            _draw_sections(live, X_cur, sections, f"sweep {done}")
+            if live3d is not None:
+                _draw_wire3d(live3d, X_cur, edges, f"sweep {done}")
             plt.pause(0.01)
 
     if live is not None:
@@ -372,8 +408,10 @@ def main():
     if a.plot_grid:
         import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(1, 2, figsize=(11, 5.5))
+        fig, axes, ax3d = _make_axes(a.plot_3d)
         _draw_sections(axes, X_out, sections, "final")
+        if ax3d is not None:
+            _draw_wire3d(ax3d, X_out, edges, "final")
         plt.show()
     if a.plot_energy:
         _plot_energy(energies, mindets)
