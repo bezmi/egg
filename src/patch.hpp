@@ -46,6 +46,11 @@ template <int D> struct StencilSampleViewT {
 // exists, so D=2 stays bit-identical (a generic LU/cofactor is not). A is row-major.
 template <int D> inline double det(const MatN<D>& A);
 template <> inline double det<2>(const MatN<2>& A) { return (A[0] * A[3]) - (A[1] * A[2]); }
+template <> inline double det<3>(const MatN<3>& A)
+{
+    return (A[0] * ((A[4] * A[8]) - (A[5] * A[7]))) - (A[1] * ((A[3] * A[8]) - (A[5] * A[6]))) +
+           (A[2] * ((A[3] * A[7]) - (A[4] * A[6])));
+}
 
 // The single A→T→detA site: vec(T) and det(A) from a corner + its D axis-neighbours,
 // the per-axis scales s[k], and W_inv (row-major). A[:,k] = s[k]·(nbr[k]−corner),

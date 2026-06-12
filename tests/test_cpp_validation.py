@@ -108,14 +108,13 @@ def test_out_of_range_energy_stencil_index_raises():
         cpp_core.cpp_sweep(bad, X_flat, 1, device="cpu")
 
 
-def test_dim3_raises_not_implemented():
-    """The runtime-dispatch scaffold: dim=3 raises a clean RuntimeError
-    ("3D ... not yet implemented") — proving the d-dispatch is wired without
-    needing the Phase 2 3D math."""
+def test_dim3_rejects_2d_shaped_context():
+    """dim=3 is a real dispatch now; feeding it a d=2-shaped context must fail
+    the pre-kernel validation (shape mismatch), not reach the device."""
     from egg._cpp import cpp_core
 
     ctx_arrays, X_flat = _valid_inputs()
-    with pytest.raises(RuntimeError, match="not yet implemented"):
+    with pytest.raises(ValueError):
         cpp_core.cpp_sweep(ctx_arrays, X_flat, 1, device="cpu", dim=3)
 
 

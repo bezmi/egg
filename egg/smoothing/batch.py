@@ -96,6 +96,29 @@ def _hess_T(T):
     )
 
 
+def make_chain_J_nd(S, W_inv):
+    """Constant J = d vec(T)/d coords per sample, any d; shape (P, d², d(d+1)).
+
+    Generalizes :func:`make_chain_J` to arbitrary spatial dimension.
+    ``S`` is the (P, d) per-axis sign array; ``W_inv`` is (P, d, d).
+    coords = [corner(d), nbr_0(d), ..., nbr_{d-1}(d)];
+    A[i, k] = s_k (nbr_k[i] - corner[i]); T = A @ W_inv (vec(T) row-major), so
+    J[i*d+c, j] = sum_k W_inv[k, c] * dA[i, k]/d coord[j].
+    """
+    S = np.asarray(S, dtype=np.float64)
+    W_inv = np.asarray(W_inv, dtype=np.float64)
+    P, d = S.shape
+    n_coords = d * (d + 1)
+    dA = np.zeros((P, d, d, n_coords))
+    for i in range(d):
+        for k in range(d):
+            dA[:, i, k, i] = -S[:, k]                 # d/d corner[i]
+            dA[:, i, k, (k + 1) * d + i] = S[:, k]    # d/d nbr_k[i]
+    # J[p, i*d+c, j] = sum_k W_inv[p, k, c] dA[p, i, k, j]
+    J = np.einsum("pkc,pikj->picj", W_inv, dA).reshape(P, d * d, n_coords)
+    return J
+
+
 def make_chain_J(s0, s1, W_inv):
     """Precompute constant J = d vec(T)/d coords per sample, shape (P, 4, 6).
 
