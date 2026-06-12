@@ -245,15 +245,30 @@ def grid_edges(blocks):
     return sorted(edges)
 
 
-def _draw_sections(axes, X, edges, title="", tol=1e-6):
-    """Planar sections: XY (z=0) and YZ (x=0) edge plots."""
-    for ax_plot, (plane_ax, keep, name) in zip(
-            axes, [(2, (0, 1), "XY (z=0)"), (0, (1, 2), "YZ (x=0)")]):
+_SECTIONS = [(2, (0, 1), "XY (z=0)"), (0, (1, 2), "YZ (x=0)")]
+
+
+def section_edges(X0, edges, tol=1e-6):
+    """Per-section edge lists, selected ONCE from the initial lattice.
+
+    Nodes sit exactly on the z=0 / x=0 symmetry planes only in the initial
+    grid; smoothing moves them off by round-off, so membership must be frozen
+    here and the live plot just re-reads their current coordinates.
+    """
+    out = []
+    for plane_ax, _keep, _name in _SECTIONS:
+        out.append([(u, v) for u, v in edges
+                    if abs(X0[u][plane_ax]) < tol and abs(X0[v][plane_ax]) < tol])
+    return out
+
+
+def _draw_sections(axes, X, sec_edges, title=""):
+    """Planar sections: XY (z=0) and YZ (x=0) edge plots (in-plane coords)."""
+    for ax_plot, (plane_ax, keep, name), sel in zip(axes, _SECTIONS, sec_edges):
         ax_plot.cla()
-        for u, v in edges:
-            if abs(X[u][plane_ax]) < tol and abs(X[v][plane_ax]) < tol:
-                ax_plot.plot([X[u][keep[0]], X[v][keep[0]]],
-                             [X[u][keep[1]], X[v][keep[1]]], "b-", lw=0.5)
+        for u, v in sel:
+            ax_plot.plot([X[u][keep[0]], X[v][keep[0]]],
+                         [X[u][keep[1]], X[v][keep[1]]], "b-", lw=0.5)
         ax_plot.set_title(f"{name} {title}")
         ax_plot.set_aspect("equal")
 
@@ -298,7 +313,7 @@ def main():
     X, blocks = build_grid(a.n, a.m, a.r0)
     tags, params, fixed = classify(X, a.r0)
     ctx = build_context(X, blocks, tags, params, fixed)
-    edges = grid_edges(blocks)
+    sections = section_edges(X, grid_edges(blocks))
     n_sphere = int((tags == TAG_SPHERE).sum())
     print(f"nodes={X.shape[0]} sphere={n_sphere} "
           f"plane={(tags == TAG_PLANE).sum()} edge={(tags == TAG_LINE3).sum()} "
@@ -313,7 +328,7 @@ def main():
 
         plt.ion()
         fig, live = plt.subplots(1, 2, figsize=(11, 5.5))
-        _draw_sections(live, X, edges, "sweep 0")
+        _draw_sections(live, X, sections, "sweep 0")
         plt.pause(0.01)
 
     done = 0
@@ -328,7 +343,7 @@ def main():
         if live is not None:
             import matplotlib.pyplot as plt
 
-            _draw_sections(live, session.get_X().reshape(-1, 3), edges,
+            _draw_sections(live, session.get_X().reshape(-1, 3), sections,
                            f"sweep {done}")
             plt.pause(0.01)
 
@@ -358,7 +373,7 @@ def main():
         import matplotlib.pyplot as plt
 
         fig, axes = plt.subplots(1, 2, figsize=(11, 5.5))
-        _draw_sections(axes, X_out, edges, "final")
+        _draw_sections(axes, X_out, sections, "final")
         plt.show()
     if a.plot_energy:
         _plot_energy(energies, mindets)
