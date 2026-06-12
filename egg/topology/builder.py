@@ -30,6 +30,7 @@ class TopologyBuilder:
         # id(entity) -> BoundaryLayerTarget kwargs
         self._boundary_layer_specs: dict[int, dict] = {}
         self._bl_entities: dict[int, Any] = {}
+        self._boundary_tags: dict[str, list[FaceSpec]] = {}
 
     def add_corner(
         self, name: str, position: Any, *, fixed: bool = True
@@ -139,6 +140,34 @@ class TopologyBuilder:
         )
         return self
 
+    def tag_boundary(
+        self,
+        name: str,
+        block_name: str,
+        axis: int,
+        side: int,
+    ) -> "TopologyBuilder":
+        """Tag a block face with a named boundary marker (e.g. for export).
+
+        Several faces may carry the same tag; exporters group them into one
+        marker (an SU2 ``MARKER_TAG``, say) for boundary-condition assignment.
+
+        Parameters
+        ----------
+        name : str
+            Marker name, e.g. ``"inlet"`` or ``"wall"``.
+        block_name : str
+        axis : int
+        side : int
+            0 = low side, 1 = high side.
+        """
+        if block_name not in self._block_specs:
+            raise ValueError(f"tag_boundary() references unknown block '{block_name}'")
+        self._boundary_tags.setdefault(name, []).append(
+            FaceSpec(block_name, axis, side)
+        )
+        return self
+
     def set_boundary_layer(
         self,
         entity: Any,
@@ -172,4 +201,5 @@ class TopologyBuilder:
             connections=self._connections,
             associations=self._associations,
             boundary_layer_specs=self._boundary_layer_specs,
+            boundary_tags=self._boundary_tags,
         )

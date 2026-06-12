@@ -123,6 +123,7 @@ class BlockTopology:
         connections: list[InterfaceConnection],
         associations: list[Association],
         boundary_layer_specs: dict | None = None,
+        boundary_tags: dict[str, list[FaceSpec]] | None = None,
     ):
         self.d = d
         self.corners = dict(corners)
@@ -131,9 +132,14 @@ class BlockTopology:
         self.associations = list(associations)
         # entity-id -> dict of BoundaryLayerTarget kwargs (first_height, growth, …)
         self.boundary_layer_specs = dict(boundary_layer_specs or {})
+        # marker name -> block faces carrying that boundary-condition tag
+        self.boundary_tags: dict[str, list[FaceSpec]] = {
+            name: list(faces) for name, faces in (boundary_tags or {}).items()
+        }
         self.singularities: list[Singularity] = []
 
         self._validate()
+        self._validate_boundary_tags()
         self._resolve_orientations()
         self.grid = self._build_dof_map()
         self.singularities = self._detect_singularities()
@@ -171,6 +177,27 @@ class BlockTopology:
                     f"{conn.face_b.block_name}[a={conn.face_b.axis},s={conn.face_b.side}]"
                     f": {names_a} vs {names_b}"
                 )
+
+    def _validate_boundary_tags(self) -> None:
+        """Check that boundary tags reference valid, non-interface block faces."""
+        shared = self._get_shared_face_set()
+        for name, faces in self.boundary_tags.items():
+            for face in faces:
+                if face.block_name not in self.block_specs:
+                    raise ValueError(
+                        f"Boundary tag '{name}' references unknown block "
+                        f"'{face.block_name}'"
+                    )
+                if not (0 <= face.axis < self.d) or face.side not in (0, 1):
+                    raise ValueError(
+                        f"Boundary tag '{name}' has invalid face "
+                        f"(axis={face.axis}, side={face.side}) for d={self.d}"
+                    )
+                if (face.block_name, face.axis, face.side) in shared:
+                    raise ValueError(
+                        f"Boundary tag '{name}' targets shared interface face "
+                        f"{face.block_name}[axis={face.axis}, side={face.side}]"
+                    )
 
     def _resolve_orientations(self) -> None:
         """For each InterfaceConnection, build the corner-name orientation dict."""
