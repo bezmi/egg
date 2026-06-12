@@ -53,8 +53,8 @@ std::size_t
     }
     if (buf.shape[0] % d != 0) {
         throw std::invalid_argument("X length must be a multiple of d (" + std::to_string(d) +
-                                    " coordinates per node); got " +
-                                    std::to_string(buf.shape[0]) + ".");
+                                    " coordinates per node); got " + std::to_string(buf.shape[0]) +
+                                    ".");
     }
     return static_cast<std::size_t>(buf.shape[0]) / d;
 }
@@ -150,7 +150,8 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
     }
     eqs(es.W_inv.size(), ns * egg::dim::wInv(D), "W_inv");
     check_index(es.gc, "gc", "energy_stencil");
-    for (int k = 0; k < D; ++k) check_index(es.gn[k], ("gn" + std::to_string(k)).c_str(), "energy_stencil");
+    for (int k = 0; k < D; ++k)
+        check_index(es.gn[k], ("gn" + std::to_string(k)).c_str(), "energy_stencil");
 }
 
 #ifndef NDEBUG
@@ -177,10 +178,10 @@ template <int D> void assert_group_race_free(const egg::SweepContextHostT<D>& ho
                     }
                 }
                 if (ref) {
-                    throw std::logic_error(
-                      "race-free colouring violated: group " + std::to_string(gi) + " DOF " +
-                      std::to_string(self) + " patch references concurrently-moved DOF " +
-                      std::to_string(culprit));
+                    throw std::logic_error("race-free colouring violated: group " +
+                                           std::to_string(gi) + " DOF " + std::to_string(self) +
+                                           " patch references concurrently-moved DOF " +
+                                           std::to_string(culprit));
                 }
             }
         }
@@ -236,6 +237,9 @@ egg::SweepContextHostT<D>
         sg.tag = extract_int(gd, "tag");
         sg.P_of = extract_int(gd, "P_of");
         sg.params = extract_double(gd, "params");
+        // Optional: variable-length entity data (B-spline nets/knots). Absent for
+        // contexts with only fixed-size entities.
+        if (gd.contains("arena")) { sg.arena = extract_double(gd, "arena"); }
 
         sg.total_samples = sg.gc.size();
 
@@ -274,8 +278,7 @@ egg::SweepContextHostT<D>
         throw std::runtime_error(
           "egg C++ core: 3D (d=3) sweep not yet implemented; only d=2 is built.");
     }
-    throw std::invalid_argument("egg C++ core: dimension must be 2 or 3, got " +
-                                std::to_string(d));
+    throw std::invalid_argument("egg C++ core: dimension must be 2 or 3, got " + std::to_string(d));
 }
 
 // Persistent device-resident session: the context is uploaded once and X is
@@ -298,8 +301,7 @@ class CppSweepSession
                     py::array_t<double, py::array::c_style | py::array::forcecast> X0,
                     const std::string& device,
                     int dim) :
-        dim_(require_supported_dim(dim)),
-        num_nodes_(checked_num_nodes(X0, dim_)),
+        dim_(require_supported_dim(dim)), num_nodes_(checked_num_nodes(X0, dim_)),
         exec_(select_queue(device), unpack_context<2>(ctx_arrays, X0.data(), num_nodes_))
     {
     }
@@ -380,14 +382,13 @@ PYBIND11_MODULE(cpp_core, m)
 
     m.def(
       "cpp_sweep",
-      [](
-        py::dict ctx_arrays,
-        py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
-        int n_sweeps,
-        const std::string& device,
-        const std::string& phase,
-        double delta,
-        int dim) -> std::tuple<py::array_t<double>, py::array_t<double>, py::array_t<double>> {
+      [](py::dict ctx_arrays,
+         py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
+         int n_sweeps,
+         const std::string& device,
+         const std::string& phase,
+         double delta,
+         int dim) -> std::tuple<py::array_t<double>, py::array_t<double>, py::array_t<double>> {
           // Runtime dispatch on the requested dimension. Phase 1 builds only d=2;
           // d=3 raises the clean scaffold error (Phase 2 flips this on).
           require_supported_dim(dim);

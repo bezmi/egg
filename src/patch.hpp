@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <array>
 #include <limits>
-#include <type_traits>
 #include <variant>
 
 namespace egg
@@ -46,7 +45,7 @@ template <int D> struct StencilSampleViewT {
 // det(A): generic *structure*, specialized *arithmetic* where a closed form
 // exists, so D=2 stays bit-identical (a generic LU/cofactor is not). A is row-major.
 template <int D> inline double det(const MatN<D>& A);
-template <> inline double det<2>(const MatN<2>& A) { return A[0] * A[3] - A[1] * A[2]; }
+template <> inline double det<2>(const MatN<2>& A) { return (A[0] * A[3]) - (A[1] * A[2]); }
 
 // The single A→T→detA site: vec(T) and det(A) from a corner + its D axis-neighbours,
 // the per-axis scales s[k], and W_inv (row-major). A[:,k] = s[k]·(nbr[k]−corner),
@@ -189,35 +188,65 @@ inline PatchResultT<D> patch_eval(const PatchViewT<D>& sv, const double* X, M ob
     return r;
 }
 
-// Newton step δ (D,) for one DOF, dispatched on a concrete (monomorphic) entity.
-// Free uses the full D×D Hessian; constrained entities reduce onto the entity
-// tangent basis (single column at D=2).
+/// @brief Newton step @f$ \delta @f$ (D,) for one DOF on a concrete (monomorphic) entity.
+///
+/// Interior DOFs (@c k==D) use the full @f$ D \times D @f$ Hessian; constrained
+/// entities reduce onto the entity tangent basis @f$ B @f$ (@f$ D \times k @f$):
+/// @f$ M = B^\top H B @f$, @f$ r = B^\top g @f$, solve @f$ M y = -r @f$, then
+/// @f$ \delta = B y @f$. The @c k==1 curve case is special-cased to `solve1x1`,
+/// reproducing the legacy single-column reduction bit-identically; the @c k==2
+/// surface arm (@c k==2) compiles now but is only exercised once 3D surface
+/// entities exist.
+/// @tparam D Embedding dimension.
+/// @tparam E Entity type (satisfies @ref GeometryEntity); supplies the tangent basis.
+/// @param g Gradient @f$ g @f$ at the DOF.
+/// @param H Hessian @f$ H @f$ at the DOF.
+/// @param pos Current node position (where the tangent basis is evaluated).
+/// @param entity The boundary entity constraining the DOF.
+/// @return The Newton step @f$ \delta @f$.
 template <int D, GeometryEntity E>
 inline VecN<D> newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& pos, const E& entity)
 {
-    if constexpr (std::is_same_v<E, Free>) {
+    constexpr int k = E::tdim;  // Free: k==D; surface: k==D-1; curve: k==1
+    if constexpr (k == D) {
         static_cast<void>(pos);
         static_cast<void>(entity);
-        return solveNxN<D>(H, g);
-        // TODO: at the moment, this assume 1D, but in a 3D grid, projecting on to a surface
-        // gives us a tangent space that is 2D, so we have to allow for solving a 2x2 system
+        return solveNxN<D>(H, g);  // interior DOF, full d×d solve
     } else {
-        const PtN<D> b = entity.tangent(pos);  // (d, 1) column
-        // A_mat = bᵀ H b (scalar); rhs = bᵀ g (scalar).
-        double Hb[D];
-        for (int i = 0; i < D; ++i) {
-            double acc = 0.0;
-            for (int j = 0; j < D; ++j) { acc += H[(i * D) + j] * b[j]; }
-            Hb[i] = acc;
+        // Reduce onto the k tangent columns B (D×k): M = BᵀHB (k×k), r = Bᵀg (k).
+        // Solve M y = −r, then δ = B y. For k==1 this is exactly the legacy
+        // b·solve1x1(bᵀHb, bᵀg) path (bit-identical single-column reduction).
+        const std::array<PtN<D>, k> B = entity.tangent_basis(pos);
+        MatN<k> M {};
+        VecN<k> r {};
+        for (int a = 0; a < k; ++a) {
+            double Hb[D];
+            for (int i = 0; i < D; ++i) {
+                double s = 0.0;
+                for (int j = 0; j < D; ++j) { s += H[(i * D) + j] * B[a][j]; }
+                Hb[i] = s;
+            }
+            for (int bcol = 0; bcol < k; ++bcol) {
+                double s = 0.0;
+                for (int i = 0; i < D; ++i) { s += B[bcol][i] * Hb[i]; }
+                M[(a * k) + bcol] = s;
+            }
+            double s = 0.0;
+            for (int i = 0; i < D; ++i) { s += B[a][i] * g[i]; }
+            r[a] = s;
         }
-        double A = 0.0, rhs = 0.0;
-        for (int i = 0; i < D; ++i) {
-            A += b[i] * Hb[i];
-            rhs += b[i] * g[i];
+        VecN<k> y;
+        if constexpr (k == 1) {
+            y = VecN<1> {solve1x1(M[0], r[0])};  // -r/M with fallback (legacy path)
+        } else {
+            y = solveNxN<k>(M, r);
         }
-        const double step = solve1x1(A, rhs);  // -rhs/A with fallback
-        VecN<D> d;
-        for (int i = 0; i < D; ++i) { d[i] = b[i] * step; }
+        VecN<D> d {};
+        for (int i = 0; i < D; ++i) {
+            double s = 0.0;
+            for (int a = 0; a < k; ++a) { s += B[a][i] * y[a]; }
+            d[i] = s;
+        }
         return d;
     }
 }

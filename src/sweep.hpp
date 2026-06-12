@@ -37,6 +37,7 @@ template <int D> struct SweepGroupHostT {
     std::vector<int> P_of;           // [ndof]  patch size per DOF
     std::vector<int> sample_offset;  // [ndof]  exclusive prefix sum of P_of
     std::vector<double> params;      // [ndof * kParamPad]
+    std::vector<double> arena;       // variable-length data (B-spline nets/knots); may be empty
 };
 
 template <int D> struct EnergyStencilHostT {
@@ -63,6 +64,7 @@ template <int D> struct GroupViewT {
     View1<const double> J;                               // [total_samples * jSize]
     View1<const int> dof_idx, tag, P_of, sample_offset;  // [ndof]
     View1<const double> params;                          // [ndof * kParamPad]
+    View1<const double> arena;                           // variable-length entity data
 
     // PatchViewT over DOF d's contiguous ragged slice
     // [sample_offset[d], sample_offset[d] + P_of[d]).
@@ -115,6 +117,7 @@ template <int D> class SweepDeviceContextT
             dg.P_of = {q, g.P_of};
             dg.sample_offset = {q, g.sample_offset};
             dg.params = {q, g.params};
+            dg.arena = {q, g.arena};
             groups_.push_back(std::move(dg));
         }
         const auto& es = host.energy_stencil;
@@ -149,6 +152,7 @@ template <int D> class SweepDeviceContextT
         UsmBuffer<double> W_inv, J;
         UsmBuffer<int> dof_idx, tag, P_of, sample_offset;
         UsmBuffer<double> params;
+        UsmBuffer<double> arena;
 
         GroupViewT<D> view() const
         {
@@ -168,6 +172,7 @@ template <int D> class SweepDeviceContextT
             gv.P_of = View1<const int> {P_of.data(), ndof};
             gv.sample_offset = View1<const int> {sample_offset.data(), ndof};
             gv.params = View1<const double> {params.data(), ndof * kParamPad};
+            gv.arena = View1<const double> {arena.data(), arena.size()};
             return gv;
         }
     };
@@ -212,6 +217,7 @@ inline void sweep_group_kernel(sycl::queue& q, const GroupViewT<D>& g, double* X
         const int dof = g.dof_idx[d];
         const int tag = g.tag[d];
         const double* params = g.params.data_handle() + d * kParamPad;
+        const double* arena = g.arena.data_handle();
 
         // 1. patch_eval → (grad, hess, e0).
         const PatchResultT<D> r = patch_eval<D>(pv, X, objective);
@@ -237,7 +243,7 @@ inline void sweep_group_kernel(sycl::queue& q, const GroupViewT<D>& g, double* X
                   PtN<D> raw;
                   for (int k = 0; k < D; ++k) { raw[k] = pos[k] + alpha * delta[k]; }
                   PtN<D> trial;
-                  if constexpr (std::is_same_v<E, Free>) {
+                  if constexpr (std::is_same_v<E, Free<D>>) {
                       trial = raw;
                   } else {
                       trial = ent.project(raw);
@@ -279,7 +285,7 @@ inline void sweep_group_kernel(sycl::queue& q, const GroupViewT<D>& g, double* X
               // 4. Scatter (race-free within colour).
               store_pt<D>(X, dof, cur);
           },
-          make_entity<D>(tag, params));
+          make_entity<D>(tag, params, arena));
     });
 }
 
