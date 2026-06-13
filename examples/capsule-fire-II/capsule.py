@@ -261,6 +261,13 @@ def main():
         drain(steps, mindet_history=mindet_history, energy_history=energy_history)
         print(f"\nFinal min det A: {mindet_history[-1]:.4e}")
 
+    if a.bl_first_height > 0.0:
+        from egg.smoothing.respace import enforce_boundary_layer_spacing
+
+        enforce_boundary_layer_spacing(grid, topo)
+        print("Enforced exact boundary-layer spacing on the wall")
+
+    if not a.plot_live:
         if a.plot_grid:
             from egg.io.visualize import plot_grid
 
