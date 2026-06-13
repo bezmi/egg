@@ -21,3 +21,6 @@ compile_commands.json
 # Local-only state (not part of the project)
 .bash_history
 .claude/
+
+# Persistent devcontainer $HOME (shell state + your personal dotfiles)
+.devcontainer/.home/

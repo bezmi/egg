@@ -9,21 +9,29 @@
     }
   },
 
-  // Rootless Podman: keep host UID/GID so files written in /workspace stay
+  // Rootless Podman: keep host UID/GID so files written in /egg-workspace stay
   // owned by you. VS Code must be told to use podman via the user/global
   // setting  "dev.containers.dockerPath": "podman"  (not settable here).
   "runArgs": [
     "--userns=keep-id"
   ],
 
+  // Mount the repo at /egg-workspace (matches podman-run.sh and the image WORKDIR).
+  "workspaceMount": "source=${localWorkspaceFolder},target=/egg-workspace,type=bind",
+  "workspaceFolder": "/egg-workspace",
+
   // Standard editable build: uv sync drives scikit-build-core, which compiles
   // the C++ extension (cpp_core) against the image's AdaptiveCpp (found via
   // CMAKE_PREFIX_PATH=/opt/adaptivecpp) and installs egg editable. C++ edits
-  // recompile on import (editable.rebuild). See DEVELOPING.md.
-  "postCreateCommand": "uv sync",
+  // recompile on import (editable.rebuild). See DEVELOPING.md. The mkdir seeds
+  // the persistent git-ignored $HOME (see containerEnv below).
+  "postCreateCommand": "seed-home; uv sync; egg-prewarm",
 
+  // HOME is a persistent, git-ignored dir inside the workspace (.devcontainer/
+  // .home): keeps shell state out of the repo root and lets you drop your own
+  // dotfiles there (.zshrc, .config/starship.toml, ...) to customise the shell.
   "containerEnv": {
-    "EGG_BACKEND": "cpp"
+    "HOME": "${containerWorkspaceFolder}/.devcontainer/.home"
   },
 
   "customizations": {

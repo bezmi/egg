@@ -35,7 +35,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
     ROCM_PATH=/opt/rocm \
     CUDA_HOME=/usr/local/cuda \
-    PATH=/opt/adaptivecpp/bin:/usr/lib/llvm-21/bin:/opt/rocm/bin:/usr/local/cuda/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/opt/adaptivecpp/bin:/usr/lib/llvm-21/bin:/opt/rocm/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
 
 # trixie-backports for the LLVM 21 toolchain + cmake (+ rocm-podman-support).
 RUN echo 'deb http://deb.debian.org/debian trixie-backports main contrib non-free non-free-firmware' \
@@ -108,12 +108,95 @@ RUN git clone --filter=blob:none \
     && cmake --build /tmp/acpp/build --target install \
     && rm -rf /tmp/acpp
 
-# uv (pinned) — manages the Python 3.13 venv + locked project deps.
-RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh
+# uv (pinned) — manages the Python 3.13 venv + locked project deps. Installed to
+# /usr/local/bin (a world-accessible PATH dir) rather than the default
+# ~/.local/bin: rootless keep-id runs the container as the host user, who can't
+# traverse root's 0700 home, so a uv under /root/.local/bin is invisible to them.
+RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh \
+      | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh
 
-ENV EGG_BACKEND=jax \
-    UV_LINK_MODE=copy \
-    CMAKE_PREFIX_PATH=/opt/adaptivecpp
+# Interactive shell: zsh + starship, plus the vim and neovim editors. Shell
+# defaults are baked as templates and seeded into $HOME on first run (by
+# seed-home, called from podman-run.sh / postCreateCommand). $HOME is the
+# persistent .devcontainer/.home, so the seeded files land there: visible and
+# editable.
+#   /etc/skel/.zshrc          Default .zshrc: Debian's maintainer-recommended
+#                             config (what zsh-newuser-install writes on first
+#                             run) plus `eval "$(starship init zsh)"`.
+#   seed-home                 Copies /etc/skel/.zshrc to $HOME/.zshrc and writes
+#                             the starship `pure` preset to
+#                             $HOME/.config/starship.toml (starship's default
+#                             config path). Only fills in files that are missing.
+# Seeding a .zshrc also stops zsh's setup wizard (it prompts on an empty $HOME).
+# Editing/removing the seeded files gives full control: drop the starship line to
+# turn it off, or edit starship.toml to restyle the prompt.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends zsh starship vim neovim \
+    && rm -rf /var/lib/apt/lists/* \
+    && sed -e '/^# Set up the prompt$/d' \
+           -e '/^autoload -Uz promptinit$/d' \
+           -e '/^promptinit$/d' \
+           -e '/^prompt adam1$/d' \
+           /etc/zsh/newuser.zshrc.recommended > /etc/skel/.zshrc \
+    && printf '%s\n' '' \
+        '# Starship prompt. (The recommended config'\''s adam1 prompt theme is' \
+        '# stripped above: starship cannot take over an active prompt theme.)' \
+        'eval "$(starship init zsh)"' \
+        >> /etc/skel/.zshrc \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        '# Seed the persistent $HOME with default dotfiles on first use.' \
+        'mkdir -p "$HOME/.config"' \
+        '[ -e "$HOME/.zshrc" ] || cp /etc/skel/.zshrc "$HOME/.zshrc"' \
+        '[ -e "$HOME/.config/starship.toml" ] || starship preset pure-preset -o "$HOME/.config/starship.toml"' \
+        > /usr/local/bin/seed-home \
+    && chmod +x /usr/local/bin/seed-home
 
-WORKDIR /workspace
-CMD ["/bin/bash"]
+# GUI examples (PyVista/VTK + matplotlib). OpenGL via mesa: the DRI package holds
+# BOTH the hardware driver (radeonsi etc.) and the software fallback (llvmpipe),
+# so the same image renders on the host GPU when /dev/dri is shared (podman-run.sh)
+# and on llvmpipe otherwise. The kernel driver stays on the host. Also: GLX/EGL,
+# the X11 + Wayland client libs VTK/Tk dlopen, and Tk for matplotlib's backend.
+# mesa-utils ships glxinfo/glxgears to verify the renderer (hardware vs llvmpipe).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1 libglx-mesa0 libgl1-mesa-dri libglu1-mesa \
+        libegl1 libegl-mesa0 libgbm1 libgles2 \
+        libx11-6 libxext6 libxrender1 libxt6 libxcursor1 libxi6 \
+        libxrandr2 libxfixes3 libxss1 libsm6 libice6 libxkbcommon0 \
+        libwayland-client0 libwayland-egl1 libwayland-cursor0 \
+        python3-tk mesa-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# egg-prewarm: compile AdaptiveCpp's SSCP kernels into its on-disk JIT cache
+# before any GUI runs. The generic-SSCP JIT uses libLLVM in-process; if it fires
+# while mesa's libLLVM is loaded for rendering (--plot-live), the two collide and
+# segfault. Warming up front (no mesa loaded) sidesteps it. Called at container
+# start (podman-run.sh / postCreateCommand); re-runs only when cpp_core changes.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    '# Pre-warm the AdaptiveCpp JIT cache before any GUI (avoids a libLLVM clash' \
+    '# with mesa during --plot-live). Re-runs when the C++ extension changes.' \
+    'so=$(ls -t .venv/lib/python3.13/site-packages/egg/_cpp/cpp_core*.so 2>/dev/null | head -n1)' \
+    '[ -n "$so" ] || exit 0' \
+    'stamp="$HOME/.egg-prewarm.stamp"' \
+    '# Skip only if already warmed and cpp_core has not changed since.' \
+    'if [ -e "$stamp" ] && [ ! "$so" -nt "$stamp" ]; then exit 0; fi' \
+    'echo ">> Pre-warming AdaptiveCpp JIT cache (one-time per build) ..."' \
+    'uv run examples/circles/untangle.py >/dev/null 2>&1 || true' \
+    'touch "$stamp"' \
+    > /usr/local/bin/egg-prewarm \
+    && chmod +x /usr/local/bin/egg-prewarm
+
+# Default the host C/C++ compiler to clang-21, matching the LLVM that acpp is
+# built with. One toolchain for the project's non-SYCL TUs and acpp's SYCL TUs:
+# consistent diagnostics/clang-tidy, and host<->device LTO possible. CMake reads
+# CC/CXX when it configures a fresh build dir (delete build/ to switch an old one).
+ENV UV_LINK_MODE=copy \
+    CMAKE_PREFIX_PATH=/opt/adaptivecpp \
+    CC=clang-21 \
+    CXX=clang++-21 \
+    SHELL=/usr/bin/zsh
+
+WORKDIR /egg-workspace
+CMD ["/bin/zsh"]
