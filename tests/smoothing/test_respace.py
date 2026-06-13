@@ -109,3 +109,18 @@ def test_enforce_noop_without_specs():
     before = grid.global_nodes.copy()
     enforce_boundary_layer_spacing(grid)
     assert np.array_equal(grid.global_nodes, before)
+
+
+def test_respace_line_oblique_uses_normal_distance():
+    """On a 45-degree line off a flat wall, layer heights are perpendicular."""
+    from egg.geometry.analytic2d import LineSegment
+
+    wall = LineSegment(np.array([-5.0, 0.0]), np.array([5.0, 0.0]))
+    t = np.linspace(0.0, 1.0, 31)
+    pts = np.column_stack([t, t])  # 45-degree straight line from the wall
+    new = _respace_line(pts, first_height=0.01, growth=1.2, n_layers=5,
+                        max_height=None, entity=wall)
+    heights = new[:, 1]  # perpendicular distance to the wall is just y
+    sp = np.diff(heights)
+    assert sp[0] == pytest.approx(0.01, rel=1e-9)
+    assert sp[1:5] / sp[:4] == pytest.approx(np.full(4, 1.2), rel=1e-9)

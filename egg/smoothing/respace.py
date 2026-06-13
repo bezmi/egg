@@ -51,15 +51,34 @@ def _solve_stretch_ratio(s0: float, n: int, length: float) -> float:
 
 
 def _respace_line(points: np.ndarray, first_height: float, growth: float,
-                  n_layers: int, max_height: float | None) -> np.ndarray:
+                  n_layers: int, max_height: float | None,
+                  entity=None) -> np.ndarray:
     """Re-sample one wall-normal polyline (wall first) to the geometric law.
 
-    Returns the new points; endpoints are preserved exactly.
+    With ``entity`` given, the law is enforced in perpendicular wall
+    distance: node ``k`` is placed where the line's distance to the wall
+    equals the cumulative layer height. Layers then sit at the same height
+    above the wall on every line, so oblique lines (e.g. along a domain
+    boundary that meets the wall at an angle) cannot lift or fan the
+    boundary layer. Without ``entity`` the law is applied to the line's own
+    arc length. Returns the new points; endpoints are preserved exactly.
     """
     seg = np.linalg.norm(np.diff(points, axis=0), axis=1)
     cum = np.concatenate([[0.0], np.cumsum(seg)])
-    total = cum[-1]
     n_cells = len(points) - 1
+
+    if entity is not None:
+        # Perpendicular wall distance at each original node, regularised to
+        # something strictly increasing so it is invertible against cum.
+        dist = np.array([
+            np.linalg.norm(p - np.asarray(entity.project(p))) for p in points
+        ])
+        dist[0] = 0.0
+        dist = np.maximum.accumulate(dist)
+        dist += np.arange(len(dist)) * 1e-15
+    else:
+        dist = cum
+    total = float(dist[-1])
 
     m = min(n_layers, n_cells - 1)
     spacings = first_height * growth ** np.arange(m)
@@ -70,17 +89,18 @@ def _respace_line(points: np.ndarray, first_height: float, growth: float,
         raise ValueError(
             "boundary-layer respacing: geometric layers "
             f"(height {s_geo:.3e}) do not fit in the block "
-            f"(line length {total:.3e}); reduce first_height/growth/n_layers")
+            f"(available height {total:.3e}); reduce "
+            "first_height/growth/n_layers")
 
     last = float(spacings[-1]) if m > 0 else first_height
     r = _solve_stretch_ratio(last, n_cells - m, total - s_geo)
     tail = last * r ** np.arange(1, n_cells - m + 1)
-    arc = np.concatenate([[0.0], np.cumsum(np.concatenate([spacings, tail]))])
-    arc[-1] = total
+    pos = np.concatenate([[0.0], np.cumsum(np.concatenate([spacings, tail]))])
+    pos[-1] = total
+    arc = np.interp(pos, dist, cum)
 
     new = np.empty_like(points)
-    new[:, 0] = np.interp(arc, cum, points[:, 0])
-    for c in range(1, points.shape[1]):
+    for c in range(points.shape[1]):
         new[:, c] = np.interp(arc, cum, points[:, c])
     new[0], new[-1] = points[0], points[-1]
     return new
@@ -144,4 +164,4 @@ def enforce_boundary_layer_spacing(grid, topology=None,
             pts = grid.global_nodes[dofs]
             grid.global_nodes[dofs] = _respace_line(
                 pts, spec["first_height"], spec["growth"],
-                spec["n_layers"], spec["max_height"])
+                spec["n_layers"], spec["max_height"], entity=assoc.entity)
