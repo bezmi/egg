@@ -112,57 +112,54 @@ def _smoothstep(t: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
-def _pinned_taper_width(grid, entity, flat: np.ndarray, p: int,
-                        k_max: int) -> int:
-    """Columns needed to absorb a pinned column's lateral lean.
-
-    Measures how far the pinned (domain-boundary) column drifts sideways
-    off its own wall normal within the orthogonalised layers, in units of
-    the local wall spacing — orthogonal columns closer than that would be
-    crossed by the boundary.
-    """
+def _boundary_shear_direction(grid, entity, flat: np.ndarray, p: int,
+                              n_layers: int) -> np.ndarray | None:
+    """Unit direction of the pinned (domain-boundary) column off the wall."""
     pts = grid.global_nodes[flat[:, p]]
-    foot = pts[0]
-    n_hat = np.asarray(entity.normal(np.asarray(entity.project(foot))),
-                       dtype=float)
-    rel = pts[1:k_max + 1] - foot
-    lateral = np.linalg.norm(
-        rel - np.outer(rel @ n_hat, n_hat), axis=1).max()
-    nb = 1 if p == 0 else flat.shape[1] - 2
-    spacing = np.linalg.norm(grid.global_nodes[flat[0, nb]] - foot)
-    if spacing <= 0:
-        return 1
-    return int(np.ceil(lateral / spacing)) + 1
+    k_ref = min(max(n_layers, 1), len(pts) - 1)
+    v = pts[k_ref] - pts[0]
+    norm = np.linalg.norm(v)
+    return v / norm if norm > 0 else None
 
 
 def _orthogonalise_columns(grid, entity, flat: np.ndarray,
                            pinned: list[bool], n_layers: int,
-                           done: set, scale: float = 1.0) -> None:
-    """Pull near-wall nodes onto each column's wall normal (blended).
+                           done: set, scale: float = 1.0,
+                           shear_taper: int = 0) -> None:
+    """Straighten near-wall columns, relaxing towards oblique boundaries.
 
     TMOP equilibrium lets wall-normal grid lines lean to follow oblique
     domain boundaries, fanning the boundary-layer columns near the wall's
     ends. This pass re-anchors each node at its already-enforced
-    perpendicular height but laterally on the wall normal through the
-    column's foot — full strength for the first ``n_layers`` layers,
-    fading to nothing by ``2·n_layers`` so the lean is absorbed above the
-    clustered region. ``pinned`` columns (those lying on a domain
-    boundary path) stay on their path, and the straightening tapers off
-    towards them over just enough columns to absorb the boundary's lean
-    without cells crossing it. ``scale`` uniformly weakens the pass (used
-    to back off if straightening would invert a cell).
+    perpendicular height, laterally on a straight ray through the
+    column's foot — the wall normal in the interior, blending into the
+    *boundary's own direction* over ``shear_taper`` columns next to a
+    ``pinned`` (domain-boundary) column. Near an oblique boundary the
+    cells therefore become uniformly sheared parallelograms that follow
+    it instead of fanning, while layer heights stay exact (the ray length
+    is rescaled by the shear angle).
+
+    Full strength for the first ``n_layers`` layers, fading to nothing by
+    ``2·n_layers`` so the lean above the clustered region stays with the
+    smoother. ``pinned`` columns stay on their boundary path. ``scale``
+    uniformly weakens the pass (used to back off if a cell would invert).
     """
     n_cols = flat.shape[1]
     k_max = min(2 * n_layers, flat.shape[0] - 1)
-    w_col = np.ones(n_cols)
-    for p in (0, n_cols - 1):
-        if not pinned[p]:
-            continue
-        taper = min(_pinned_taper_width(grid, entity, flat, p, k_max),
-                    max(n_cols // 2, 1))
-        d = np.abs(np.arange(n_cols) - p)
-        w_col = np.minimum(w_col, np.array(
-            [_smoothstep(di / taper) for di in d]))
+
+    # Per-column blend towards each pinned boundary's direction.
+    shear = [None] * n_cols  # (lambda, b_hat) of the nearest pinned side
+    if shear_taper > 0:
+        for p in (0, n_cols - 1):
+            if not pinned[p]:
+                continue
+            b_hat = _boundary_shear_direction(grid, entity, flat, p, n_layers)
+            if b_hat is None:
+                continue
+            for col in range(n_cols):
+                lam = 1.0 - _smoothstep(abs(col - p) / shear_taper)
+                if lam > 0 and (shear[col] is None or lam > shear[col][0]):
+                    shear[col] = (lam, b_hat)
 
     for col in range(n_cols):
         if pinned[col]:
@@ -178,14 +175,21 @@ def _orthogonalise_columns(grid, entity, flat: np.ndarray,
                            dtype=float)
         if np.dot(n_hat, pts[1] - foot) < 0:
             n_hat = -n_hat
+        d_hat = n_hat
+        if shear[col] is not None:
+            lam, b_hat = shear[col]
+            d_hat = (1.0 - lam) * n_hat + lam * b_hat
+            d_hat = d_hat / np.linalg.norm(d_hat)
+        # Stretch the ray so the perpendicular layer height stays exact.
+        stretch = 1.0 / max(float(np.dot(d_hat, n_hat)), 0.2)
         for k in range(1, k_max + 1):
             height = np.linalg.norm(
                 pts[k] - np.asarray(entity.project(pts[k])))
             w = 1.0 if k <= n_layers else \
                 1.0 - _smoothstep((k - n_layers) / max(n_layers, 1))
-            w *= w_col[col] * scale
+            w *= scale
             grid.global_nodes[dofs[k]] = (
-                w * (foot + height * n_hat) + (1.0 - w) * pts[k])
+                w * (foot + height * stretch * d_hat) + (1.0 - w) * pts[k])
 
 
 def _region_orientation(nodes: np.ndarray, k_max: int) -> int:
@@ -210,7 +214,8 @@ def _oriented_dof_lines(grid, topology, block_name: str, axis: int,
 
 
 def enforce_boundary_layer_spacing(grid, topology=None,
-                                   extend_through_neighbours: bool = True) -> None:
+                                   extend_through_neighbours: bool = True,
+                                   relax_boundary_normals: bool = True) -> None:
     """Exactly enforce recorded boundary-layer specs on ``grid`` (in place).
 
     @param grid      A (smoothed) MultiBlockGrid; ``grid.global_nodes`` is
@@ -223,6 +228,13 @@ def enforce_boundary_layer_spacing(grid, topology=None,
                      wall block (when one is glued there), so the stretch
                      tail relaxes over both blocks instead of compressing
                      against the first shared interface.
+    @param relax_boundary_normals
+                     Near a domain boundary that meets the wall obliquely,
+                     shear the straightened columns along the boundary's
+                     direction instead of forcing them onto the wall normal
+                     (heights stay exact). Off, columns stay wall-normal up
+                     to the boundary, which can fan or invert cells against
+                     an inward-leaning boundary.
     """
     topology = topology if topology is not None else grid.topology
     specs = getattr(topology, "boundary_layer_specs", {})
@@ -274,13 +286,15 @@ def enforce_boundary_layer_spacing(grid, topology=None,
             if _neighbour_across(topology, face.block_name, t_axis, 1) is None:
                 pinned[-1] = True
             k_max = min(2 * spec["n_layers"], flat.shape[0] - 1)
+            taper = max(3, spec["n_layers"]) if relax_boundary_normals else 0
             saved = grid.global_nodes[flat].copy()
             sign = _region_orientation(grid.global_nodes[flat], k_max)
             for attempt in range(4):
                 done_try = set(ortho_done)
                 _orthogonalise_columns(grid, assoc.entity, flat, pinned,
                                        spec["n_layers"], done_try,
-                                       scale=0.5 ** attempt)
+                                       scale=0.5 ** attempt,
+                                       shear_taper=taper)
                 new_sign = _region_orientation(grid.global_nodes[flat], k_max)
                 if sign == 0 or new_sign == sign:
                     ortho_done = done_try
