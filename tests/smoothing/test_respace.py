@@ -124,3 +124,24 @@ def test_respace_line_oblique_uses_normal_distance():
     sp = np.diff(heights)
     assert sp[0] == pytest.approx(0.01, rel=1e-9)
     assert sp[1:5] / sp[:4] == pytest.approx(np.full(4, 1.2), rel=1e-9)
+
+
+def test_enforce_straightens_columns_onto_wall_normal():
+    """Within the clustered layers, columns leave the wall orthogonally."""
+    topo, ents = build_circle_in_rectangle(rough=False)
+    topo.boundary_layer_specs = {id(ents["circle"]): dict(
+        first_height=0.004, growth=1.25, n_layers=3,
+        max_height=None, tangential_spacing=None)}
+    grid = topo.initialize_grid()
+    enforce_boundary_layer_spacing(grid)
+
+    circle = ents["circle"]
+    names = list(topo.block_specs.keys())
+    for blk in ("o_s", "o_e", "o_n", "o_w"):
+        nodes = grid.global_nodes[grid.block_dof_maps[names.index(blk)]]
+        for col in range(nodes.shape[0]):
+            foot = nodes[col, -1]
+            n_hat = np.asarray(circle.normal(circle.project(foot)))
+            v = nodes[col, -4] - foot  # node at layer 3
+            v = v / np.linalg.norm(v)
+            assert abs(np.cross(v, n_hat)) < 1e-9

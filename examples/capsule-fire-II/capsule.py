@@ -238,6 +238,19 @@ def main():
         untangle_direct=not a.plot_live,
     )
 
+    if a.bl_first_height > 0.0:
+        # Chain the exact respacing onto the pipeline so the live view's last
+        # frame (and any later plotting/export) reflects it.
+        from egg.smoothing.respace import enforce_boundary_layer_spacing
+
+        def _with_respace(inner):
+            yield from inner
+            enforce_boundary_layer_spacing(grid, topo)
+            yield ("respace", {"first_height": a.bl_first_height,
+                               "growth": a.bl_growth})
+
+        steps = _with_respace(steps)
+
     if a.plot_live:
         from egg.io.visualize import animate_pipeline
 
@@ -260,12 +273,6 @@ def main():
         mindet_history, energy_history = [], []
         drain(steps, mindet_history=mindet_history, energy_history=energy_history)
         print(f"\nFinal min det A: {mindet_history[-1]:.4e}")
-
-    if a.bl_first_height > 0.0:
-        from egg.smoothing.respace import enforce_boundary_layer_spacing
-
-        enforce_boundary_layer_spacing(grid, topo)
-        print("Enforced exact boundary-layer spacing on the wall")
 
     if not a.plot_live:
         if a.plot_grid:
