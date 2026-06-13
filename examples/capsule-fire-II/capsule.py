@@ -9,7 +9,10 @@ multiblock topology instead, and each cell of the net becomes an egg block.
 
 Boundary faces are associated with the gdtk paths (outer arc = inflow,
 capsule body = wall, stagnation line = symmetry, exit line = outflow) and
-tagged with those names for SU2 export.
+tagged with those names for SU2 export. One deviation from the gdtk case:
+the outflow is vertical rather than slanted, meeting the (horizontal)
+post-shoulder wall at a right angle so the boundary-layer cells stay
+orthogonal into that corner.
 
 Pipeline: TFI init → boundary snap → TMOP quality optimisation.
 
@@ -57,8 +60,12 @@ def build_paths():
 
     body = Polyline([Arc(ai, bi, oi), Arc(bi, ci, pi_), Line(ci, di)])
 
-    thetao = 1.5 * thetai
+    # The wall is horizontal after the shoulder, so a vertical outflow meets
+    # it at a right angle (the gdtk original slants it to 1.5*thetai, which
+    # forces sheared cells where it meets the wall). The outer arc ends
+    # directly above the wall's end point.
     ao = oi + Ro * Vector3(-1.0, 0.0)
+    thetao = math.acos((Ri - di.x) / Ro)
     do = oi + Ro * Vector3(-math.cos(thetao), math.sin(thetao))
 
     outer = Arc(ao, do, oi)
@@ -85,6 +92,12 @@ def build_capsule(res_i=20, res_j=20, bl_first_height=0.0, bl_growth=1.3):
     """3 x 12 block topology with the control points as block corners."""
     outer, body, south, north = build_paths()
     C = load_control_points(Path(__file__).parent / "capsule_ctrl_pts.vts")
+
+    # The VTS control net was generated for the original slanted outflow;
+    # move its last column onto the vertical outflow line (north: do -> di).
+    do, di = north.p0, north.p1
+    for i, r in enumerate((0.0, 0.25, 0.75, 1.0)):
+        C[i, -1] = (di.x, do.y + (di.y - do.y) * r)
 
     inflow = from_gdtk(outer)
     wall = from_gdtk(body)
