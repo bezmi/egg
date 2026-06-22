@@ -170,12 +170,13 @@ inline PatchResultT<D> patch_eval(const PatchViewT<D>& sv, const double* X, M ob
             }
             // HJb[a,j] = sum_b H[a,b] Jb[b,j].
             double HJb[kVT][D];
-            for (int a = 0; a < kVT; ++a)
+            for (int a = 0; a < kVT; ++a) {
                 for (int j = 0; j < D; ++j) {
                     double acc = 0.0;
                     for (int b = 0; b < kVT; ++b) { acc += H[(a * kVT) + b] * Jb[b][j]; }
                     HJb[a][j] = acc;
                 }
+            }
             for (int i = 0; i < D; ++i) {
                 for (int j = 0; j < D; ++j) {
                     double acc = 0.0;
