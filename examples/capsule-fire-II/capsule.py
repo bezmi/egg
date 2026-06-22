@@ -29,10 +29,8 @@ import re
 from pathlib import Path
 
 import numpy as np
-from gdtk.geom.path import Arc, Line, Polyline
-from gdtk.geom.vector3 import Vector3
 
-from egg.geometry.gdtk_adapter import from_gdtk
+from egg.geometry.frontend2d import Arc, Line, Polyline, Vector3
 from egg.pipeline import generate_steps, drain
 from egg.topology.builder import TopologyBuilder
 
@@ -99,10 +97,10 @@ def build_capsule(res_i=20, res_j=20, bl_first_height=0.0, bl_growth=1.3):
     for i, r in enumerate((0.0, 0.25, 0.75, 1.0)):
         C[i, -1] = (di.x, do.y + (di.y - do.y) * r)
 
-    inflow = from_gdtk(outer)
-    wall = from_gdtk(body)
-    symmetry = from_gdtk(south)
-    outflow = from_gdtk(north)
+    inflow = outer
+    wall = body
+    symmetry = south
+    outflow = north
 
     b = TopologyBuilder(d=2)
     for i in range(NCPI):
