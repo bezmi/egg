@@ -1,11 +1,12 @@
-"""Smooth blob in a rectangle, with geometry defined via gdtk paths.
+"""Smooth blob in a rectangle, with geometry defined via the egg 2D front-end.
 
 Same O-grid-in-rectangle topology as ``examples/circles/good-topo.py``, but the
-geometry is built with the gdtk ``geom`` module instead of the analytic
-primitives: the inner body is a closed gdtk ``Spline`` through points sampled
-from ``r(theta) = 0.8 + 0.12 sin(3 theta)`` (a wavy blob), converted by
-:func:`egg.geometry.gdtk_adapter.from_gdtk` into a ``CompositePath`` of cubic
-Bézier segments; the outer walls are gdtk ``Line`` paths.
+geometry is built with :mod:`egg.geometry.frontend2d` (a gdtk-style construction
+API that returns egg entities directly) instead of the analytic primitives: the
+inner body is a closed :class:`~egg.geometry.frontend2d.Spline` through points
+sampled from ``r(theta) = 0.8 + 0.12 sin(3 theta)`` (a wavy blob), produced as a
+``CompositePath`` of cubic Bézier segments; the outer walls are
+:class:`~egg.geometry.frontend2d.Line` segments.
 
 Pipeline: TFI init → boundary snap → TMOP quality optimisation.
 
@@ -18,28 +19,26 @@ Usage::
 import argparse
 
 import numpy as np
-from gdtk.geom.path import Line, Spline
-from gdtk.geom.vector3 import Vector3
 
-from egg.geometry.gdtk_adapter import from_gdtk
+from egg.geometry.frontend2d import Line, Spline, Vector3
 from egg.pipeline import generate_steps, drain
 from egg.topology.builder import TopologyBuilder
 
 
 def build_blob_in_rectangle():
-    """Blob-in-rectangle topology; geometry authored as gdtk paths."""
+    """Blob-in-rectangle topology; geometry authored via the egg 2D front-end."""
     # Inner body: closed cubic spline through a wavy-radius point ring.
     theta = np.linspace(0.0, 2.0 * np.pi, 17)[:-1]
     r = 0.8 + 0.12 * np.sin(3.0 * theta)
     ring = [Vector3(2.0 + ri * np.cos(th), 2.0 + ri * np.sin(th))
             for th, ri in zip(theta, r)]
-    blob = from_gdtk(Spline(ring, closed=True))
+    blob = Spline(ring, closed=True)
 
-    # Outer walls: gdtk Lines.
-    bottom = from_gdtk(Line(Vector3(0, 0), Vector3(4, 0)))
-    right = from_gdtk(Line(Vector3(4, 0), Vector3(4, 4)))
-    top = from_gdtk(Line(Vector3(4, 4), Vector3(0, 4)))
-    left = from_gdtk(Line(Vector3(0, 0), Vector3(0, 4)))
+    # Outer walls.
+    bottom = Line(Vector3(0, 0), Vector3(4, 0))
+    right = Line(Vector3(4, 0), Vector3(4, 4))
+    top = Line(Vector3(4, 4), Vector3(0, 4))
+    left = Line(Vector3(0, 0), Vector3(0, 4))
 
     b = TopologyBuilder(d=2)
     for n, p in [("sw", (0, 0)), ("se", (4, 0)), ("ne", (4, 4)), ("nw", (0, 4))]:
@@ -128,7 +127,7 @@ def build_blob_in_rectangle():
 
 
 def main():
-    p = argparse.ArgumentParser(description="gdtk-defined blob → TMOP smoothed.")
+    p = argparse.ArgumentParser(description="spline blob → TMOP smoothed.")
     p.add_argument("--plot-live", action="store_true",
                    help="PyVista animated relaxation")
     p.add_argument("--plot-energy", action="store_true",
@@ -148,7 +147,7 @@ def main():
     a = p.parse_args()
 
     print("=" * 56)
-    print("gdtk spline blob in rectangle → TMOP smooth")
+    print("spline blob in rectangle → TMOP smooth")
     print("=" * 56)
 
     topo, ents = build_blob_in_rectangle()
@@ -188,7 +187,7 @@ def main():
             steps,
             graph_colours=graph_colours,
             show_edge_verts=a.colour_edge_verts,
-            title="gdtk spline blob",
+            title="spline blob",
         )
     else:
         mindet_history, energy_history = [], []
