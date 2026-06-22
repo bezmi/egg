@@ -14,10 +14,14 @@ namespace py = pybind11;
 #include <stdexcept>
 #include <string>
 #include <sycl/sycl.hpp>
-#include <unordered_set>
+
+#ifndef NDEBUG
+    #include <unordered_set>
+#endif
 
 namespace
 {
+using std::invalid_argument;
 
 sycl::queue select_queue(const std::string& device)
 {
@@ -89,8 +93,8 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         const std::size_t ts = g.total_samples;
         auto eq = [&](std::size_t got, std::size_t want, const std::string& what) {
             if (got != want) {
-                throw std::invalid_argument("validate_context: " + grp + " " + what + " size " +
-                                            std::to_string(got) + " != " + std::to_string(want));
+                throw invalid_argument("validate_context: " + grp + " " + what + " size " +
+                                       std::to_string(got) + " != " + std::to_string(want));
             }
         };
         eq(g.gc.size(), ts, "gc");
@@ -131,7 +135,9 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         }
 
         check_index(g.gc, "gc", grp);
-        for (int k = 0; k < D; ++k) check_index(g.gn[k], ("gn" + std::to_string(k)).c_str(), grp);
+        for (int k = 0; k < D; ++k) {
+            check_index(g.gn[k], ("gn" + std::to_string(k)).c_str(), grp);
+        }
         check_index(g.dof_idx, "dof_idx", grp);
     }
 
@@ -150,8 +156,9 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
     }
     eqs(es.W_inv.size(), ns * egg::dim::wInv(D), "W_inv");
     check_index(es.gc, "gc", "energy_stencil");
-    for (int k = 0; k < D; ++k)
+    for (int k = 0; k < D; ++k) {
         check_index(es.gn[k], ("gn" + std::to_string(k)).c_str(), "energy_stencil");
+    }
 }
 
 #ifndef NDEBUG
@@ -190,14 +197,14 @@ template <int D> void assert_group_race_free(const egg::SweepContextHostT<D>& ho
 #endif
 
 // Extract a contiguous int32 numpy array from a dict key, returning a vector.
-std::vector<int> extract_int(py::dict d, const std::string& key)
+std::vector<int> extract_int(const py::dict& d, const std::string& key)
 {
     auto arr = d[key.c_str()].cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
     return std::vector<int>(arr.data(), arr.data() + arr.size());
 }
 
 // Extract a contiguous float64 numpy array from a dict key, returning a vector.
-std::vector<double> extract_double(py::dict d, const std::string& key)
+std::vector<double> extract_double(const py::dict& d, const std::string& key)
 {
     auto arr =
       d[key.c_str()].cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
@@ -206,22 +213,22 @@ std::vector<double> extract_double(py::dict d, const std::string& key)
 
 template <int D>
 egg::SweepContextHostT<D>
-  unpack_context(py::dict ctx_arrays, const double* X_data, std::size_t num_nodes)
+  unpack_context(const py::dict& ctx_arrays, const double* X_data, std::size_t num_nodes)
 {
     using namespace egg;
 
     SweepContextHostT<D> host;
     host.num_nodes = num_nodes;
-    host.X.assign(X_data, X_data + num_nodes * D);
+    host.X.assign(X_data, X_data + (num_nodes * D));
 
     // Groups — one ragged group per colour. Per-sample arrays are flat over the
     // concatenated DOFs (DOF-major, variable P per DOF); per-DOF arrays carry the
     // patch size P_of and we derive the sample_offset prefix sum here. The wire
     // format keeps per-axis keys gn0..gn{D-1} / s0..s{D-1}; we map them into the
     // gn[k]/s[k] array slots. See cpp_backend_plan.md §5 and flatten_context.
-    py::list groups_list = ctx_arrays["groups"].cast<py::list>();
+    auto groups_list = ctx_arrays["groups"].cast<py::list>();
     for (auto g_item : groups_list) {
-        py::dict gd = g_item.cast<py::dict>();
+        auto gd = g_item.cast<py::dict>();
         SweepGroupHostT<D> sg;
         sg.ndof = gd["D"].cast<std::size_t>();
 
@@ -251,7 +258,7 @@ egg::SweepContextHostT<D>
     }
 
     // Energy stencil
-    py::dict es = ctx_arrays["energy_stencil"].cast<py::dict>();
+    auto es = ctx_arrays["energy_stencil"].cast<py::dict>();
     host.energy_stencil.num_samples = es["num_samples"].cast<std::size_t>();
     host.energy_stencil.gc = extract_int(es, "gc");
     for (int k = 0; k < D; ++k) {
@@ -290,15 +297,15 @@ egg::SweepContextHostT<D>
 // initializer list. Phase 2 replaces this with a real <D> dispatch.
 int require_supported_dim(int d)
 {
-    if (d != 2) throw_unsupported_dim(d);
+    if (d != 2) { throw_unsupported_dim(d); }
     return d;
 }
 
 class CppSweepSession
 {
   public:
-    CppSweepSession(py::dict ctx_arrays,
-                    py::array_t<double, py::array::c_style | py::array::forcecast> X0,
+    CppSweepSession(const py::dict& ctx_arrays,
+                    const py::array_t<double, py::array::c_style | py::array::forcecast>& X0,
                     const std::string& device,
                     int dim) :
         dim_(require_supported_dim(dim)), num_nodes_(checked_num_nodes(X0, dim_)),
@@ -326,13 +333,13 @@ class CppSweepSession
     }
 
     // Re-upload X to the device.
-    void set_X(py::array_t<double, py::array::c_style | py::array::forcecast> X_arr)
+    void set_X(const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr)
     {
         auto buf = X_arr.request();
         if (static_cast<std::size_t>(buf.shape[0]) != num_nodes_ * egg::kDim) {
             throw std::invalid_argument("set_X: shape mismatch with session num_nodes");
         }
-        std::vector<double> host(X_arr.data(), X_arr.data() + num_nodes_ * egg::kDim);
+        std::vector<double> host(X_arr.data(), X_arr.data() + (num_nodes_ * egg::kDim));
         exec_.ctx().upload_X(host);
     }
 
@@ -382,8 +389,8 @@ PYBIND11_MODULE(cpp_core, m)
 
     m.def(
       "cpp_sweep",
-      [](py::dict ctx_arrays,
-         py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
+      [](const py::dict& ctx_arrays,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr,
          int n_sweeps,
          const std::string& device,
          const std::string& phase,
@@ -464,7 +471,7 @@ PYBIND11_MODULE(cpp_core, m)
 
     m.def(
       "metric_eval",
-      [](py::array_t<double, py::array::c_style | py::array::forcecast> t_arr)
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& t_arr)
         -> std::tuple<double, py::array_t<double>, py::array_t<double>> {
           const auto* t = t_arr.data();
           egg::VecT vt {t[0], t[1], t[2], t[3]};
@@ -481,9 +488,9 @@ PYBIND11_MODULE(cpp_core, m)
 
     m.def(
       "geometry_project",
-      [](py::array_t<double, py::array::c_style | py::array::forcecast> p_arr,
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& p_arr,
          int tag,
-         py::array_t<double, py::array::c_style | py::array::forcecast> params_arr)
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& params_arr)
         -> py::array_t<double> {
           egg::Pt p {p_arr.data()[0], p_arr.data()[1]};
           egg::Pt proj = egg::project(p, tag, params_arr.data());
@@ -496,9 +503,9 @@ PYBIND11_MODULE(cpp_core, m)
 
     m.def(
       "geometry_tangent",
-      [](py::array_t<double, py::array::c_style | py::array::forcecast> p_arr,
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& p_arr,
          int tag,
-         py::array_t<double, py::array::c_style | py::array::forcecast> params_arr)
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& params_arr)
         -> py::array_t<double> {
           egg::Pt p {p_arr.data()[0], p_arr.data()[1]};
           egg::Pt tang = egg::tangent_space(p, tag, params_arr.data());
@@ -511,15 +518,15 @@ PYBIND11_MODULE(cpp_core, m)
 
     m.def(
       "patch_eval",
-      [](py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
-         py::array_t<int, py::array::c_style | py::array::forcecast> gc_arr,
-         py::array_t<int, py::array::c_style | py::array::forcecast> gn0_arr,
-         py::array_t<int, py::array::c_style | py::array::forcecast> gn1_arr,
-         py::array_t<double, py::array::c_style | py::array::forcecast> s0_arr,
-         py::array_t<double, py::array::c_style | py::array::forcecast> s1_arr,
-         py::array_t<double, py::array::c_style | py::array::forcecast> W_inv_arr,
-         py::array_t<int, py::array::c_style | py::array::forcecast> role_arr,
-         py::array_t<double, py::array::c_style | py::array::forcecast> J_arr)
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& gc_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& gn0_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& gn1_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& s0_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& s1_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& W_inv_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& role_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& J_arr)
         -> std::tuple<py::array_t<double>, py::array_t<double>, double, double> {
           egg::PatchView pv;
           pv.P = static_cast<int>(gc_arr.size());
@@ -549,13 +556,13 @@ PYBIND11_MODULE(cpp_core, m)
 
     m.def(
       "energy_mindet",
-      [](py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
-         py::array_t<int, py::array::c_style | py::array::forcecast> gc_arr,
-         py::array_t<int, py::array::c_style | py::array::forcecast> gn0_arr,
-         py::array_t<int, py::array::c_style | py::array::forcecast> gn1_arr,
-         py::array_t<double, py::array::c_style | py::array::forcecast> s0_arr,
-         py::array_t<double, py::array::c_style | py::array::forcecast> s1_arr,
-         py::array_t<double, py::array::c_style | py::array::forcecast> W_inv_arr)
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& gc_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& gn0_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& gn1_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& s0_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& s1_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& W_inv_arr)
         -> std::tuple<double, double> {
           egg::StencilSampleView sv;
           sv.P = static_cast<int>(gc_arr.size());
@@ -580,11 +587,11 @@ PYBIND11_MODULE(cpp_core, m)
 
     m.def(
       "newton_step",
-      [](py::array_t<double, py::array::c_style | py::array::forcecast> grad_arr,
-         py::array_t<double, py::array::c_style | py::array::forcecast> hess_arr,
-         py::array_t<double, py::array::c_style | py::array::forcecast> pos_arr,
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& grad_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& hess_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& pos_arr,
          int tag,
-         py::array_t<double, py::array::c_style | py::array::forcecast> params_arr)
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& params_arr)
         -> py::array_t<double> {
           const auto* g = grad_arr.data();
           const auto* h = hess_arr.data();
