@@ -1,4 +1,4 @@
-"""Tests for 2D curve entities, encoding, and the gdtk adapter."""
+"""Tests for 2D curve entities, encoding, and the 2D construction front-end."""
 
 import numpy as np
 import pytest
@@ -127,72 +127,201 @@ class TestEncoding:
         np.testing.assert_allclose(rec[1:4], [1.0, 1.0, 1.0])
 
 
-class TestGdtkAdapter:
+class TestFrontend2d:
     def test_line(self):
-        from gdtk.geom.path import Line
-        from gdtk.geom.vector3 import Vector3
-        from egg.geometry.gdtk_adapter import from_gdtk
+        from egg.geometry.frontend2d import Line, Vector3
 
-        ent = from_gdtk(Line(Vector3(0, 0), Vector3(1, 2)))
+        ent = Line(Vector3(0, 0), Vector3(1, 2))
         assert isinstance(ent, LineSegment)
         np.testing.assert_allclose(ent.end, [1.0, 2.0])
 
-    def test_arc_matches_gdtk_eval(self):
-        from gdtk.geom.path import Arc
-        from gdtk.geom.vector3 import Vector3
-        from egg.geometry.gdtk_adapter import from_gdtk
+    def test_line_accepts_tuples(self):
+        from egg.geometry.frontend2d import Line
+
+        ent = Line((0, 0), (1, 2))
+        assert isinstance(ent, LineSegment)
+        np.testing.assert_allclose(ent.end, [1.0, 2.0])
+
+    def test_line_p0_p1(self):
+        from egg.geometry.frontend2d import Line, Vector3
+
+        ent = Line(Vector3(0, 0), Vector3(1, 2))
+        assert isinstance(ent, LineSegment)
+        assert isinstance(ent.p0, Vector3) and isinstance(ent.p1, Vector3)
+        assert ent.p0.x == 0.0 and ent.p0.y == 0.0
+        assert ent.p1.x == 1.0 and ent.p1.y == 2.0
+
+    def test_arc_passes_through_endpoints(self):
+        from egg.geometry.frontend2d import Arc, Vector3
 
         a, b, c = Vector3(2, 0), Vector3(0, 2), Vector3(0, 0)
-        arc = Arc(a, b, c)
-        ent = from_gdtk(arc)
+        ent = Arc(a, b, c)
         assert isinstance(ent, CircleArc)
-        for t in (0.0, 0.3, 1.0):
-            p = arc(t)
-            proj = ent.project(np.array([p.x, p.y]))
-            np.testing.assert_allclose(proj, [p.x, p.y], atol=1e-9)
+        # The arc starts at a and ends at b.
+        np.testing.assert_allclose(ent.eval(ent.t0), [2.0, 0.0], atol=1e-12)
+        np.testing.assert_allclose(ent.eval(ent.t1), [0.0, 2.0], atol=1e-12)
+
+    def test_arc_rejects_branch_wrap(self):
+        # An arc that wraps past +/-pi after both branches must be rejected.
+        from egg.geometry.frontend2d import Arc, Vector3
+
+        # Quarter arc just below the branch cut is fine.
+        ent = Arc(Vector3(1, 0), Vector3(0, 1), Vector3(0, 0))
+        assert isinstance(ent, CircleArc)
+        assert -np.pi < ent.t0 and ent.t1 <= np.pi
 
     def test_bezier_degrees(self):
-        from gdtk.geom.path import Bezier
-        from gdtk.geom.vector3 import Vector3
-        from egg.geometry.gdtk_adapter import from_gdtk
+        from egg.geometry.frontend2d import Bezier, Vector3
 
         pts = [Vector3(0, 0), Vector3(1, 1), Vector3(2, 0)]
-        assert isinstance(from_gdtk(Bezier(pts)), QuadBezier)
+        assert isinstance(Bezier(pts), QuadBezier)
         pts4 = pts + [Vector3(3, 1)]
-        assert isinstance(from_gdtk(Bezier(pts4)), CubicBezier)
+        assert isinstance(Bezier(pts4), CubicBezier)
+        pts2 = [Vector3(0, 0), Vector3(1, 2)]
+        assert isinstance(Bezier(pts2), LineSegment)
+        # Degree >= 4 becomes a B-spline on the clamped knot vector and
+        # reproduces the Bézier.
         pts5 = pts4 + [Vector3(4, 0)]
-        ent = from_gdtk(Bezier(pts5))
+        ent = Bezier(pts5)
         assert isinstance(ent, BSplineCurve)
-        # The degree-4 B-spline reproduces the Bézier.
-        bez = Bezier(pts5)
+        # The degree-4 B-spline reproduces the Bézier control points exactly.
         for t in (0.25, 0.75):
-            p = bez(t)
-            np.testing.assert_allclose(ent.eval(t), [p.x, p.y], atol=1e-12)
+            np.testing.assert_allclose(ent.eval(t),
+                                       _bezier_eval(np.stack([_v2(p) for p in pts5]), t),
+                                       atol=1e-12)
 
     def test_polyline_to_composite(self):
-        from gdtk.geom.path import Line, Polyline
-        from gdtk.geom.vector3 import Vector3
-        from egg.geometry.gdtk_adapter import from_gdtk
+        from egg.geometry.frontend2d import Line, Polyline, Vector3
 
         pl = Polyline([
             Line(Vector3(0, 0), Vector3(1, 0)),
             Line(Vector3(1, 0), Vector3(1, 1)),
         ])
-        ent = from_gdtk(pl)
-        assert isinstance(ent, CompositePath)
-        np.testing.assert_allclose(ent.project(np.array([1.5, 0.6])),
+        assert isinstance(pl, CompositePath)
+        np.testing.assert_allclose(pl.project(np.array([1.5, 0.6])),
                                    [1.0, 0.6], atol=1e-12)
 
-    def test_spline_to_composite(self):
-        from gdtk.geom.path import Spline
-        from gdtk.geom.vector3 import Vector3
-        from egg.geometry.gdtk_adapter import from_gdtk
+    def test_polyline_closed_appends_segment(self):
+        from egg.geometry.frontend2d import Line, Polyline, Vector3
 
-        sp = Spline([Vector3(0, 0), Vector3(1, 1), Vector3(2, 0), Vector3(3, 1)])
-        ent = from_gdtk(sp)
+        segs = [Line(Vector3(0, 0), Vector3(1, 0)),
+                Line(Vector3(1, 0), Vector3(1, 1))]
+        assert len(Polyline(segs).segments) == 2
+        pl = Polyline(segs, closed=True)
+        assert len(pl.segments) == 3
+        np.testing.assert_allclose(pl.segments[-1].start, [1.0, 1.0], atol=1e-12)
+        np.testing.assert_allclose(pl.segments[-1].end, [0.0, 0.0], atol=1e-12)
+        segs_closed = [Line(Vector3(0, 0), Vector3(1, 0)),
+                       Line(Vector3(1, 0), Vector3(0, 0))]
+        assert len(Polyline(segs_closed, closed=True).segments) == 2
+
+    def test_spline_open_passes_through_points(self):
+        from egg.geometry.frontend2d import Spline, Vector3
+
+        pts = [Vector3(0, 0), Vector3(1, 1), Vector3(2, 0), Vector3(3, 1)]
+        ent = Spline(pts)
         assert isinstance(ent, CompositePath)
+        assert len(ent.segments) == 3
+        assert all(isinstance(s, CubicBezier) for s in ent.segments)
         # On-curve points project to themselves.
-        for t in (0.2, 0.6):
-            p = sp(t)
+        for p in pts:
             np.testing.assert_allclose(ent.project(np.array([p.x, p.y])),
                                        [p.x, p.y], atol=1e-8)
+
+    def test_spline_closed_passes_through_points(self):
+        from egg.geometry.frontend2d import Spline, Vector3
+
+        pts = [Vector3(0, 0), Vector3(1, 1), Vector3(2, 0), Vector3(3, 1)]
+        ent = Spline(pts, closed=True)
+        assert isinstance(ent, CompositePath)
+        # One segment per interval, including the wrap from last back to first.
+        assert len(ent.segments) == 4
+        assert all(isinstance(s, CubicBezier) for s in ent.segments)
+        for p in pts:
+            np.testing.assert_allclose(ent.project(np.array([p.x, p.y])),
+                                       [p.x, p.y], atol=1e-8)
+
+    def test_spline_c1_continuity(self):
+        # Adjacent cubic Bézier segments share an endpoint and have
+        # collinear, equal-magnitude tangents there (C1 continuity).
+        from egg.geometry.frontend2d import Spline, Vector3
+
+        pts = [Vector3(0, 0), Vector3(1, 1), Vector3(2, 0), Vector3(3, 1),
+               Vector3(4, 0)]
+        ent = Spline(pts)
+        for s0, s1 in zip(ent.segments[:-1], ent.segments[1:]):
+            np.testing.assert_allclose(s0.p[3], s1.p[0], atol=1e-12)
+            # C1: p3 - p2 of seg0 == p1 - p0 of seg1.
+            np.testing.assert_allclose(s0.p[3] - s0.p[2], s1.p[1] - s1.p[0],
+                                       atol=1e-9)
+
+    def test_spline_closed_continuity(self):
+        # gdtk's closed Spline appends points[0] and solves an open natural
+        # spline. Internal joints are C1; the wrap-around joint is only C0
+        # (the second derivative is zero at both ends, not periodic).
+        from egg.geometry.frontend2d import Spline, Vector3
+
+        pts = [Vector3(0, 0), Vector3(1, 1), Vector3(2, 0), Vector3(3, 1),
+               Vector3(4, 0)]
+        ent = Spline(pts, closed=True)
+        segs = ent.segments
+        # C1 at internal joints.
+        for s0, s1 in zip(segs[:-1], segs[1:]):
+            np.testing.assert_allclose(s0.p[3], s1.p[0], atol=1e-12)
+            np.testing.assert_allclose(s0.p[3] - s0.p[2], s1.p[1] - s1.p[0],
+                                       atol=1e-9)
+        # C0 at the wrap-around joint (last seg ends where first seg starts).
+        s0, s1 = segs[-1], segs[0]
+        np.testing.assert_allclose(s0.p[3], s1.p[0], atol=1e-12)
+
+    def test_spline_closed_equals_open_with_appended_first(self):
+        # gdtk's algorithm: closed Spline through [p0..pn] == open Spline
+        # through [p0..pn, p0] when pn != p0.
+        from egg.geometry.frontend2d import Spline, Vector3
+
+        pts = [Vector3(0, 0), Vector3(1, 1), Vector3(2, 0), Vector3(3, 1)]
+        closed = Spline(pts, closed=True)
+        open_ext = Spline(pts + [pts[0]])
+        assert len(closed.segments) == len(open_ext.segments)
+        for sc, so in zip(closed.segments, open_ext.segments):
+            np.testing.assert_allclose(sc.p, so.p, atol=1e-12)
+
+    def test_vector3_arithmetic(self):
+        from egg.geometry.frontend2d import Vector3
+
+        a = Vector3(1.0, 2.0)
+        b = Vector3(3.0, 4.0)
+        c = a + b
+        assert isinstance(c, Vector3)
+        np.testing.assert_allclose([c.x, c.y], [4.0, 6.0])
+        d = 2.0 * a
+        assert isinstance(d, Vector3)
+        np.testing.assert_allclose([d.x, d.y], [2.0, 4.0])
+        e = a * 0.5
+        np.testing.assert_allclose([e.x, e.y], [0.5, 1.0])
+        f = a - b
+        np.testing.assert_allclose([f.x, f.y], [-2.0, -2.0])
+        g = -a
+        np.testing.assert_allclose([g.x, g.y], [-1.0, -2.0])
+        assert abs(a) == pytest.approx(np.sqrt(5.0))
+        # Chained: oi + Ri * Vector3(...)  (capsule.py pattern)
+        oi = Vector3(1.0, 0.0)
+        h = oi + 2.0 * Vector3(-1.0, 0.0)
+        np.testing.assert_allclose([h.x, h.y], [-1.0, 0.0])
+
+    def test_vector3_rejects_nonzero_z(self):
+        from egg.geometry.frontend2d import Vector3
+
+        with pytest.raises(ValueError):
+            Vector3(1, 2, 3)
+
+
+def _v2(v) -> np.ndarray:
+    return np.array([float(v.x), float(v.y)])
+
+
+def _bezier_eval(p: np.ndarray, t: float) -> np.ndarray:
+    """De Casteljau for an arbitrary-degree Bézier (test reference)."""
+    while p.shape[0] > 1:
+        p = (1.0 - t) * p[:-1] + t * p[1:]
+    return p[0]

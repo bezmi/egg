@@ -14,7 +14,6 @@ description = "egg aims to be an excellent grid generator"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-  "gdtk",
   "matplotlib>=3.10.9",
   "numpy>=2.4.6",
   "pytest>=9.0.3",
@@ -72,6 +71,3 @@ if.state = "editable"
 cmake.define.EGG_BUILD_TESTS = "ON"
 build.targets = []                  # [] = build the default (all) target, not just cpp_core
 
-[tool.uv.sources]
-# for geometry lib
-gdtk = { git = "https://github.com/gdtk-uq/gdtk", subdirectory = "src/lib" }
