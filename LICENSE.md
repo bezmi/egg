@@ -1,3 +1,13 @@
+# License
+
+> **Summary (not the license).** Egg uses the **PolyForm Noncommercial
+> License**, a *source-available* license — free for personal, hobby, and
+> academic use. You may run, copy, modify, and share the software and your
+> changes, **provided all use stays noncommercial** and you pass along this
+> license and any required notices. To protect community contributions, **each tagged release's
+> artifacts convert to GNU AGPL-3.0 four years after its release date**, via a
+> PolyForm Countdown notice attached to that release.
+
 # PolyForm Noncommercial License 2.0.0-pre.2
 
 ## Noncommercial Use

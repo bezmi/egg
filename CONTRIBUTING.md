@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to [PROJECT NAME]! This document
+Thanks for your interest in contributing to Egg! This document
 explains how to contribute and the terms under which contributions are accepted.
 
 ## License
@@ -9,10 +9,17 @@ This project is licensed under the terms in [LICENSE.md](./LICENSE.md). Please
 read it before contributing so you understand how the project is distributed.
 
 Note that this is a **source-available** license, not an OSI-approved open
-source license. By contributing, you agree to the Contributor License Agreement
-(CLA) at the end of this document, which—among other things—allows the
-maintainer to offer the project (including your contributions) under separate
-commercial terms.
+source license — free for personal, hobby, and academic use. You may run, copy,
+modify, and share the software and your changes, **provided all use stays
+noncommercial** and you pass along this license and any required notices. To
+protect community contributions, **each tagged release's artifacts convert to GNU
+AGPL-3.0 four years after its release date**, via the PolyForm Countdown notice
+attached to that release.
+
+Contributing requires agreeing to the Contributor License Agreement (CLA) at the
+end of this document, which—among other things—allows the maintainer to offer
+the project (including your contributions) under separate commercial terms. See
+[Signing the CLA](#signing-the-cla) below for how to record your agreement.
 
 ### Signing the CLA
 
@@ -88,10 +95,12 @@ rebase before merge.
 
 ## Contributor License Agreement (CLA)
 
-By submitting a contribution to this project (a "Contribution"), You accept and
-agree to the following terms for any past and future Contributions You submit.
-Except for the license granted herein, You reserve all right, title, and
-interest in and to Your Contributions.
+You agree to this Agreement by stating, in a comment on your pull request, that
+You have read and agree to the Contributor License Agreement (as described in
+[Signing the CLA](#signing-the-cla) above). That confirmation makes this
+Agreement effective for all past and future Contributions You submit to the
+project. Except for the license granted herein, You reserve all right, title,
+and interest in and to Your Contributions.
 
 **1. Definitions.**
 "You" (or "Your") means the copyright owner or legal entity authorized by the
