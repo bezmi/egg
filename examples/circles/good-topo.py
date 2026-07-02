@@ -61,6 +61,13 @@ def main():
     p.add_argument("--tmop-sweeps", type=int, default=40)
     p.add_argument("--sweeps-per-delta", type=int, default=20)
     p.add_argument("--chunk", type=int, default=10)
+    p.add_argument("--smoother", choices=["colored-gs", "block-jacobi"],
+                   default="colored-gs",
+                   help="TMOP smoother: global colored-GS or the structured "
+                        "block-Jacobi (one merged launch per sweep; needs more "
+                        "sweeps — bump --tmop-sweeps)")
+    p.add_argument("--omega", type=float, default=1.0,
+                   help="block-Jacobi SOR/damping weight (1.0 = undamped)")
     # Boundary-layer clustering on the (single) circle. <=0 disables it; the
     # ``*2`` flags exist only for CLI parity with the side-by-side demo (which
     # clusters a second circle) and are ignored here.
@@ -128,6 +135,8 @@ def main():
         sweeps_per_delta=a.sweeps_per_delta,
         tmop_sweeps=a.tmop_sweeps,
         tmop_chunk=a.chunk,
+        smoother=a.smoother,
+        omega=a.omega,
         device=a.device,
         # Step the untangle per δ only when animating; otherwise run it direct.
         untangle_direct=not a.plot_live,

@@ -260,6 +260,9 @@ def test_cpp_session_chunking_lossless():
 
     Proves the §0 gate — X stays device-resident across calls and chunked
     driving is lossless (identical per-sweep energies/min-dets and final X).
+    Pins ``report_every=1`` so the per-sweep arrays are directly comparable;
+    the binding's default (0, chunk-end) would otherwise collapse both sides
+    to a single value.
     """
     from egg.smoothing.cpp_backend import CppSweepSession
 
@@ -267,13 +270,13 @@ def test_cpp_session_chunking_lossless():
     n_sweeps = 10
 
     one = CppSweepSession(ctx, X0.copy(), device="cpu")
-    e_one, m_one = one.run(n_sweeps)
+    e_one, m_one = one.run(n_sweeps, report_every=1)
     X_one = one.get_X()
 
     chunked = CppSweepSession(ctx, X0.copy(), device="cpu")
     e_parts, m_parts = [], []
     for _ in range(n_sweeps):
-        e, m = chunked.run(1)
+        e, m = chunked.run(1, report_every=1)
         e_parts.append(e)
         m_parts.append(m)
     e_ten = np.concatenate(e_parts)
@@ -286,16 +289,20 @@ def test_cpp_session_chunking_lossless():
 
 
 def test_cpp_session_matches_one_shot():
-    """Session .run matches the one-shot cpp_sweep (same staging, resident X)."""
+    """Session .run matches the one-shot cpp_sweep (same staging, resident X).
+
+    Pins ``report_every=1`` so the per-sweep arrays are directly comparable
+    (the binding's default of 0 collapses both sides to a single value).
+    """
     from egg.smoothing.cpp_backend import CppSweepSession, cpp_sweep
 
     ctx, X0, _ = _mini_context()
     n_sweeps = 5
 
-    X_os, e_os, m_os = cpp_sweep(ctx, X0.copy(), n_sweeps, device="cpu")
+    X_os, e_os, m_os = cpp_sweep(ctx, X0.copy(), n_sweeps, device="cpu", report_every=1)
 
     sess = CppSweepSession(ctx, X0.copy(), device="cpu")
-    e_s, m_s = sess.run(n_sweeps)
+    e_s, m_s = sess.run(n_sweeps, report_every=1)
 
     np.testing.assert_array_equal(e_s, e_os)
     np.testing.assert_array_equal(m_s, m_os)
@@ -305,14 +312,18 @@ def test_cpp_session_matches_one_shot():
 @pytest.mark.skipif(not _has_cpp() or not _gpu_available(),
                     reason="No usable SYCL GPU")
 def test_cpp_sweep_matches_numpy_gpu():
-    """cpp_sweep (GPU) == NumPy local_relaxation_sweep — same gate on the device path."""
+    """cpp_sweep (GPU) == NumPy local_relaxation_sweep — same gate on the device path.
+
+    Pins ``report_every=1`` so the per-sweep energy arrays are directly
+    comparable (the binding's default of 0 would collapse to a single value).
+    """
     from egg.smoothing.cpp_backend import cpp_sweep
 
     ctx, X0, topo = _mini_context()
     n_sweeps = 5
     X_ref, e_ref = _numpy_reference(X0, topo, n_sweeps)
 
-    X_gpu, e_gpu, _m = cpp_sweep(ctx, X0.copy(), n_sweeps, device="gpu")
+    X_gpu, e_gpu, _m = cpp_sweep(ctx, X0.copy(), n_sweeps, device="gpu", report_every=1)
     np.testing.assert_allclose(e_gpu, e_ref, rtol=_RTOL_E, atol=_ATOL,
                                err_msg="GPU per-sweep energy mismatch vs NumPy")
     np.testing.assert_allclose(X_gpu, X_ref, rtol=_RTOL_X, atol=_ATOL,

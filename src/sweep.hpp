@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <functional>
 #include <limits>
@@ -101,12 +102,14 @@ struct PartitionView {
 
 template <int D> struct GroupViewT {
     std::size_t ndof;
+    std::size_t n_free = 0;  // DOFs are Free-first reordered; [0, n_free) are Free
     View1<const int> gc, role;                           // [total_samples]
     View1<const int> gn[D];                              // [total_samples]
     View1<const double> s[D];                            // [total_samples]
     View1<const double> W_inv;                           // [total_samples * wInv]
     View1<const double> J;                               // [total_samples * jSize]
     View1<const int> dof_idx, P_of, sample_offset;       // [ndof]
+    View1<const int> part_of, row_of;                    // [ndof] DOF -> (partition, row)
     const PartitionView* partitions = nullptr;           // [num_partitions]
     std::size_t num_partitions = 0;                      // per-(colour,EntityTag) splits
 
@@ -127,6 +130,24 @@ template <int D> struct GroupViewT {
         pv.J = J.data_handle() + (off * dim::jSize(D));
         return pv;
     }
+
+    // A view restricted to the per-DOF sub-range [begin, begin+count). Only the
+    // per-DOF arrays (dof_idx, P_of, sample_offset, part_of, row_of) are sliced;
+    // the per-sample arrays (gc/gn/s/W_inv/role/J) and the partition list are
+    // shared unchanged — sample_offset still indexes the full per-sample tables.
+    // Used by the Plan #1 interior/boundary split to launch one kernel over each
+    // contiguous DOF class of a Free-first-reordered view.
+    GroupViewT<D> dof_subrange(std::size_t begin, std::size_t count) const
+    {
+        GroupViewT<D> sub = *this;
+        sub.ndof = count;
+        sub.dof_idx = View1<const int> {dof_idx.data_handle() + begin, count};
+        sub.P_of = View1<const int> {P_of.data_handle() + begin, count};
+        sub.sample_offset = View1<const int> {sample_offset.data_handle() + begin, count};
+        sub.part_of = View1<const int> {part_of.data_handle() + begin, count};
+        sub.row_of = View1<const int> {row_of.data_handle() + begin, count};
+        return sub;
+    }
 };
 
 template <int D> struct StencilViewT {
@@ -140,8 +161,16 @@ template <int D> struct StencilViewT {
 template <int D> class SweepDeviceContextT
 {
   public:
+    // Per-node warm-start parameter cache for iterative projections: stride
+    // (D-1), one slot per global node, initialised non-finite (cold) so the
+    // first sweep seeds via the coarse grid and subsequent sweeps warm-start.
+    static constexpr std::size_t kSeedStride = (D > 1) ? (D - 1) : 1;
+
     SweepDeviceContextT(sycl::queue q, const SweepContextHostT<D>& host) :
-        q_(q), num_nodes_(host.num_nodes), X_(q, host.X)
+        q_(q), num_nodes_(host.num_nodes), X_(q, host.X),
+        seeds_(q,
+               std::vector<double>(host.num_nodes * kSeedStride,
+                                   std::numeric_limits<double>::quiet_NaN()))
     {
         groups_.reserve(host.groups.size());
         group_partitions_.reserve(host.groups.size());
@@ -157,9 +186,6 @@ template <int D> class SweepDeviceContextT
             }
             dg.W_inv = {q, g.W_inv};
             dg.J = {q, g.J};
-            dg.dof_idx = {q, g.dof_idx};
-            dg.P_of = {q, g.P_of};
-            dg.sample_offset = {q, g.sample_offset};
 
             // Each SoAHostRecord in g.soa is one (colour, EntityTag) partition:
             // its dof_local is the group-local DOF list, its records/seg the
@@ -188,6 +214,50 @@ template <int D> class SweepDeviceContextT
                 dg.partitions.push_back(std::move(dp));
             }
 
+            // Invert the per-partition dof_local lists into per-DOF maps so the
+            // single per-colour kernel can find each DOF's entity: part_of[d]
+            // indexes dg.partitions, row_of[d] is the DOF's row within that
+            // partition's SoA records (g.soa[p].dof_local[r] == d).
+            std::vector<int> part_of(g.ndof, -1), row_of(g.ndof, -1);
+            for (std::size_t p = 0; p < g.soa.size(); ++p) {
+                const auto& dl = g.soa[p].dof_local;
+                for (std::size_t r = 0; r < dl.size(); ++r) {
+                    part_of[static_cast<std::size_t>(dl[r])] = static_cast<int>(p);
+                    row_of[static_cast<std::size_t>(dl[r])] = static_cast<int>(r);
+                }
+            }
+
+            // Free-first reorder: permute the per-DOF arrays so every Free
+            // (interior) DOF precedes the non-Free (boundary) ones, making the
+            // two classes contiguous sub-ranges of one view. The per-sample
+            // arrays are untouched — sample_offset still indexes them. A DOF is
+            // Free iff its owning partition's tag is Free. Plan #1 step 2.
+            const auto is_free = [&](std::size_t d) {
+                const int p = part_of[d];
+                return p >= 0 && g.soa[static_cast<std::size_t>(p)].tag == EntityTag::Free;
+            };
+            std::vector<int> perm;
+            perm.reserve(g.ndof);
+            for (std::size_t d = 0; d < g.ndof; ++d) {
+                if (is_free(d)) { perm.push_back(static_cast<int>(d)); }
+            }
+            dg.n_free = perm.size();
+            for (std::size_t d = 0; d < g.ndof; ++d) {
+                if (!is_free(d)) { perm.push_back(static_cast<int>(d)); }
+            }
+            const auto gather = [&](const std::vector<int>& src) {
+                std::vector<int> dst(src.size());
+                for (std::size_t i = 0; i < perm.size(); ++i) {
+                    dst[i] = src[static_cast<std::size_t>(perm[i])];
+                }
+                return dst;
+            };
+            dg.dof_idx = {q, gather(g.dof_idx)};
+            dg.P_of = {q, gather(g.P_of)};
+            dg.sample_offset = {q, gather(g.sample_offset)};
+            dg.part_of = {q, gather(part_of)};
+            dg.row_of = {q, gather(row_of)};
+
             groups_.push_back(std::move(dg));
         }
         const auto& es = host.energy_stencil;
@@ -202,10 +272,10 @@ template <int D> class SweepDeviceContextT
         // Build the stable PartitionView arrays (raw device pointers) and the
         // GroupViewT views in lockstep; both index groups_ by position.
         group_views_.reserve(groups_.size());
-        group_partitions_.resize(groups_.size());
+        group_partitions_.reserve(groups_.size());
         for (std::size_t gi = 0; gi < groups_.size(); ++gi) {
             auto& dg = groups_[gi];
-            auto& pvs = group_partitions_[gi];
+            std::vector<PartitionView> pvs;
             pvs.reserve(dg.partitions.size());
             for (const auto& dp : dg.partitions) {
                 const std::size_t ndof = dp.dof_list.size();
@@ -224,7 +294,12 @@ template <int D> class SweepDeviceContextT
                 }
                 pvs.push_back(pv);
             }
-            group_views_.push_back(dg.view(pvs.data(), pvs.size()));
+            // The per-colour kernel indexes this array ON the device (via
+            // part_of[d]), so it must live in USM — a host std::vector pointer
+            // would fault on the GPU. Upload once; the device pointer is stable.
+            group_partitions_.emplace_back(q, pvs);
+            group_views_.push_back(dg.view(group_partitions_.back().data(), pvs.size()));
+            host_pvs_.push_back(std::move(pvs));  // retained for the merged Jacobi view
         }
         stencil_view_ = stencil_.view();
     }
@@ -232,9 +307,39 @@ template <int D> class SweepDeviceContextT
     const std::vector<GroupViewT<D>>& group_views() const { return group_views_; }
     const StencilViewT<D>& stencil_view() const { return stencil_view_; }
     double* X() const { return X_.data(); }
+    std::size_t x_size() const { return X_.size(); }
     std::size_t num_nodes() const { return num_nodes_; }
+    /// @brief Per-node warm-start seed cache (stride @ref kSeedStride), persisted
+    ///        across sweeps. Forwarded to the block-Jacobi kernel; null-equivalent
+    ///        cold path is used by colored-GS (passes nullptr).
+    double* seeds() { return seeds_.data(); }
 
-    void upload_X(const std::vector<double>& host_X) { X_.upload(host_X); }
+    /// @brief A single GroupViewT spanning *all* colour groups, for block-Jacobi.
+    ///
+    /// Under frozen halos every free DOF updates from the same snapshot, so the
+    /// colour ordering is irrelevant and all DOFs can run in **one launch**. The
+    /// in-order queue serialises per-group launches, so a merged view (not merely
+    /// dropping the dependency) is what recovers full occupancy. Built lazily on
+    /// first use and cached: the bulk per-sample arrays are concatenated by
+    /// device-to-device copy; the small per-DOF index arrays are rebuilt with the
+    /// running sample/partition offsets; the partition list (entity SoA pointers)
+    /// is concatenated unchanged. The per-colour @ref group_views() stay intact
+    /// for colored-GS.
+    const GroupViewT<D>& merged_group_view()
+    {
+        if (!merged_built_) {
+            build_merged_view();
+            merged_built_ = true;
+        }
+        return merged_view_;
+    }
+
+    void upload_X(const std::vector<double>& host_X)
+    {
+        X_.upload(host_X);
+        // Positions reset → invalidate the warm-start cache (re-seed cold).
+        seeds_.upload(std::vector<double>(seeds_.size(), std::numeric_limits<double>::quiet_NaN()));
+    }
     void download_X(double* host_X) { X_.download(host_X); }
 
   private:
@@ -248,12 +353,14 @@ template <int D> class SweepDeviceContextT
 
     struct DeviceGroup {
         std::size_t ndof;
+        std::size_t n_free = 0;  // count of Free DOFs (the [0, n_free) prefix)
         std::size_t total_samples;
         UsmBuffer<int> gc, role;
         UsmBuffer<int> gn[D];
         UsmBuffer<double> s[D];
         UsmBuffer<double> W_inv, J;
         UsmBuffer<int> dof_idx, P_of, sample_offset;
+        UsmBuffer<int> part_of, row_of;  // [ndof] DOF -> (partition, row)
         std::vector<DevicePartition> partitions;
 
         GroupViewT<D> view(const PartitionView* pvs, std::size_t np) const
@@ -261,6 +368,7 @@ template <int D> class SweepDeviceContextT
             const std::size_t n = total_samples;
             GroupViewT<D> gv;
             gv.ndof = ndof;
+            gv.n_free = n_free;
             gv.gc = View1<const int> {gc.data(), n};
             gv.role = View1<const int> {role.data(), n};
             for (int k = 0; k < D; ++k) {
@@ -272,6 +380,8 @@ template <int D> class SweepDeviceContextT
             gv.dof_idx = View1<const int> {dof_idx.data(), ndof};
             gv.P_of = View1<const int> {P_of.data(), ndof};
             gv.sample_offset = View1<const int> {sample_offset.data(), ndof};
+            gv.part_of = View1<const int> {part_of.data(), ndof};
+            gv.row_of = View1<const int> {row_of.data(), ndof};
             gv.partitions = pvs;
             gv.num_partitions = np;
             return gv;
@@ -299,41 +409,225 @@ template <int D> class SweepDeviceContextT
         }
     };
 
+    /// Concatenate every colour group's tables into one GroupViewT (cached in the
+    /// m_* buffers + merged_view_). Bulk per-sample arrays are joined by
+    /// device-to-device copy; the small per-DOF index arrays are rebuilt on host
+    /// with the running sample/partition offsets; the partition list is the
+    /// per-group PartitionView arrays concatenated (entity SoA pointers unchanged).
+    void build_merged_view()
+    {
+        const std::size_t ng = groups_.size();
+        std::size_t total_ndof = 0, total_samples = 0, total_parts = 0;
+        for (std::size_t gi = 0; gi < ng; ++gi) {
+            total_ndof += groups_[gi].ndof;
+            total_samples += groups_[gi].total_samples;
+            total_parts += host_pvs_[gi].size();
+        }
+        const std::size_t wInv = dim::wInv(D), jSize = dim::jSize(D);
+
+        m_gc_ = UsmBuffer<int> {q_, total_samples};
+        m_role_ = UsmBuffer<int> {q_, total_samples};
+        for (int k = 0; k < D; ++k) {
+            m_gn_[k] = UsmBuffer<int> {q_, total_samples};
+            m_s_[k] = UsmBuffer<double> {q_, total_samples};
+        }
+        m_W_inv_ = UsmBuffer<double> {q_, total_samples * wInv};
+        m_J_ = UsmBuffer<double> {q_, total_samples * jSize};
+
+        std::vector<int> dof_idx(total_ndof), P_of(total_ndof), sample_offset(total_ndof);
+        std::vector<int> part_of(total_ndof), row_of(total_ndof);
+        std::vector<PartitionView> merged_pvs;
+        merged_pvs.reserve(total_parts);
+
+        std::size_t sbase = 0, dbase = 0, pbase = 0;
+        for (std::size_t gi = 0; gi < ng; ++gi) {
+            auto& dg = groups_[gi];
+            const std::size_t gs = dg.total_samples, gd = dg.ndof;
+            q_.memcpy(m_gc_.data() + sbase, dg.gc.data(), gs * sizeof(int));
+            q_.memcpy(m_role_.data() + sbase, dg.role.data(), gs * sizeof(int));
+            for (int k = 0; k < D; ++k) {
+                q_.memcpy(m_gn_[k].data() + sbase, dg.gn[k].data(), gs * sizeof(int));
+                q_.memcpy(m_s_[k].data() + sbase, dg.s[k].data(), gs * sizeof(double));
+            }
+            q_.memcpy(m_W_inv_.data() + sbase * wInv, dg.W_inv.data(), gs * wInv * sizeof(double));
+            q_.memcpy(m_J_.data() + sbase * jSize, dg.J.data(), gs * jSize * sizeof(double));
+
+            std::vector<int> g_dof_idx(gd), g_P_of(gd), g_so(gd), g_part(gd), g_row(gd);
+            dg.dof_idx.download(g_dof_idx.data());
+            dg.P_of.download(g_P_of.data());
+            dg.sample_offset.download(g_so.data());
+            dg.part_of.download(g_part.data());
+            dg.row_of.download(g_row.data());
+            for (std::size_t r = 0; r < gd; ++r) {
+                dof_idx[dbase + r] = g_dof_idx[r];
+                P_of[dbase + r] = g_P_of[r];
+                sample_offset[dbase + r] = g_so[r] + static_cast<int>(sbase);
+                part_of[dbase + r] = g_part[r] + static_cast<int>(pbase);
+                row_of[dbase + r] = g_row[r];
+            }
+            for (const auto& pv : host_pvs_[gi]) { merged_pvs.push_back(pv); }
+
+            sbase += gs;
+            dbase += gd;
+            pbase += host_pvs_[gi].size();
+        }
+        q_.wait();
+
+        // Global Free-first reorder across all merged DOFs (each group is already
+        // Free-first internally, but the concatenation interleaves the classes).
+        // The single block-Jacobi launch is then split at n_free into the lean
+        // interior kernel and the full boundary kernel. Plan #1 step 2.
+        const auto merged_is_free = [&](std::size_t i) {
+            const int p = part_of[i];
+            return p >= 0 && merged_pvs[static_cast<std::size_t>(p)].tag == EntityTag::Free;
+        };
+        std::vector<int> perm;
+        perm.reserve(total_ndof);
+        for (std::size_t i = 0; i < total_ndof; ++i) {
+            if (merged_is_free(i)) { perm.push_back(static_cast<int>(i)); }
+        }
+        const std::size_t merged_n_free = perm.size();
+        for (std::size_t i = 0; i < total_ndof; ++i) {
+            if (!merged_is_free(i)) { perm.push_back(static_cast<int>(i)); }
+        }
+        const auto gather = [&](const std::vector<int>& src) {
+            std::vector<int> dst(src.size());
+            for (std::size_t i = 0; i < perm.size(); ++i) {
+                dst[i] = src[static_cast<std::size_t>(perm[i])];
+            }
+            return dst;
+        };
+
+        m_dof_idx_ = UsmBuffer<int> {q_, gather(dof_idx)};
+        m_P_of_ = UsmBuffer<int> {q_, gather(P_of)};
+        m_sample_offset_ = UsmBuffer<int> {q_, gather(sample_offset)};
+        m_part_of_ = UsmBuffer<int> {q_, gather(part_of)};
+        m_row_of_ = UsmBuffer<int> {q_, gather(row_of)};
+        m_partitions_ = UsmBuffer<PartitionView> {q_, merged_pvs};
+
+        GroupViewT<D> gv;
+        gv.ndof = total_ndof;
+        gv.n_free = merged_n_free;
+        gv.gc = View1<const int> {m_gc_.data(), total_samples};
+        gv.role = View1<const int> {m_role_.data(), total_samples};
+        for (int k = 0; k < D; ++k) {
+            gv.gn[k] = View1<const int> {m_gn_[k].data(), total_samples};
+            gv.s[k] = View1<const double> {m_s_[k].data(), total_samples};
+        }
+        gv.W_inv = View1<const double> {m_W_inv_.data(), total_samples * wInv};
+        gv.J = View1<const double> {m_J_.data(), total_samples * jSize};
+        gv.dof_idx = View1<const int> {m_dof_idx_.data(), total_ndof};
+        gv.P_of = View1<const int> {m_P_of_.data(), total_ndof};
+        gv.sample_offset = View1<const int> {m_sample_offset_.data(), total_ndof};
+        gv.part_of = View1<const int> {m_part_of_.data(), total_ndof};
+        gv.row_of = View1<const int> {m_row_of_.data(), total_ndof};
+        gv.partitions = m_partitions_.data();
+        gv.num_partitions = total_parts;
+        merged_view_ = gv;
+    }
+
     sycl::queue q_;
     std::size_t num_nodes_;
     UsmBuffer<double> X_;
+    UsmBuffer<double> seeds_;  // [num_nodes * kSeedStride] warm-start param cache
     std::vector<DeviceGroup> groups_;
-    std::vector<std::vector<PartitionView>> group_partitions_;  // stable backing for views
+    std::vector<UsmBuffer<PartitionView>> group_partitions_;  // device-resident PartitionView arrays
     DeviceStencil stencil_;
     std::vector<GroupViewT<D>> group_views_;
     StencilViewT<D> stencil_view_ {};
+
+    // Merged single-launch view for block-Jacobi (lazily built, then cached).
+    std::vector<std::vector<PartitionView>> host_pvs_;  // per-group PartitionView (host copies)
+    bool merged_built_ = false;
+    GroupViewT<D> merged_view_ {};
+    UsmBuffer<int> m_gc_, m_role_;
+    UsmBuffer<int> m_gn_[D];
+    UsmBuffer<double> m_s_[D];
+    UsmBuffer<double> m_W_inv_, m_J_;
+    UsmBuffer<int> m_dof_idx_, m_P_of_, m_sample_offset_, m_part_of_, m_row_of_;
+    UsmBuffer<PartitionView> m_partitions_;
 };
 
-/// @brief Monomorphic per-partition sweep kernel (Phase 1a).
+/// @brief Single per-colour sweep kernel (backup architecture, SoA-backed).
 ///
-/// One kernel per (colour, EntityTag) partition: each work item loads its
-/// group-local DOF @c d from @p part.dof_list, builds the concrete entity @c E
-/// via @ref EntitySoA "EntitySoA<E>::load" from the partition's typed SoA (no
-/// `std::visit`, no `make_entity`, no per-lane dispatch), and runs the unchanged
-/// Newton/backtracking body on a fully concrete entity. The entity type @p E is
-/// a compile-time template parameter, so the Newton step, per-trial projection,
-/// and energy reduction are all monomorphic — no variant alternatives are
-/// inlined into the kernel.
+/// One kernel per colour over the whole group's @c ndof — not one per
+/// (colour, EntityTag) partition. The heavy body (patch eval, backtracking,
+/// energy/min-det assembly) is **entity-agnostic** and compiled exactly once;
+/// the only entity-specific steps — the tangent-reduced Newton delta and the
+/// per-trial projection — are isolated behind @ref with_entity, a single cheap
+/// `switch` over the DOF's tag that loads the concrete entity from its SoA slot
+/// and runs a *small* callable. This keeps launches ∝ colours (no per-partition
+/// launch explosion) while never inlining all entity variants into the body
+/// (no `std::visit` occupancy collapse). Race-free within a colour: distinct
+/// DOFs are distinct nodes, so the scatter never collides.
+/// The kernel supports both in-place colored-GS and double-buffered block-Jacobi
+/// via @p X_out: reads (patch eval, trial-loop node substitution, current
+/// position) always use @p X; the final scatter writes @p X_out. When @p X_out is
+/// null the write is in-place (X_out == X) — the colored-GS behaviour. For
+/// block-Jacobi @p X is the frozen read buffer and @p X_out the write buffer, so
+/// every free DOF updates from the same snapshot (no intra-sweep dependency). The
+/// relaxation weight @p omega damps the simultaneous Jacobi update
+/// (`cur = pos + ω·(cur − pos)`); ω=1 is the undamped step (and exact for
+/// colored-GS).
+///
 /// @tparam D Embedding dimension.
-/// @tparam E Entity type (satisfies @ref GeometryEntity).
 /// @tparam Obj Objective type.
 /// @param q SYCL queue.
-/// @param g The colour group view (per-DOF patch arrays + partition list).
-/// @param part The partition to iterate (entity tag @c E, group-local DOF list).
-/// @param X Global node positions (device USM).
+/// @param g The colour group view (per-DOF patch arrays + partition list + map).
+/// @param X Global node positions to read (device USM).
 /// @param objective The objective functor.
-template <int D, class E, class Obj>
-inline void
-  sweep_partition_kernel(sycl::queue& q, const GroupViewT<D>& g, const PartitionView& part, double* X, Obj objective)
+/// @param X_out Buffer to scatter into (null → in-place, X_out == X).
+/// @param omega Relaxation weight (1.0 = undamped).
+/// @brief Project @p p onto @p ent, warm-starting from this DOF's parameter
+///        cache when the entity supports it (the iterative B-spline curve /
+///        surface). @p seed_slot points at the (D-1)-double per-node seed
+///        (non-finite ⇒ cold); on return it holds the converged foot parameter
+///        so the next sweep skips the expensive coarse-grid seed. Closed-form
+///        entities have no @c project_seeded and project cold (seed untouched).
+template <int D, class E>
+inline PtN<D> project_with_seed(const E& ent, const PtN<D>& p, double* seed_slot)
 {
-    if (part.ndof == 0) { return; }
-    q.parallel_for(sycl::range<1>(part.ndof), [=](sycl::id<1> idx) {
-        const std::size_t d = static_cast<std::size_t>(part.dof_list[idx[0]]);
+    constexpr int K = E::tdim;
+    if constexpr (requires(Param<K> s) { ent.project_seeded(p, s, true); }) {
+        Param<K> seed {};
+        const bool has = (seed_slot != nullptr) && std::isfinite(seed_slot[0]);
+        if (has) {
+            for (int a = 0; a < K; ++a) { seed[a] = seed_slot[a]; }
+        }
+        const PtN<D> out = ent.project_seeded(p, seed, has);
+        if (seed_slot != nullptr) {
+            for (int a = 0; a < K; ++a) { seed_slot[a] = seed[a]; }
+        }
+        return out;
+    } else {
+        return ent.project(p);
+    }
+}
+
+/// @param seeds Optional per-node warm-start parameter cache, stride (D-1),
+///        indexed by global node id. Null disables warm starting (cold
+///        projection, e.g. the colored-GS path). Persisted across sweeps by the
+///        owning context so the iterative projections converge in 1–2 Newton
+///        steps from the previous foot instead of the coarse-grid seed.
+///
+/// @tparam FreeOnly When true the launched view is guaranteed to contain only
+///        `EntityTag::Free` DOFs (interior), so all entity/projection/tangent
+///        dispatch is statically elided: the Newton step is the plain `solveNxN`
+///        and the line-search trial is the raw step (no projection). This is the
+///        lean interior kernel of the Plan #1 interior/boundary split — it omits
+///        the `with_entity` call graph entirely, removing the geometry spills.
+///        `false` (default) is the full geometry-aware kernel (every entity type,
+///        correctness preserved), launched over the boundary DOFs.
+template <int D, class Obj, bool FreeOnly = false>
+inline void sweep_colour_kernel(sycl::queue& q, const GroupViewT<D>& g, double* X, Obj objective,
+                                double* X_out = nullptr, double omega = 1.0, double* seeds = nullptr)
+{
+    if (g.ndof == 0) { return; }
+    constexpr std::size_t kSeedStride = (D > 1) ? (D - 1) : 1;
+    const PartitionView* parts = g.partitions;
+    double* out = X_out ? X_out : X;
+    q.parallel_for(sycl::range<1>(g.ndof), [=](sycl::id<1> idx) {
+        const std::size_t d = idx[0];
         const PatchViewT<D> pv = g.patch(d);
         const int dof = g.dof_idx[d];
 
@@ -341,16 +635,20 @@ inline void
         const PatchResultT<D> r = patch_eval<D>(pv, X, objective);
         const PtN<D> pos = load_pt<D>(X, dof);
 
-        // Build the concrete entity ONCE per DOF from the packed SoA records via
-        // tie_view + load (coalesced, no blob stride, no std::visit, no variant):
-        // the Newton step, per-trial projection, and energy reduction below all
-        // run on a monomorphic, fully-concrete E. Every 2D entity type has an
-        // EntitySoA<E> specialization (Phase 4 retired the positional blob), so
-        // this is the single load path.
-        const E ent = EntitySoA<E>::load(EntitySoA<E>::tie_view(part.soa_view, part.seg), idx[0]);
-
-        // 2. Newton step (tangent-reduced if constrained).
-        const VecN<D> delta = newton_delta<D>(r.grad, r.hess, pos, ent);
+        // 2. Newton step. Interior (FreeOnly) DOFs take the plain d×d solve — no
+        //    entity geometry, so the whole `with_entity` dispatch is elided.
+        //    Boundary DOFs take the tangent-reduced step via the scoped tag
+        //    switch (the only place the Newton math touches entity geometry).
+        VecN<D> delta {};
+        if constexpr (FreeOnly) {
+            delta = solveNxN<D>(r.hess, r.grad);
+        } else {
+            // The DOF's entity lives in partition part_of[d] at SoA row row_of[d].
+            const PartitionView& part = parts[g.part_of[d]];
+            const auto row = static_cast<std::size_t>(g.row_of[d]);
+            with_entity<D>(part.tag, part.soa_view, part.seg, row,
+                           [&](const auto& ent) { delta = newton_delta<D>(r.grad, r.hess, pos, ent); });
+        }
 
         // 3. Backtracking: halve alpha up to 10×; accept on
         //    finite(e) && e <= e0 + 1e-12 && objective.accept_mindet(mindet).
@@ -360,11 +658,21 @@ inline void
         for (int it = 0; it < 10 && !accepted; ++it) {
             PtN<D> raw;
             for (int k = 0; k < D; ++k) { raw[k] = pos[k] + alpha * delta[k]; }
-            PtN<D> trial;
-            if constexpr (std::is_same_v<E, Free<D>>) {
-                trial = raw;
-            } else {
-                trial = ent.project(raw);
+            // Interior (FreeOnly) DOFs project to identity → trial = raw, no
+            // dispatch. Constrained DOFs project via the same scoped tag switch
+            // as the Newton step above.
+            PtN<D> trial = raw;
+            if constexpr (!FreeOnly) {
+                const PartitionView& part = parts[g.part_of[d]];
+                const EntityTag tag = part.tag;
+                const auto row = static_cast<std::size_t>(g.row_of[d]);
+                if (tag != EntityTag::Free) {
+                    double* seed_slot =
+                      (seeds != nullptr) ? (seeds + (static_cast<std::size_t>(dof) * kSeedStride))
+                                         : nullptr;
+                    with_entity<D>(tag, part.soa_view, part.seg, row,
+                                   [&](const auto& ent) { trial = project_with_seed<D>(ent, raw, seed_slot); });
+                }
             }
 
             double e_new = 0.0;
@@ -400,8 +708,16 @@ inline void
             }
         }
 
-        // 4. Scatter (race-free within colour).
-        store_pt<D>(X, dof, cur);
+        // 4. Optional Jacobi relaxation weighting: cur = pos + ω·(cur − pos).
+        //    ω=1 leaves cur untouched (colored-GS / undamped Jacobi).
+        if (omega != 1.0) {
+            for (int k = 0; k < D; ++k) { cur[k] = pos[k] + (omega * (cur[k] - pos[k])); }
+        }
+
+        // 5. Scatter. In-place (colored-GS) writes X; double-buffered Jacobi
+        //    writes the separate X_out snapshot. Race-free: distinct DOFs are
+        //    distinct nodes, so the scatter never collides.
+        store_pt<D>(out, dof, cur);
     });
 }
 
@@ -446,64 +762,166 @@ inline void reduce_energy_mindet(sycl::queue& q,
                    });
 }
 
+/// @brief Shared colored Gauss-Seidel driver: @c n_sweeps of (pre-sweep hook →
+///        per-colour kernels → energy/min-det reduction) on the in-order queue.
+///
+/// Both the unstructured @ref ExecutorT and the structured @ref
+/// StructuredExecutorT compose this; the only difference between them is the
+/// @c before_sweep hook, called as `before_sweep(q, X)` before each sweep's
+/// colour kernels. The unstructured path passes a no-op; the structured path
+/// passes a per-sweep @ref halo_exchange (cadence 1.4b). Colours are serialized
+/// by the in-order queue, and the race-free colouring guarantees no DOF reads a
+/// same-colour mate's X within a sweep.
+///
+/// @p report_every controls how often the energy/min-det reduction is run:
+///   - `1` (default, legacy)  : every sweep  — returns `n_sweeps` pairs.
+///   - `k > 1`                : every `k`-th sweep, plus always the final
+///                                sweep of the run               — returns `ceil(n/k)` pairs.
+///   - `<= 0`                 : only the final sweep of this run  — returns `1` pair.
+/// The returned vectors carry exactly the reported reductions (length matches
+/// the number of reductions actually performed, not `n_sweeps`).
+template <int D, class Obj, class PreSweep>
+inline std::pair<std::vector<double>, std::vector<double>>
+  run_colored_gs(sycl::queue& q, SweepDeviceContextT<D>& ctx, Obj objective, int n_sweeps,
+                 PreSweep before_sweep, int report_every = 1)
+{
+    const int k = (report_every <= 0) ? n_sweeps : report_every;
+    const std::size_t report_count =
+      static_cast<std::size_t>((n_sweeps + k - 1) / k);
+    UsmBuffer<double> d_e(q, report_count);
+    UsmBuffer<double> d_m(q, report_count);
+    double* X = ctx.X();
+
+    constexpr int kSyncEvery = 32;
+    std::size_t report_idx = 0;
+    for (int s = 0; s < n_sweeps; ++s) {
+        before_sweep(q, X);
+        // Per colour: lean interior launch over [0, n_free) then the full
+        // boundary launch over the tail. Within a colour all DOFs are distinct
+        // nodes, so the two launches over disjoint subsets are race-free
+        // (serialized by the in-order queue). Plan #1 step 4.
+        for (const auto& gv : ctx.group_views()) {
+            sweep_colour_kernel<D, Obj, true>(q, gv.dof_subrange(0, gv.n_free), X, objective);
+            sweep_colour_kernel<D, Obj, false>(
+              q, gv.dof_subrange(gv.n_free, gv.ndof - gv.n_free), X, objective);
+        }
+        if ((s + 1) % k == 0 || s == n_sweeps - 1) {
+            reduce_energy_mindet<D>(q, ctx.stencil_view(), X,
+                                    d_e.data() + report_idx, d_m.data() + report_idx, objective);
+            ++report_idx;
+        }
+        if ((s + 1) % kSyncEvery == 0) { q.wait(); }
+    }
+    q.wait();
+    assert(report_idx == report_count);
+
+    std::vector<double> energies(report_count), mindets(report_count);
+    d_e.download(energies.data());
+    d_m.download(mindets.data());
+    return {energies, mindets};
+}
+
+/// @brief Double-buffered block-Jacobi driver: @c n_sweeps of (pre-sweep hook →
+///        one merged Jacobi launch reading X_in, writing X_new → energy/min-det
+///        reduction on X_new → swap).
+///
+/// The structured analogue of @ref run_colored_gs, but instead of the ~14-deep
+/// per-colour dependency chain it issues a **single** launch over the merged
+/// group view (@ref SweepDeviceContextT::merged_group_view): under the frozen-halo
+/// cadence every free DOF reads the previous snapshot, so there is no colour
+/// ordering and no intra-sweep dependency. @p before_sweep is the same per-sweep
+/// halo hook the structured colored-GS path uses (halo_exchange + broadcast on the
+/// read buffer). @p omega is the SOR/damping weight forwarded to the kernel.
+///
+/// A second USM buffer (X_new) is allocated once and initialised to a copy of X;
+/// each sweep writes every free DOF, fixed nodes stay constant, and ghosts are
+/// re-exchanged, so no per-sweep full copy is needed. After the loop the canonical
+/// ctx buffer is restored if an odd number of swaps left the result in X_new.
+template <int D, class Obj, class PreSweep>
+inline std::pair<std::vector<double>, std::vector<double>>
+  run_block_jacobi(sycl::queue& q, SweepDeviceContextT<D>& ctx, Obj objective, int n_sweeps,
+                   PreSweep before_sweep, double omega = 1.0, int report_every = 1)
+{
+    const int k = (report_every <= 0) ? n_sweeps : report_every;
+    const std::size_t report_count =
+      static_cast<std::size_t>((n_sweeps + k - 1) / k);
+    UsmBuffer<double> d_e(q, report_count);
+    UsmBuffer<double> d_m(q, report_count);
+    const std::size_t nbuf = ctx.x_size();
+    UsmBuffer<double> x_new_buf(q, nbuf);
+
+    double* canonical = ctx.X();
+    double* x_in = canonical;
+    double* x_out = x_new_buf.data();
+    q.memcpy(x_out, x_in, nbuf * sizeof(double)).wait();  // X_new := copy of X
+
+    const GroupViewT<D>& mg = ctx.merged_group_view();
+
+    constexpr int kSyncEvery = 32;
+    std::size_t report_idx = 0;
+    for (int s = 0; s < n_sweeps; ++s) {
+        before_sweep(q, x_in);  // refresh ghosts + shared-node copies on the read buffer
+        // Interior/boundary split: the lean FreeOnly kernel over [0, n_free)
+        // (no projection, no seeds) and the full geometry kernel over the
+        // boundary tail. Both read the frozen x_in and write disjoint x_out
+        // slots, so block-Jacobi correctness is preserved. Plan #1 step 4.
+        sweep_colour_kernel<D, Obj, true>(
+          q, mg.dof_subrange(0, mg.n_free), x_in, objective, x_out, omega, nullptr);
+        sweep_colour_kernel<D, Obj, false>(
+          q, mg.dof_subrange(mg.n_free, mg.ndof - mg.n_free), x_in, objective, x_out, omega,
+          ctx.seeds());
+        if ((s + 1) % k == 0 || s == n_sweeps - 1) {
+            reduce_energy_mindet<D>(q, ctx.stencil_view(), x_out,
+                                    d_e.data() + report_idx, d_m.data() + report_idx,
+                                    objective);
+            ++report_idx;
+        }
+        std::swap(x_in, x_out);
+        if ((s + 1) % kSyncEvery == 0) { q.wait(); }
+    }
+    q.wait();
+    assert(report_idx == report_count);
+
+    // After the loop the freshest values are in x_in (post-swap). Make the ctx's
+    // canonical buffer hold them so downloads / subsequent runs see the result.
+    if (x_in != canonical) { q.memcpy(canonical, x_in, nbuf * sizeof(double)).wait(); }
+
+    std::vector<double> energies(report_count), mindets(report_count);
+    d_e.download(energies.data());
+    d_m.download(mindets.data());
+    return {energies, mindets};
+}
+
 template <int D> class ExecutorT
 {
   public:
     ExecutorT(const sycl::queue& queue, const SweepContextHostT<D>& host) :
-        q_(sycl::queue(
-          queue.get_context(), queue.get_device(), {sycl::property::queue::in_order()})),
+        q_(sycl::queue(queue.get_context(), queue.get_device(),
+          {sycl::property::queue::in_order(),
+           sycl::property::queue::AdaptiveCpp_coarse_grained_events{}})),
         ctx_(q_, host)
     {
     }
 
     SweepDeviceContextT<D>& ctx() { return ctx_; }
 
-    // Run n_sweeps, dispatching the objective kind once via std::visit.
+// Run n_sweeps, dispatching the objective kind once via std::visit.
+    // @p report_every throttles the energy/min-det reduction cadence
+    // (see @ref run_colored_gs); default preserves the legacy per-sweep contract.
     std::pair<std::vector<double>, std::vector<double>>
-      run_sweeps(int n_sweeps, const ObjectiveKindT<D>& kind = ShapeObjectiveT<D> {})
+      run_sweeps(int n_sweeps, const ObjectiveKindT<D>& kind = ShapeObjectiveT<D> {},
+                 int report_every = 1)
     {
-        return std::visit([&](auto objective) { return run_impl(objective, n_sweeps); }, kind);
+        return std::visit(
+          [&](auto objective) {
+              // Unstructured path: no halo exchange (one global X, not per-block).
+              return run_colored_gs<D>(q_, ctx_, objective, n_sweeps,
+                                        [](sycl::queue&, double*) {}, report_every);
+          },
+          kind);
     }
 
   private:
-    template <class Obj>
-    std::pair<std::vector<double>, std::vector<double>> run_impl(Obj objective, int n_sweeps)
-    {
-        UsmBuffer<double> d_e(q_, static_cast<std::size_t>(n_sweeps));
-        UsmBuffer<double> d_m(q_, static_cast<std::size_t>(n_sweeps));
-        double* X = ctx_.X();
-
-        constexpr int kSyncEvery = 32;
-        for (int s = 0; s < n_sweeps; ++s) {
-            for (const auto& gv : ctx_.group_views()) {
-                // Launch one monomorphic kernel per (colour, EntityTag) partition
-                // via dispatch_entity_type — no in-kernel std::visit, no per-lane
-                // dispatch. Partitions are serialized by the in-order queue; the
-                // race-free colouring guarantees no cross-partition dependency
-                // within a colour (no DOF reads a same-colour mate's X).
-                for (std::size_t p = 0; p < gv.num_partitions; ++p) {
-                    const auto& part = gv.partitions[p];
-                    dispatch_entity_type<D>(part.tag, [&]<class E>() {
-                        sweep_partition_kernel<D, E>(q_, gv, part, X, objective);
-                    });
-                }
-            }
-            reduce_energy_mindet<D>(q_,
-                                    ctx_.stencil_view(),
-                                    X,
-                                    d_e.data() + s,
-                                    d_m.data() + s,
-                                    objective);
-            if ((s + 1) % kSyncEvery == 0) { q_.wait(); }
-        }
-        q_.wait();
-
-        std::vector<double> energies(n_sweeps), mindets(n_sweeps);
-        d_e.download(energies.data());
-        d_m.download(mindets.data());
-        return {energies, mindets};
-    }
-
     sycl::queue q_;
     SweepDeviceContextT<D> ctx_;
 };

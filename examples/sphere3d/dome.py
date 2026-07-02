@@ -14,7 +14,7 @@ produces) and drives the C++ core directly at ``dim=3``:
 Usage::
 
     uv run dome.py [--n N] [--sweeps N] [--chunk N] [--device cpu|gpu|auto]
-        [--plot-live] [--plot-grid] [--plot-energy]
+        [--report-every N] [--plot-live] [--plot-grid] [--plot-energy]
 """
 
 import argparse
@@ -186,6 +186,21 @@ def main():
     p.add_argument("--chunk", type=int, default=10,
                    help="sweeps per device-resident chunk")
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
+    p.add_argument("--structured", action="store_true",
+                   help="run the halo-padded structured path (coalesced stencil) "
+                        "instead of the global colored-GS session")
+    p.add_argument("--smoother", choices=["colored-gs", "block-jacobi"],
+                   default="colored-gs",
+                   help="structured-path smoother (requires --structured): the "
+                        "in-place per-colour chain or one merged block-Jacobi launch")
+    p.add_argument("--omega", type=float, default=1.0,
+                   help="block-Jacobi SOR/damping weight (1.0 = undamped)")
+    p.add_argument("--report-every", type=int, default=0,
+                   help="report (energy, min_det) every N sweeps: 0 (default) "
+                        "reports once per chunk (chunk-end, minimal reduction "
+                        "launches — the small-n GPU regime); 1 reports every "
+                        "sweep (legacy full per-sweep history for --plot-energy); "
+                        "k > 1 reports every k-th sweep plus the final one.")
     p.add_argument("--plot-live", action="store_true",
                    help="matplotlib animated 3D wireframe (one frame per chunk)")
     p.add_argument("--plot-grid", action="store_true",
@@ -228,7 +243,24 @@ def main():
 
     # Chunked, device-resident driving: the context/X are uploaded once and the
     # sweeps run in chunks so live plotting only pays one download per chunk.
-    session = cpp_core.CppSweepSession(ctx, X.ravel(), device=a.device, dim=3)
+    if a.structured:
+        # The dome lattice is a single n^3 block (C-order node ids), so the
+        # structured store has an empty halo: structured colored-GS is bit-for-bit
+        # the global path, and block-Jacobi is the merged single-launch smoother.
+        from egg.smoothing.cpp_backend import (
+            build_structured_context_from_block_maps, structured_arrays)
+        blocks = [np.arange(n ** 3).reshape(n, n, n)]
+        bsc = build_structured_context_from_block_maps(3, blocks, X.shape[0])
+        structured = structured_arrays(bsc)
+        session = cpp_core.CppStructuredSweepSession(
+            ctx, structured, X.ravel(), device=a.device, dim=3)
+        print(f"structured: blocks={bsc.num_blocks} smoother={a.smoother} omega={a.omega}")
+        run_kwargs = {"smoother": a.smoother, "omega": a.omega}
+    else:
+        if a.smoother != "colored-gs":
+            p.error("--smoother requires --structured")
+        session = cpp_core.CppSweepSession(ctx, X.ravel(), device=a.device, dim=3)
+        run_kwargs = {}
     energies, mindets = [], []
 
     live = None
@@ -244,7 +276,8 @@ def main():
     done = 0
     while done < a.sweeps:
         step = min(a.chunk, a.sweeps - done)
-        e, m = session.run(step, phase="barrier", delta=0.0)
+        e, m = session.run(step, phase="barrier", delta=0.0,
+                       report_every=a.report_every, **run_kwargs)
         energies.extend(np.asarray(e))
         mindets.extend(np.asarray(m))
         done += step

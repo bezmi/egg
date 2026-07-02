@@ -224,6 +224,24 @@ template <Parametrization P> struct TrimmedEntity {
     /// @param p Query point.
     /// @return The projected point.
     [[nodiscard]] Pt project(const Pt& p) const { return project_frame(p).pos; }
+
+    /// @brief Warm-started projection: seed the (Newton-based) inverse from
+    ///        @p seed_io (the previous foot parameter) and write the converged
+    ///        parameter back into @p seed_io for the next call. Only present when
+    ///        the parametrization provides @c invert_seeded (the iterative
+    ///        B-spline curve/surface), so closed-form params fall through to the
+    ///        cold @ref project in the device kernel's seed dispatch.
+    [[nodiscard]] Pt project_seeded(const Pt& p, Param<tdim>& seed_io, bool has_seed) const
+        requires requires(const P& pp, const Pt& pt, Param<tdim>& s, bool b) {
+            pp.invert_seeded(pt, s, b);
+        }
+    {
+        Param<tdim> q = param.invert_seeded(p, seed_io, has_seed);
+        seed_io = q;  // store the unclamped Newton foot for the next warm start
+        const bool inside = trim.contains(q);
+        if (!inside) { q = trim.clamp(q); }
+        return param.eval(q);
+    }
     /// @brief Orthonormal tangent basis at the projection of @p p.
     /// @param p Query point.
     /// @return The @c tdim orthonormal tangent columns.
@@ -404,22 +422,29 @@ static_assert(Parametrization<LineParam>);
 /// @param n_seed Number of coarse samples for the seed.
 /// @param iters Newton iterations.
 /// @return The nearest-foot parameter @f$ t @f$.
+// Seeded variant: when @p has_seed, skip the coarse-sample search and start
+// Newton from @p seed (warm start, e.g. the previous sweep's foot parameter).
 template <class C>
-inline double project_param(
-  const C& c, const PtN<2>& q, double t_lo, double t_hi, int n_seed = 16, int iters = 8)
+inline double project_param_seeded(const C& c, const PtN<2>& q, double t_lo, double t_hi,
+                                   double seed, bool has_seed, int n_seed = 16, int iters = 8)
 {
-    double best_t = t_lo;
-    double best_d = std::numeric_limits<double>::infinity();
-    for (int i = 0; i <= n_seed; ++i) {
-        const double t = t_lo + (((t_hi - t_lo) * i) / n_seed);
-        const VecN<2> d = c.eval({t}) - q;
-        const double dd = dot(d, d);
-        if (dd < best_d) {
-            best_d = dd;
-            best_t = t;
+    double t;
+    if (has_seed) {
+        t = std::clamp(seed, t_lo, t_hi);
+    } else {
+        double best_t = t_lo;
+        double best_d = std::numeric_limits<double>::infinity();
+        for (int i = 0; i <= n_seed; ++i) {
+            const double tc = t_lo + (((t_hi - t_lo) * i) / n_seed);
+            const VecN<2> d = c.eval({tc}) - q;
+            const double dd = dot(d, d);
+            if (dd < best_d) {
+                best_d = dd;
+                best_t = tc;
+            }
         }
+        t = best_t;
     }
-    double t = best_t;
     for (int it = 0; it < iters; ++it) {
         const VecN<2> d = c.eval({t}) - q;
         const VecN<2> d1 = c.deriv({t});
@@ -429,6 +454,13 @@ inline double project_param(
         t -= f / fp;
     }
     return t;
+}
+
+template <class C>
+inline double project_param(
+  const C& c, const PtN<2>& q, double t_lo, double t_hi, int n_seed = 16, int iters = 8)
+{
+    return project_param_seeded(c, q, t_lo, t_hi, 0.0, false, n_seed, iters);
 }
 
 /// @brief A circular arc of radius @p r centred at @f$ (c_x, c_y) @f$, parametrized
@@ -693,6 +725,9 @@ struct BSplineCurveParam {
     ///        @f$ [knots[degree], knots[n\_ctrl]] @f$.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
     { return {project_param(*this, q, knots[degree], knots[n_ctrl])}; }
+    /// @brief Warm-started inverse: skip the coarse seed when @p has_seed.
+    [[nodiscard]] Param<1> invert_seeded(const PtN<2>& q, Param<1> seed, bool has_seed) const
+    { return {project_param_seeded(*this, q, knots[degree], knots[n_ctrl], seed[0], has_seed)}; }
     /// @brief The raw tangent column @f$ C'(u) @f$.
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& u) const { return {deriv(u)}; }
 };
@@ -861,7 +896,7 @@ struct BSplineSurfaceParam {
     /// @param S Output: `S[a][b]` is @f$ S^{(a,b)} @f$; entries with
     ///          @f$ a + b > nd \cdot 2 @f$ beyond what the quotient rule below
     ///          fills are untouched.
-    void ders(const Param<2>& q, int nd, PtN<3> S[3][3]) const
+    __attribute__((noinline)) void ders(const Param<2>& q, int nd, PtN<3> S[3][3]) const
     {
         const int su = bspline_find_span(pu, nu, knots_u, q[0]);
         const int sv = bspline_find_span(pv, nv, knots_v, q[1]);
@@ -936,21 +971,32 @@ struct BSplineSurfaceParam {
     /// @f$ F = ((S-p)\cdot S_u, (S-p)\cdot S_v) @f$ with the exact Jacobian
     /// (needs the second partials), clamping each iterate to the domain. A
     /// near-singular Jacobian (e.g. at a degenerate corner) stops early.
-    [[nodiscard]] Param<2> invert(const PtN<3>& p) const
+    __attribute__((noinline)) [[nodiscard]] Param<2> invert(const PtN<3>& p) const
+    { return invert_seeded(p, {}, false); }
+
+    /// @brief Warm-started inverse: when @p has_seed, skip the 9×9 coarse-grid
+    ///        search and start Newton from @p seed (e.g. the previous sweep's
+    ///        foot parameter) — the dominant cost of the cold projection.
+    __attribute__((noinline)) [[nodiscard]] Param<2>
+      invert_seeded(const PtN<3>& p, Param<2> seed, bool has_seed) const
     {
         const double u0 = knots_u[pu], u1 = knots_u[nu];
         const double v0 = knots_v[pv], v1 = knots_v[nv];
-        constexpr int kSeed = 8;
         Param<2> q {u0, v0};
-        double best = std::numeric_limits<double>::infinity();
-        for (int i = 0; i <= kSeed; ++i) {
-            for (int j = 0; j <= kSeed; ++j) {
-                const Param<2> t {u0 + (((u1 - u0) * i) / kSeed), v0 + (((v1 - v0) * j) / kSeed)};
-                const VecN<3> d = eval(t) - p;
-                const double dd = dot(d, d);
-                if (dd < best) {
-                    best = dd;
-                    q = t;
+        if (has_seed) {
+            q = {std::clamp(seed[0], u0, u1), std::clamp(seed[1], v0, v1)};
+        } else {
+            constexpr int kSeed = 8;
+            double best = std::numeric_limits<double>::infinity();
+            for (int i = 0; i <= kSeed; ++i) {
+                for (int j = 0; j <= kSeed; ++j) {
+                    const Param<2> t {u0 + (((u1 - u0) * i) / kSeed), v0 + (((v1 - v0) * j) / kSeed)};
+                    const VecN<3> d = eval(t) - p;
+                    const double dd = dot(d, d);
+                    if (dd < best) {
+                        best = dd;
+                        q = t;
+                    }
                 }
             }
         }
@@ -2075,6 +2121,43 @@ inline Pt tangent_space(const Pt& p, Tag tag, const double* params)
     dispatch_entity_type<2>(static_cast<EntityTag>(tag),
                             [&]<class E>() { out = decode_entity<E>(params).tangent_basis(p)[0]; });
     return out;
+}
+
+/// @brief Load DOF @p i's concrete entity from its tag's SoA slot and invoke
+///        @p f(ent). The colored-GS sweep's single device-hot-path tag→type
+///        dispatch.
+///
+/// Callers pass a *small* callable (tangent-reduced Newton or projection), so
+/// the heavy patch + backtracking body that surrounds the call stays
+/// entity-agnostic and is compiled exactly once. That sidesteps both measured
+/// failure modes of the sweep kernel:
+///   - wrapping the whole body in `std::visit` inlines every variant
+///     alternative into one kernel → register pressure → GPU occupancy
+///     collapse (≈4× slower on the bench);
+///   - launching one monomorphic kernel per entity type → launch-count
+///     explosion on the in-order queue (the per-partition regression).
+/// Here the dispatch is one cheap `switch` over @p tag around a small
+/// `EntitySoA<E>::load`, and the launch stays one-per-colour.
+///
+/// @tparam D Embedding dimension.
+/// @tparam F Callable invoked as `f(const E&)` with the loaded entity.
+/// @param tag     Entity tag of the DOF (selects the concrete type).
+/// @param records Packed SoA records view of the DOF's tag partition.
+/// @param seg     Segmented (CSR) field views of that partition (null for fixed-size).
+/// @param i       Row of the DOF within its tag partition.
+/// @param f       The small entity-specific callable.
+template <int D, class F>
+inline void with_entity(EntityTag tag,
+                        SoAView<const double> records,
+                        const SegmentedView<double>* seg,
+                        std::size_t i,
+                        F&& f)
+{
+    dispatch_entity_type<D>(tag, [&]<class E>() {
+        if constexpr (HasEntitySoA<E>) {
+            f(EntitySoA<E>::load(EntitySoA<E>::tie_view(records, seg), i));
+        }
+    });
 }
 
 }  // namespace egg

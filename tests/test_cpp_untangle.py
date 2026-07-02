@@ -53,17 +53,22 @@ def _folded_context():
 @pytest.mark.parametrize("delta", [1e-1, 1e-2, 1e-3])
 @pytest.mark.parametrize("n_sweeps", [1, 3])
 def test_cpp_untangle_self_consistent(n_sweeps, delta):
-    """One-shot cpp_sweep(phase="untangle") is identical to session-mode."""
+    """One-shot cpp_sweep(phase="untangle") is identical to session-mode.
+
+    Pins ``report_every=1`` so the per-sweep min-det arrays are directly
+    comparable (the binding's default of 0 would collapse one side to a
+    single value).
+    """
     from egg.smoothing.cpp_backend import CppSweepSession, cpp_sweep
 
     ctx, X0 = _folded_context()
     X_os, _, m_os = cpp_sweep(ctx, X0.copy(), n_sweeps, device="cpu",
-                               phase="untangle", delta=delta)
+                               phase="untangle", delta=delta, report_every=1)
 
     sess = CppSweepSession(ctx, X0.copy(), device="cpu")
     m_parts = []
     for _ in range(n_sweeps):
-        _, m = sess.run(1, phase="untangle", delta=delta)
+        _, m = sess.run(1, phase="untangle", delta=delta, report_every=1)
         m_parts.append(m)
     m_sess = np.concatenate(m_parts)
 

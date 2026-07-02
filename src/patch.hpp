@@ -114,10 +114,17 @@ inline void patch_energy_mindet(
 // batch.patch_eval (numerically identical to the JAX patch_eval_jax). For D=2 the
 // accumulation orders match the original unrolled code, so it is bit-identical.
 template <int D, ObjectiveD<D> M = ShapeObjectiveT<D>>
-inline PatchResultT<D> patch_eval(const PatchViewT<D>& sv, const double* X, M objective = {})
+__attribute__((noinline)) inline PatchResultT<D>
+  patch_eval(const PatchViewT<D>& sv, const double* X, M objective = {})
 {
     constexpr int kVT = dim::vecT(D);
     constexpr int kJC = dim::jCols(D);
+    // Fused path when the objective offers eval_jhj (ShapeObjectiveT<3>): one CSE
+    // pass yields value + metric gradient + the contracted Hessian Jbᵀ H Jb,
+    // without ever materialising the 81-entry metric Hessian (the live state that
+    // pins the 3D sweep kernel at 256 VGPR). Otherwise the separate
+    // value/grad/hess path (D=2 closed form, or the AD untangle objective) runs.
+    constexpr bool kUseJhj = requires(M m, VecTN<D> tt, double* d) { m.eval_jhj(tt, d, d, d, d); };
     PatchResultT<D> r {};
     r.grad = VecN<D> {};
     r.hess = MatN<D> {};
@@ -127,16 +134,39 @@ inline PatchResultT<D> patch_eval(const PatchViewT<D>& sv, const double* X, M ob
     for (int p = 0; p < sv.P; ++p) {
         double detA;
         const VecTN<D> t = sample_vecT<D>(sv, X, p, detA);
-
-        // --- energy & mindet ---
-        r.energy += objective.value(t);
         if (detA < r.mindet) { r.mindet = detA; }
-
         const double* w = &sv.W_inv[dim::wInv(D) * p];  // row-major d×d
+        const int role = sv.role[p];
 
-        // --- gradient ---
-        // dmu_dT (vec order, row-major) then dmu_dA[i,k] = sum_j dmu_dT[i,j]·w[k,j].
-        const GradN<D> g = objective.grad(t);
+        // Metric gradient g (vec order, row-major). The fused path also folds in
+        // the energy and the contracted-Hessian contribution here.
+        GradN<D> g;
+        if constexpr (kUseJhj) {
+            // Role-selected Jb (kVT×D, row-major); zero when the DOF is absent so
+            // the returned jhj is itself zero (the Hessian block is role-gated).
+            double Jb[kVT * D];
+            for (int e = 0; e < kVT * D; ++e) { Jb[e] = 0.0; }
+            if (role >= 0) {
+                const double* Jp = &sv.J[dim::jSize(D) * p];
+                const int c0 = D * role;
+                for (int a = 0; a < kVT; ++a) {
+                    for (int k = 0; k < D; ++k) { Jb[(a * D) + k] = Jp[(a * kJC) + c0 + k]; }
+                }
+            }
+            double val = 0.0;
+            double gg[kVT];
+            double jhj[D * D];
+            objective.eval_jhj(t, Jb, &val, gg, jhj);
+            r.energy += val;
+            for (int i = 0; i < kVT; ++i) { g[i] = gg[i]; }
+            for (int i = 0; i < D * D; ++i) { r.hess[i] += jhj[i]; }
+        } else {
+            r.energy += objective.value(t);
+            g = objective.grad(t);
+        }
+
+        // --- gradient contraction (common) ---
+        // dmu_dA[i,k] = sum_j dmu_dT[i,j]·w[k,j].
         double dA[D][D];
         for (int i = 0; i < D; ++i) {
             for (int k = 0; k < D; ++k) {
@@ -145,8 +175,6 @@ inline PatchResultT<D> patch_eval(const PatchViewT<D>& sv, const double* X, M ob
                 dA[i][k] = acc;
             }
         }
-
-        const int role = sv.role[p];
         double c[D];
         for (int i = 0; i < D; ++i) { c[i] = 0.0; }
         if (role == 0) {  // corner: c[i] = -sum_k s[k]·dA[i][k]
@@ -161,31 +189,33 @@ inline PatchResultT<D> patch_eval(const PatchViewT<D>& sv, const double* X, M ob
         }  // role == -1: absent, contributes nothing
         for (int i = 0; i < D; ++i) { r.grad[i] += c[i]; }
 
-        // --- hessian ---
+        // --- hessian (non-fused path) ---
         // Select the D columns of J for this role (cols D·role + {0..D-1}); zero
         // the whole block when the DOF is absent (role < 0). Jb is kVT×D.
-        if (role >= 0) {
-            const HessN<D> H = objective.hess(t);         // (d²)×(d²) row-major
-            const double* Jp = &sv.J[dim::jSize(D) * p];  // jRows×jCols row-major
-            const int c0 = D * role;                      // first selected column
-            double Jb[kVT][D];
-            for (int a = 0; a < kVT; ++a) {
-                for (int k = 0; k < D; ++k) { Jb[a][k] = Jp[(a * kJC) + c0 + k]; }
-            }
-            // HJb[a,j] = sum_b H[a,b] Jb[b,j].
-            double HJb[kVT][D];
-            for (int a = 0; a < kVT; ++a) {
-                for (int j = 0; j < D; ++j) {
-                    double acc = 0.0;
-                    for (int b = 0; b < kVT; ++b) { acc += H[(a * kVT) + b] * Jb[b][j]; }
-                    HJb[a][j] = acc;
+        if constexpr (!kUseJhj) {
+            if (role >= 0) {
+                const HessN<D> H = objective.hess(t);         // (d²)×(d²) row-major
+                const double* Jp = &sv.J[dim::jSize(D) * p];  // jRows×jCols row-major
+                const int c0 = D * role;                      // first selected column
+                double Jb[kVT][D];
+                for (int a = 0; a < kVT; ++a) {
+                    for (int k = 0; k < D; ++k) { Jb[a][k] = Jp[(a * kJC) + c0 + k]; }
                 }
-            }
-            for (int i = 0; i < D; ++i) {
-                for (int j = 0; j < D; ++j) {
-                    double acc = 0.0;
-                    for (int a = 0; a < kVT; ++a) { acc += Jb[a][i] * HJb[a][j]; }
-                    r.hess[(i * D) + j] += acc;
+                // HJb[a,j] = sum_b H[a,b] Jb[b,j].
+                double HJb[kVT][D];
+                for (int a = 0; a < kVT; ++a) {
+                    for (int j = 0; j < D; ++j) {
+                        double acc = 0.0;
+                        for (int b = 0; b < kVT; ++b) { acc += H[(a * kVT) + b] * Jb[b][j]; }
+                        HJb[a][j] = acc;
+                    }
+                }
+                for (int i = 0; i < D; ++i) {
+                    for (int j = 0; j < D; ++j) {
+                        double acc = 0.0;
+                        for (int a = 0; a < kVT; ++a) { acc += Jb[a][i] * HJb[a][j]; }
+                        r.hess[(i * D) + j] += acc;
+                    }
                 }
             }
         }

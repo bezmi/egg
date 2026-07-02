@@ -1,4 +1,12 @@
-"""Sphere inside a cube — the 3D analogue of the 2D circle-in-rectangle O-grid.
+"""NURBS sphere inside a cube — a heavy-entity variant of sphere_in_cube.
+
+Identical to ``sphere_in_cube.py`` except the spherical cavity is an exact
+*NURBS* surface (degree-2 surface of revolution, rational weights) instead of
+the analytic ``Sphere``. Geometrically it is the same sphere (eval radius error
+~1e-16), but every cavity node now slides via the heavy
+``BSplineSurfaceParam`` device project (coarse-grid-seeded Newton on the
+nearest-foot stationarity) — the workload that decides whether the per-colour
+sweep kernel still wins once the constrained entity is expensive.
 
 Mirrors the 2D circle example's topology one dimension up: a 6-block
 "cubed-sphere" **O-shell** wraps the spherical cavity of radius ``r0`` out to
@@ -34,9 +42,10 @@ from itertools import product
 import numpy as np
 
 from egg._cpp import cpp_core
-from egg.geometry.analytic3d import Line3, Plane, Sphere
+from egg.geometry.analytic3d import Line3
 from egg.geometry.entity_encoding import TAG_FREE, TAG_PLANE, TAG_SPHERE
 from egg.geometry.entity_soa import TAG_LINE3, group_entities_by_type
+from egg.geometry.surfaces3d import BSplineSurface
 from egg.smoothing.batch import make_chain_J_nd
 
 # The six cube-face frames (e, t1, t2), each right-handed: t1 x t2 = e, so the
@@ -107,23 +116,82 @@ def build_grid(n, m, mh, r0, cw):
     return np.asarray(X), blocks
 
 
+def nurbs_sphere(r0, center=(0.0, 0.0, 0.0)):
+    """Exact NURBS sphere of radius ``r0`` as a surface of revolution.
+
+    A degree-2 nine-point NURBS full circle (u, around z) revolves a degree-2
+    five-point NURBS meridian half-circle (v, north->south); the combined
+    weights are the product, and the pole rows collapse to a point (the
+    standard degenerate-pole rational sphere). Bit-for-bit the analytic sphere
+    geometrically (eval radius error ~1e-16), but routed through the heavy
+    ``BSplineSurfaceParam`` device project — the point of this benchmark.
+    """
+    s2 = np.sqrt(2.0) / 2.0
+    circ = np.array([(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0),
+                     (-1, -1), (0, -1), (1, -1), (1, 0)], dtype=float)
+    wc = np.array([1, s2, 1, s2, 1, s2, 1, s2, 1], dtype=float)
+    knots_u = np.array([0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4], dtype=float)
+    merid = np.array([(0, 1), (1, 1), (1, 0), (1, -1), (0, -1)], dtype=float)  # (radius, height)
+    wm = np.array([1, s2, 1, s2, 1], dtype=float)
+    knots_v = np.array([0, 0, 0, 1, 1, 2, 2, 2], dtype=float)
+    nu, nv = 9, 5
+    ctrl = np.zeros((nu, nv, 3))
+    weights = np.zeros((nu, nv))
+    c = np.asarray(center, float)
+    for j in range(nu):
+        for i in range(nv):
+            x_i, z_i = merid[i]
+            ctrl[j, i] = c + r0 * np.array([x_i * circ[j, 0], x_i * circ[j, 1], z_i])
+            weights[j, i] = wm[i] * wc[j]
+    return BSplineSurface(2, 2, knots_u, knots_v, ctrl, weights)
+
+
+def nurbs_plane(o, a1, a2, half=1.0):
+    """A flat cube face as a degree-1 (bilinear) NURBS surface patch.
+
+    Spans ``o + s*a1 + t*a2`` for ``s, t in [-half, half]`` with the four
+    corners as control points — geometrically the analytic ``Plane`` restricted
+    to the face, but routed through the heavy ``BSplineSurfaceParam`` device
+    project so the cube faces exercise the NURBS path too (not just the sphere).
+    """
+    o = np.asarray(o, float)
+    a1 = np.asarray(a1, float)
+    a2 = np.asarray(a2, float)
+    ctrl = np.zeros((2, 2, 3))
+    for i, s in enumerate((-half, half)):
+        for j, t in enumerate((-half, half)):
+            ctrl[i, j] = o + s * a1 + t * a2
+    knots = np.array([0, 0, 1, 1], dtype=float)
+    return BSplineSurface(1, 1, knots, knots, ctrl)
+
+
 def classify(X, r0, tol=1e-9):
     """Per-node entity objects from position: sphere / plane / edge / corner.
 
     Returns (dof_entities, tags, fixed) where dof_entities maps nid → entity
     object (or None for free), tags is the int tag array (for stats/plots),
-    and fixed marks the 8 cube corners.
+    and fixed marks the 8 cube corners. Both the sphere cavity AND the cube
+    faces are NURBS surfaces (heavy device project); only the cube edges
+    (Line3) and interior stay cheap.
     """
     N = X.shape[0]
     tags = np.zeros(N, dtype=np.int32)
     dof_entities: dict[int, object] = {}
     fixed = np.zeros(N, dtype=bool)
+    sphere = nurbs_sphere(r0)  # one shared NURBS sphere for every cavity node
+    # Six shared NURBS cube-face patches, keyed by (axis, sign).
+    faces = {}
+    for fax in range(3):
+        for sgn in (-1.0, 1.0):
+            fo = np.zeros(3)
+            fo[fax] = sgn
+            fa1, fa2 = np.eye(3)[(fax + 1) % 3], np.eye(3)[(fax + 2) % 3]
+            faces[(fax, sgn)] = nurbs_plane(fo, fa1, fa2)
     for nid in range(N):
         p = X[nid]
         if abs(np.linalg.norm(p) - r0) < tol:
             tags[nid] = TAG_SPHERE
-            dof_entities[nid] = Sphere((0.0, 0.0, 0.0), r0,
-                                       (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+            dof_entities[nid] = sphere
             continue
         on = [ax for ax in range(3) if abs(abs(p[ax]) - 1.0) < tol]
         if len(on) == 3:
@@ -136,13 +204,10 @@ def classify(X, r0, tol=1e-9):
             tags[nid] = TAG_LINE3
             dof_entities[nid] = Line3(p0, p1, 0.0, 1.0)
         elif len(on) == 1:
-            # Cube face: a Plane through the face spanned by the others.
+            # Cube face: a NURBS planar patch for the face it lies on.
             ax = on[0]
-            o = np.zeros(3)
-            o[ax] = np.sign(p[ax])
-            a1, a2 = np.eye(3)[(ax + 1) % 3], np.eye(3)[(ax + 2) % 3]
             tags[nid] = TAG_PLANE
-            dof_entities[nid] = Plane(o, a1, a2)
+            dof_entities[nid] = faces[(ax, float(np.sign(p[ax])))]
         else:
             tags[nid] = TAG_FREE
             dof_entities[nid] = None
@@ -428,7 +493,7 @@ def main():
     a = p.parse_args()
 
     print("=" * 56)
-    print("d=3: sphere in a cube (6-block O-grid) → TMOP smooth")
+    print("d=3: NURBS sphere in a cube (6-block O-grid) → TMOP smooth")
     print("=" * 56)
 
     X, blocks = build_grid(a.n, a.m, a.mh, a.r0, a.cw)
@@ -448,10 +513,9 @@ def main():
 
     if a.structured:
         # Re-home the hand-built block lattice onto the halo-padded structured
-        # store. The blocks already carry the per-block global-DOF arrays (shared
-        # faces merged by position), so the owner/broadcast tables come straight
-        # from them; cross-block stencil neighbours are mirrored by the C++
-        # singular-fan fallback (empty face-ghost halo).
+        # store (owner/broadcast from the per-block global-DOF arrays; cross-block
+        # stencil neighbours mirrored by the C++ singular-fan fallback). Enables
+        # the merged block-Jacobi launch as well as the structured colored-GS.
         from egg.smoothing.cpp_backend import (
             build_structured_context_from_block_maps, structured_arrays)
         bsc = build_structured_context_from_block_maps(3, blocks, X.shape[0])
@@ -477,7 +541,7 @@ def main():
     while done < a.sweeps:
         step = min(a.chunk, a.sweeps - done)
         e, m = session.run(step, phase="barrier", delta=0.0,
-                           report_every=a.report_every, **run_kwargs)
+                       report_every=a.report_every, **run_kwargs)
         energies.extend(np.asarray(e))
         mindets.extend(np.asarray(m))
         done += step
@@ -498,9 +562,8 @@ def main():
     sph = tags == TAG_SPHERE
     sph_dev = np.abs(np.linalg.norm(X_out[sph], axis=1) - a.r0).max()
     pl = tags == TAG_PLANE
-    pl_dev = max(
-        abs(abs(X_out[i][np.argmax(np.abs(dof_entities[i].o))]) - 1.0)
-        for i in np.flatnonzero(pl))
+    # Face nodes stay on the cube surface: their max-abs coordinate is 1.
+    pl_dev = max(abs(np.max(np.abs(X_out[i])) - 1.0) for i in np.flatnonzero(pl))
     print(f"sphere |x|-r0 max dev: {sph_dev:.2e}; plane dev: {pl_dev:.2e}")
     assert mindets[-1] > 0.0
     assert sph_dev < 1e-9 and pl_dev < 1e-9

@@ -46,6 +46,15 @@ class PipelineConfig:
     # TMOP quality phase.
     tmop_sweeps: int = 40
     tmop_chunk: int = 10
+    # TMOP smoother: "colored-gs" (global in-place chain) or "block-jacobi" (the
+    # halo-padded structured store, one merged double-buffered launch per sweep).
+    smoother: str = "colored-gs"
+    omega: float = 1.0  # block-Jacobi SOR/damping weight (ignored by colored-gs)
+    # report_every throttle for the resident session's energy/min-det reduction
+    # (0 = chunk-end, 1 = per-sweep, k > 1 = every k-th plus final). 0 is the
+    # lowest-launch default for the small-n GPU regime; set 1 for live plots
+    # that animate per-sweep energy curves.
+    report_every: int = 0
 
     # Backend.
     use_cpp: bool = True
@@ -101,6 +110,9 @@ def generate_steps(
     untangle_direct: bool = True,
     tmop_sweeps: int = 40,
     tmop_chunk: int = 10,
+    smoother: str = "colored-gs",
+    omega: float = 1.0,
+    report_every: int = 0,
     device: str = "cpu",
 ):
     """Step-wise pipeline on the C++ backend; mutates ``grid`` in place.
@@ -111,7 +123,13 @@ def generate_steps(
     drive it from a PyVista timer (see :func:`egg.io.visualize.animate_pipeline`).
 
     The TMOP phase always steps per chunk (``tmop_chunk`` sweeps each); set
-    ``tmop_chunk == tmop_sweeps`` to run it in one direct call. The untangle
+    ``tmop_chunk == tmop_sweeps`` to run it in one direct call. ``smoother``
+    selects the TMOP relaxation: ``"colored-gs"`` (default, the global in-place
+    colour chain) or ``"block-jacobi"`` (the halo-padded structured store, one
+    merged double-buffered launch per sweep, SOR weight ``omega``) — block-Jacobi
+    converges to the same minimiser but needs more sweeps, so raise
+    ``tmop_sweeps``. Only the TMOP phase honours ``smoother``; the untangle phase
+    always runs the global colored-GS / ``cpp_untangle`` path. The untangle
     phase mirrors this: by default it runs **direct** — the whole δ-continuation
     in one ``cpp_untangle`` call (the analogue of TMOP chunk == sweeps), yielding
     a single ``untangle`` event. Pass ``untangle_direct=False`` to step per δ
@@ -170,7 +188,10 @@ def generate_steps(
             session = CppSweepSession(ctx_iso, grid.global_nodes, device=device)
             delta = delta0_factor * max(abs(md), 1e-12)
             for it in range(max_outer):
-                _e, mds = session.run(sweeps_per_delta, phase="untangle", delta=delta)
+                _e, mds = session.run(
+                    sweeps_per_delta, phase="untangle", delta=delta,
+                    report_every=report_every,
+                )
                 md = float(np.asarray(mds)[-1])
                 _sync(grid, session.get_X())
                 converged = md > margin
@@ -185,11 +206,27 @@ def generate_steps(
     # --- Phase 2: TMOP quality optimisation (resident session, per-chunk loop) ---
     tmop_ctx = ctx_iso if target is None else build_sweep_context(grid, target)
     tmop_sweeps = max((tmop_sweeps // tmop_chunk) * tmop_chunk, tmop_chunk)
-    session = CppSweepSession(tmop_ctx, grid.global_nodes, device=device)
+    # The default colored-GS keeps the global in-place session (unchanged). The
+    # block-Jacobi smoother needs the halo-padded structured store, built from the
+    # grid's BlockTopology; it runs one merged double-buffered launch per sweep and
+    # converges to the same minimiser (more sweeps — bump tmop_sweeps accordingly).
+    if smoother == "block-jacobi":
+        from .smoothing.cpp_backend import (
+            CppStructuredSweepSession, build_block_structured_context)
+        bsc = build_block_structured_context(grid)
+        session = CppStructuredSweepSession(
+            tmop_ctx, bsc, grid.global_nodes, device=device)
+        run_kwargs = {"smoother": "block-jacobi", "omega": omega}
+    elif smoother == "colored-gs":
+        session = CppSweepSession(tmop_ctx, grid.global_nodes, device=device)
+        run_kwargs = {}
+    else:
+        raise ValueError(
+            f"smoother must be 'colored-gs' or 'block-jacobi', got {smoother!r}")
     done = 0
     while done < tmop_sweeps:
         k = min(tmop_chunk, tmop_sweeps - done)
-        energies, _mds = session.run(k)
+        energies, _mds = session.run(k, report_every=report_every, **run_kwargs)
         done += k
         _sync(grid, session.get_X())
         yield ("tmop", {"energy": float(np.asarray(energies)[-1]),
@@ -257,6 +294,9 @@ def generate(topology, config: PipelineConfig | None = None) -> MultiBlockGrid:
                     untangle_direct=True,
                     tmop_sweeps=config.tmop_sweeps,
                     tmop_chunk=config.tmop_chunk,
+                    smoother=config.smoother,
+                    omega=config.omega,
+                    report_every=config.report_every,
                     device=config.device):
                 if phase == "init":
                     report.add("init", min_det=info["min_det"])

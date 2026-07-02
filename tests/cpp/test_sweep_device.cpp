@@ -1,10 +1,10 @@
 // test_sweep_device.cpp — SYCL device parity of the colored Gauss-Seidel
-// barrier sweep (src/sweep.hpp): sweep_partition_kernel (per-(colour,EntityTag)
-// monomorphic launch via dispatch_entity_type), reduce_energy_mindet, and
-// Executor.run_sweeps, run on EVERY visible device (the AMD GPU and the
+// barrier sweep (src/sweep.hpp): sweep_colour_kernel (one per-colour launch
+// with scoped in-kernel tag dispatch via with_entity), reduce_energy_mindet,
+// and Executor.run_sweeps, run on EVERY visible device (the AMD GPU and the
 // OpenMP host/CPU device) against the golden sweep data. The golden context
-// carries mixed-tag DOFs (Free/LineSeg/Circle/CircleArc) so non-Free partition
-// kernels are exercised on device alongside the Free path.
+// carries mixed-tag DOFs (Free/LineSeg/Circle/CircleArc) so the constrained
+// entity dispatch is exercised on device alongside the Free path.
 //
 // Proves the full sweep path — including the colour-ordered partition sequence,
 // backtracking, and energy/min-det reduction — is device-callable and
@@ -13,6 +13,7 @@
 // Requires the acpp toolchain (SYCL).
 #include "golden_soa.hpp"
 #include "golden_sweep.hpp"
+#include "structured_sweep.hpp"
 #include "sweep.hpp"
 #include "sycl_devices.hpp"
 #include "ut_cfg.hpp"
@@ -94,6 +95,27 @@ SweepContextHost build_context_from_golden()
     return host;
 }
 
+// Compare per-sweep energy/min-det and the final X against the golden tables.
+void check_against_golden(const std::vector<double>& energies, const std::vector<double>& mindets,
+                          const std::vector<double>& X_final)
+{
+    for (int s = 0; s < golden::kNumSweeps; ++s) {
+        expect(close(energies[s], golden::kEnergies[s], 1e-10))
+          << std::format("sweep {} energy: {} vs golden {}", s, energies[s], golden::kEnergies[s]);
+        expect(close(mindets[s], golden::kMindets[s], 1e-10))
+          << std::format("sweep {} mindet: {} vs golden {}", s, mindets[s], golden::kMindets[s]);
+    }
+
+    double max_x_diff = 0.0;
+    for (std::size_t i = 0; i < golden::kNumNodes * 2; ++i) {
+        const double diff = std::abs(X_final[i] - golden::kXFinal[i]);
+        if (diff > max_x_diff) max_x_diff = diff;
+        expect(close(X_final[i], golden::kXFinal[i], 1e-9))
+          << std::format("X[{}]: {} vs golden {}", i, X_final[i], golden::kXFinal[i]);
+    }
+    boost::ut::log << std::format("  max X diff: {:.2e}\n", max_x_diff);
+}
+
 // Test one sweep on one device: energy, mindet, and final X.
 void test_sweep_on_device(sycl::queue& q, const std::string& name)
 {
@@ -104,26 +126,29 @@ void test_sweep_on_device(sycl::queue& q, const std::string& name)
 
     auto [energies, mindets] = exec.run_sweeps(golden::kNumSweeps);
 
-    // Per-sweep energy and mindet
-    for (int s = 0; s < golden::kNumSweeps; ++s) {
-        expect(close(energies[s], golden::kEnergies[s], 1e-10))
-          << std::format("sweep {} energy: {} vs golden {}", s, energies[s], golden::kEnergies[s]);
-        expect(close(mindets[s], golden::kMindets[s], 1e-10))
-          << std::format("sweep {} mindet: {} vs golden {}", s, mindets[s], golden::kMindets[s]);
-    }
-
-    // Final X
     std::vector<double> X_final(golden::kNumNodes * 2);
     exec.ctx().download_X(X_final.data());
+    check_against_golden(energies, mindets, X_final);
+}
 
-    double max_x_diff = 0.0;
-    for (std::size_t i = 0; i < golden::kNumNodes * 2; ++i) {
-        const double diff = std::abs(X_final[i] - golden::kXFinal[i]);
-        if (diff > max_x_diff) max_x_diff = diff;
-        expect(close(X_final[i], golden::kXFinal[i], 1e-9))
-          << std::format("X[{}]: {} vs golden {}", i, X_final[i], golden::kXFinal[i]);
-    }
-    boost::ut::log << std::format("  max X diff: {:.2e}\n", max_x_diff);
+// The structured executor (src/structured_sweep.hpp) composes the same
+// run_colored_gs driver as Executor plus a per-sweep halo exchange. Driven on
+// the golden context with an EMPTY block topology, the exchange is a no-op, so it
+// must reproduce the golden sweep exactly — locking the shared-driver refactor
+// and the structured wrapper against the baseline before structured indices /
+// real halos enter via the Python builder and the 1.5 parity gate.
+void test_structured_executor_on_device(sycl::queue& q, const std::string& name)
+{
+    boost::ut::log << std::format("  device: {}\n", name);
+
+    SweepContextHost host = build_context_from_golden();
+    StructuredExecutorT<2> exec(q, host, BlockTopologyDevice<2> {});  // empty topo -> halo no-op
+
+    auto [energies, mindets] = exec.run_sweeps(golden::kNumSweeps);
+
+    std::vector<double> X_final(golden::kNumNodes * 2);
+    exec.ctx().download_X(X_final.data());
+    check_against_golden(energies, mindets, X_final);
 }
 
 }  // namespace
@@ -138,5 +163,8 @@ int main()
         const std::string name = dev.get_info<sycl::info::device::name>();
 
         test("sweep on " + name) = [&] { test_sweep_on_device(q, name); };
+        test("structured executor (empty topo) on " + name) = [&] {
+            test_structured_executor_on_device(q, name);
+        };
     }
 }

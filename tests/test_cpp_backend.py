@@ -65,13 +65,17 @@ def _make_mini_context():
 
 @pytest.mark.parametrize("device", ["cpu"])
 def test_cpp_sweep_smoke(device):
-    """cpp_sweep runs on a tiny context without error."""
+    """cpp_sweep runs on a tiny context without error.
+
+    Pins ``report_every=1`` to assert per-sweep array shapes (the binding's
+    default of 0 would collapse to a single value).
+    """
     from egg.smoothing.cpp_backend import cpp_sweep
 
     ctx, grid = _make_mini_context()
     X0 = grid.global_nodes.copy()
 
-    X_out, energies, mindets = cpp_sweep(ctx, X0, 3, device=device)
+    X_out, energies, mindets = cpp_sweep(ctx, X0, 3, device=device, report_every=1)
 
     assert X_out.shape == X0.shape
     assert energies.shape == (3,)
@@ -83,13 +87,17 @@ def test_cpp_sweep_smoke(device):
 
 @pytest.mark.skipif(not _has_gpu(), reason="No GPU device available")
 def test_cpp_sweep_smoke_gpu():
-    """cpp_sweep runs on GPU without error."""
+    """cpp_sweep runs on GPU without error.
+
+    Pins ``report_every=1`` to assert per-sweep array shapes (the binding's
+    default of 0 would collapse to a single value).
+    """
     from egg.smoothing.cpp_backend import cpp_sweep
 
     ctx, grid = _make_mini_context()
     X0 = grid.global_nodes.copy()
 
-    X_out, energies, mindets = cpp_sweep(ctx, X0, 3, device="gpu")
+    X_out, energies, mindets = cpp_sweep(ctx, X0, 3, device="gpu", report_every=1)
 
     assert X_out.shape == X0.shape
     assert energies.shape == (3,)
@@ -100,7 +108,11 @@ def test_cpp_sweep_smoke_gpu():
 
 
 def test_cpp_sweep_cpu_gpu_agree():
-    """CPU and GPU produce matching results (when both available)."""
+    """CPU and GPU produce matching results (when both available).
+
+    Pins ``report_every=1`` so the per-sweep arrays are directly comparable
+    (the binding's default of 0 would collapse to a single value).
+    """
     if not _has_gpu():
         pytest.skip("No GPU device available")
 
@@ -109,8 +121,8 @@ def test_cpp_sweep_cpu_gpu_agree():
     ctx, grid = _make_mini_context()
     X0 = grid.global_nodes.copy()
 
-    X_cpu, e_cpu, m_cpu = cpp_sweep(ctx, X0.copy(), 3, device="cpu")
-    X_gpu, e_gpu, m_gpu = cpp_sweep(ctx, X0.copy(), 3, device="gpu")
+    X_cpu, e_cpu, m_cpu = cpp_sweep(ctx, X0.copy(), 3, device="cpu", report_every=1)
+    X_gpu, e_gpu, m_gpu = cpp_sweep(ctx, X0.copy(), 3, device="gpu", report_every=1)
 
     np.testing.assert_allclose(e_cpu, e_gpu, rtol=1e-9, atol=1e-12,
                                err_msg="CPU vs GPU energy mismatch")

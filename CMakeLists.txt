@@ -264,11 +264,13 @@ if(EGG_BUILD_TESTS)
   add_executable(cpp_tests
     tests/cpp/test_main.cpp
     tests/cpp/test_metric.cpp
+    tests/cpp/test_metric_3d.cpp
     tests/cpp/test_solve.cpp
     tests/cpp/test_geometry.cpp
     tests/cpp/test_curves.cpp
     tests/cpp/test_3d.cpp
-    tests/cpp/test_patch.cpp)
+    tests/cpp/test_patch.cpp
+    tests/cpp/test_structured.cpp)
   target_link_libraries(cpp_tests PRIVATE egg_core Boost::ut)
   target_compile_definitions(cpp_tests PRIVATE BOOST_UT_DISABLE_MODULE)
   target_include_directories(cpp_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp")
@@ -277,7 +279,11 @@ if(EGG_BUILD_TESTS)
   # Geometry + patch device tests run the closed-form project/tangent and the
   # per-DOF patch evaluation as SYCL kernels on EVERY visible device (the AMD
   # GPU and the OpenMP host/CPU device), against the C++ regression golden tables.
-  foreach(_t geometry patch)
+  # The field device test exercises BlockField<D>'s halo-padded store and its
+  # interior/with_halo mdspan views (Phase 1.1b) on the same devices; the halo
+  # test exercises BlockTopologyDevice + halo_exchange (Phase 1.2); the
+  # structured_field test exercises the BlockFieldStructured adapter (Phase 1.3).
+  foreach(_t geometry patch field halo structured_field)
     add_executable(cpp_${_t}_tests tests/cpp/test_${_t}_device.cpp)
     target_link_libraries(cpp_${_t}_tests PRIVATE egg_core Boost::ut)
     target_compile_definitions(cpp_${_t}_tests PRIVATE BOOST_UT_DISABLE_MODULE)
