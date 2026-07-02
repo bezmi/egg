@@ -429,6 +429,58 @@ def gen_sweep() -> str:
     grid = topo.grid
 
     target = IdentityTarget(d=2)
+
+    # Mixed-tag sliding constraints on free edge DOFs (Phase 1a): inject a few
+    # fixed-size entities (no arena) so the device sweep exercises non-Free
+    # partition kernels — LineSegment, Circle, and CircleArc (a trimmed
+    # analytic). Geometry is chosen so each constrained DOF starts ON its entity
+    # (the 0.05 perturbation below stays well-posed, det(A)>0). DOFs are looked
+    # up by position before the perturbation; they remain in free_mask (sliding).
+    from egg.geometry.analytic2d import Circle, LineSegment
+    from egg.geometry.curves2d import BSplineCurve, CircleArc, CompositePath
+
+    def gidx_at(x: float, y: float) -> int:
+        matches = np.where(
+            (np.abs(grid.global_nodes[:, 0] - x) < 1e-9) &
+            (np.abs(grid.global_nodes[:, 1] - y) < 1e-9)
+        )[0]
+        assert len(matches) == 1, f"expected one DOF at ({x},{y}), got {len(matches)}"
+        return int(matches[0])
+
+    # Bottom edge: two DOFs slide on a horizontal segment y=0, x in [1,3].
+    seg = LineSegment(start=(1.0, 0.0), end=(3.0, 0.0))
+    grid.dof_constraints[gidx_at(1.0, 0.0)] = seg
+    grid.dof_constraints[gidx_at(3.0, 0.0)] = seg
+    # A circle centred at (2,2) radius 2 passes through (2,0) and (0,2);
+    # constrain those two edge midpoints to slide on it.
+    circ = Circle(center=(2.0, 2.0), radius=2.0)
+    grid.dof_constraints[gidx_at(2.0, 0.0)] = circ
+    grid.dof_constraints[gidx_at(0.0, 2.0)] = circ
+    # Rounded top-right corner: a quarter arc of radius 1 about (4,4) from
+    # angle pi (point (3,4)) to 3pi/2 (point (4,3)).
+    arc = CircleArc(center=(4.0, 4.0), radius=1.0, t0=np.pi, t1=1.5 * np.pi)
+    grid.dof_constraints[gidx_at(3.0, 4.0)] = arc
+    grid.dof_constraints[gidx_at(4.0, 3.0)] = arc
+    # A degree-2 B-spline arch over the top edge: control points (1, 3.8),
+    # (2, 4.2), (3, 3.8) with clamped knots [0,0,0,1,1,1] — the midpoint
+    # at t=0.5 is exactly (2, 4.0), matching the grid node. Exercises the
+    # B-spline partition kernel's runtime numerics (find_span + basis_ders
+    # + seeded-Newton projection) on device. Phase 2-A gates this via the
+    # blob path (arena-carried knots/ctrl); Phase 2-B switches to SoA.
+    spline = BSplineCurve(degree=2, knots=[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                          ctrl=[[1.0, 3.8], [2.0, 4.2], [3.0, 3.8]])
+    grid.dof_constraints[gidx_at(2.0, 4.0)] = spline
+    # A 2-segment composite (polyline) up the left edge: (0,0)->(0,2)->(0,4).
+    # DOFs at (0,1) and (0,3) slide on it (each starts exactly on its segment).
+    # Exercises the composite partition kernel's SoA load + per-segment
+    # dispatch_entity_type projection on device (Phase 3) — fixed-size segments.
+    poly = CompositePath([
+        LineSegment(start=(0.0, 0.0), end=(0.0, 2.0)),
+        LineSegment(start=(0.0, 2.0), end=(0.0, 4.0)),
+    ])
+    grid.dof_constraints[gidx_at(0.0, 1.0)] = poly
+    grid.dof_constraints[gidx_at(0.0, 3.0)] = poly
+
     ctx = build_sweep_context(grid, target)
 
     # Perturb initial positions slightly
@@ -477,6 +529,12 @@ def gen_sweep() -> str:
 
     es_data = {k: np.asarray(ctx.energy_stencil[k]) for k in
                ("gc", "gn0", "gn1", "s0", "s1", "W_inv")}
+
+    # Variable-length entity data (B-spline knots/nets). Shared across all
+    # groups — the arena offsets in params index into this single flat array.
+    # Empty when only fixed-size entities are present.
+    arena_data = np.asarray(ctx.entity_arena, dtype=np.float64) if ctx.entity_arena is not None else np.empty(0, dtype=np.float64)
+    arena_size = int(arena_data.shape[0])
 
     # Generate C++ header
     def pad_to(a, n, fill=0):
@@ -543,6 +601,7 @@ inline constexpr int kNumGroups = {len(groups_data)};
 inline constexpr int kNumNodes = {num_nodes};
 inline constexpr int kNumSweeps = 3;
 inline constexpr int kEnergyStencilSize = {es_num};
+inline constexpr int kArenaSize = {arena_size};
 
 struct SweepGroup {{
   int P;
@@ -583,6 +642,8 @@ inline constexpr std::array<double, {num_nodes * 2}> kXFinal = {_arr(X_final.res
 inline constexpr std::array<double, 3> kEnergies = {_arr(energies)};
 
 inline constexpr std::array<double, 3> kMindets = {_arr(mindets)};
+
+inline constexpr std::array<double, kArenaSize> kArena = {_arr(arena_data)};
 
 }}  // namespace egg::golden
 """

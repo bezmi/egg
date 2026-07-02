@@ -15,8 +15,10 @@
 // larger golden context or load from a file.
 #include "sweep.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <exception>
+#include <numeric>
 #include <nanobench.h>
 #include <optional>
 #include <print>
@@ -25,6 +27,7 @@
 #include <vector>
 
 // Pull the golden context from gen_golden.py's output.
+#include "golden_soa.hpp"
 #include "golden_sweep.hpp"
 
 using namespace egg;
@@ -50,21 +53,33 @@ SweepContextHost build_context_from_golden()
     for (std::size_t g = 0; g < golden::kNumGroups; ++g) {
         const auto& gg = golden::kSweepGroups[g];
         SweepGroupHost sg;
-        sg.P = gg.P;
-        sg.D = gg.D;
+        sg.ndof = gg.D;
 
+        // Express the uniform-P golden group in the ragged per-DOF layout
+        // SweepGroupHostT now uses (P_of[d]=P, sample_offset the prefix sum); the
+        // flat DOF-major arrays carry over unchanged.
         const std::size_t DP = gg.D * gg.P;
+        sg.total_samples = DP;
         sg.gc.assign(gg.gc.begin(), gg.gc.begin() + DP);
-        sg.gn0.assign(gg.gn0.begin(), gg.gn0.begin() + DP);
-        sg.gn1.assign(gg.gn1.begin(), gg.gn1.begin() + DP);
-        sg.s0.assign(gg.s0.begin(), gg.s0.begin() + DP);
-        sg.s1.assign(gg.s1.begin(), gg.s1.begin() + DP);
+        sg.gn[0].assign(gg.gn0.begin(), gg.gn0.begin() + DP);
+        sg.gn[1].assign(gg.gn1.begin(), gg.gn1.begin() + DP);
+        sg.s[0].assign(gg.s0.begin(), gg.s0.begin() + DP);
+        sg.s[1].assign(gg.s1.begin(), gg.s1.begin() + DP);
         sg.W_inv.assign(gg.W_inv.begin(), gg.W_inv.begin() + DP * 4);
         sg.role.assign(gg.role.begin(), gg.role.begin() + DP);
         sg.J.assign(gg.J.begin(), gg.J.begin() + DP * 24);
         sg.dof_idx.assign(gg.dof_idx.begin(), gg.dof_idx.begin() + gg.D);
-        sg.tag.assign(gg.tag.begin(), gg.tag.begin() + gg.D);
-        sg.params.assign(gg.params.begin(), gg.params.begin() + gg.D * 12);
+
+        sg.P_of.assign(gg.D, gg.P);
+        sg.sample_offset.resize(gg.D);
+        std::exclusive_scan(sg.P_of.begin(), sg.P_of.end(), sg.sample_offset.begin(), 0);
+
+        // Decode the golden positional blob (per-DOF tag + params + shared arena)
+        // into the typed SoA records the device ctx consumes (Phase 4).
+        const std::vector<int> tag(gg.tag.begin(), gg.tag.begin() + gg.D);
+        const std::vector<double> params(gg.params.begin(), gg.params.begin() + gg.D * 12);
+        const std::vector<double> arena(golden::kArena.begin(), golden::kArena.end());
+        sg.soa = egg_test::build_soa_from_blob(tag.data(), params.data(), arena, sg.ndof);
 
         host.groups.push_back(std::move(sg));
     }
@@ -73,10 +88,10 @@ SweepContextHost build_context_from_golden()
     constexpr std::size_t es_num = golden::SweepEnergyStencil::num_samples;
     host.energy_stencil.num_samples = es_num;
     host.energy_stencil.gc.assign(es.gc.begin(), es.gc.begin() + es_num);
-    host.energy_stencil.gn0.assign(es.gn0.begin(), es.gn0.begin() + es_num);
-    host.energy_stencil.gn1.assign(es.gn1.begin(), es.gn1.begin() + es_num);
-    host.energy_stencil.s0.assign(es.s0.begin(), es.s0.begin() + es_num);
-    host.energy_stencil.s1.assign(es.s1.begin(), es.s1.begin() + es_num);
+    host.energy_stencil.gn[0].assign(es.gn0.begin(), es.gn0.begin() + es_num);
+    host.energy_stencil.gn[1].assign(es.gn1.begin(), es.gn1.begin() + es_num);
+    host.energy_stencil.s[0].assign(es.s0.begin(), es.s0.begin() + es_num);
+    host.energy_stencil.s[1].assign(es.s1.begin(), es.s1.begin() + es_num);
     host.energy_stencil.W_inv.assign(es.W_inv.begin(), es.W_inv.begin() + es_num * 4);
 
     return host;

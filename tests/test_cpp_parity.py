@@ -182,8 +182,16 @@ def test_flatten_context_structure():
         assert g["W_inv"].size == total_samples * 4
         assert g["J"].size == total_samples * 24
         assert g["dof_idx"].shape == (D,)
-        assert g["tag"].shape == (D,)
-        assert g["params"].size == D * 12
+        # Entity data is carried solely by the typed SoA sub-dict (Phase 4
+        # retired the positional tag/params/arena blob); every DOF is covered
+        # by exactly one per-type entity group via its group-local dof_local.
+        assert "tag" not in g and "params" not in g and "arena" not in g
+        entities = g["entities"]
+        assert "__blob__" not in entities
+        covered = sorted(
+            int(i) for e in entities.values() for i in e["dof_local"]
+        )
+        assert covered == list(range(D))
 
     es = fc["energy_stencil"]
     n = es["num_samples"]

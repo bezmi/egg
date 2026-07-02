@@ -1,13 +1,17 @@
 // test_sweep_device.cpp — SYCL device parity of the colored Gauss-Seidel
-// barrier sweep (src/sweep.hpp): sweep_group_kernel, compute_energy_mindet,
-// and Executor.run_sweeps, run on EVERY visible device (the AMD GPU and the
-// OpenMP host/CPU device) against the JAX golden sweep data.
+// barrier sweep (src/sweep.hpp): sweep_partition_kernel (per-(colour,EntityTag)
+// monomorphic launch via dispatch_entity_type), reduce_energy_mindet, and
+// Executor.run_sweeps, run on EVERY visible device (the AMD GPU and the
+// OpenMP host/CPU device) against the golden sweep data. The golden context
+// carries mixed-tag DOFs (Free/LineSeg/Circle/CircleArc) so non-Free partition
+// kernels are exercised on device alongside the Free path.
 //
-// Proves the full sweep path — including the colour-ordered kernel sequence,
+// Proves the full sweep path — including the colour-ordered partition sequence,
 // backtracking, and energy/min-det reduction — is device-callable and
 // numerically correct on both backends.
 //
 // Requires the acpp toolchain (SYCL).
+#include "golden_soa.hpp"
 #include "golden_sweep.hpp"
 #include "sweep.hpp"
 #include "sycl_devices.hpp"
@@ -27,6 +31,8 @@ using egg_test::usable_devices;
 namespace
 {
 bool close(double a, double b, double tol) { return std::abs(a - b) <= tol * (1.0 + std::abs(b)); }
+
+using egg_test::build_soa_from_blob;
 
 // Build a SweepContextHost from the golden data.
 SweepContextHost build_context_from_golden()
@@ -57,12 +63,19 @@ SweepContextHost build_context_from_golden()
         sg.role.assign(gg.role.begin(), gg.role.begin() + DP);
         sg.J.assign(gg.J.begin(), gg.J.begin() + DP * 24);
         sg.dof_idx.assign(gg.dof_idx.begin(), gg.dof_idx.begin() + gg.D);
-        sg.tag.assign(gg.tag.begin(), gg.tag.begin() + gg.D);
-        sg.params.assign(gg.params.begin(), gg.params.begin() + gg.D * 12);
 
         sg.P_of.assign(gg.D, gg.P);
         sg.sample_offset.resize(gg.D);
         std::exclusive_scan(sg.P_of.begin(), sg.P_of.end(), sg.sample_offset.begin(), 0);
+
+        // The golden header stores the frozen positional blob (per-DOF tag +
+        // params + shared arena); decode it into the typed per-(colour,EntityTag)
+        // SoA records the device ctx consumes (Phase 4 retired the blob from
+        // SweepGroupHost). This mirrors the Python wire's group_entities_by_type.
+        const std::vector<int> tag(gg.tag.begin(), gg.tag.begin() + gg.D);
+        const std::vector<double> params(gg.params.begin(), gg.params.begin() + gg.D * 12);
+        const std::vector<double> arena(golden::kArena.begin(), golden::kArena.end());
+        sg.soa = build_soa_from_blob(tag.data(), params.data(), arena, sg.ndof);
 
         host.groups.push_back(std::move(sg));
     }

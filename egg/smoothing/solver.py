@@ -79,6 +79,9 @@ class SweepContext:
     # records); offsets in dof_constraint_params index into this. Empty when
     # only fixed-size entities are present.
     entity_arena: np.ndarray = None  # (A,) float64
+    # Original entity objects per DOF (Phase 1b-B: for typed SoA wire boundary).
+    # None when no constraints are present.
+    dof_entities: dict = None
     # Lazily-built, position-independent stacked patch arrays per (colour, P) group.
     # Position-independent (indices/W_inv/J/role), so cached once and reused across
     # all sweeps. Populated on first sweep.
@@ -270,6 +273,7 @@ def build_sweep_context(
         dof_colours, dof_patch_sizes, colour_P_groups,
         dof_constraint_tags, dof_constraint_params,
         np.asarray(arena, dtype=np.float64),
+        dict(grid.dof_constraints),
     )
 
 

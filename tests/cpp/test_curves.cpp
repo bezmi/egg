@@ -10,7 +10,6 @@
 #include <cmath>
 #include <format>
 #include <numbers>
-#include <variant>
 #include <vector>
 
 using namespace boost::ut;
@@ -92,7 +91,7 @@ static const suite<"curves"> curves_suite = [] {
           << "clamped projection should land on the t1 endpoint";
     };
 
-    "make_entity dispatches the curve tags"_test = [] {
+    "project dispatches the curve tags"_test = [] {
         // Cubic Bézier through the flat upload blob, full [0,1] range.
         std::array<double, kParamPad> blob {};
         const std::array<PtN<2>, 4> cp {{{0.0, 0.0}, {1.0, 2.0}, {3.0, 2.0}, {4.0, 0.0}}};
@@ -108,7 +107,7 @@ static const suite<"curves"> curves_suite = [] {
         const PtN<2> pr = project(q, TAG_CUBICBEZIER, blob.data());
         const PtN<2> expref = ref.eval(ref.invert(q));
         expect(close(pr[0], expref[0], 1e-7) && close(pr[1], expref[1], 1e-7))
-          << std::format("make_entity cubic Bézier proj ({}, {}) vs ({}, {})",
+          << std::format("project cubic Bézier proj ({}, {}) vs ({}, {})",
                          pr[0],
                          pr[1],
                          expref[0],
@@ -174,9 +173,9 @@ static const suite<"bspline"> bspline_suite = [] {
         }
     };
 
-    // make_entity must slice the knot/control spans out of the arena using the
+    // decode_entity must slice the knot/control spans out of the arena using the
     // offsets in the flat blob, matching a directly-constructed entity.
-    "make_entity slices the B-spline arena"_test = [] {
+    "decode_entity slices the B-spline arena"_test = [] {
         const std::array<double, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
         const std::array<double, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
         std::vector<double> arena;
@@ -193,12 +192,12 @@ static const suite<"bspline"> bspline_suite = [] {
         blob[4] = 0.0;  // t0
         blob[5] = 3.0;  // t1
 
-        const auto ent = make_entity(TAG_BSPLINE, blob.data(), arena.data());
+        const auto ent = decode_entity<TrimmedEntity<BSplineCurveParam>>(blob.data(), arena.data());
         const TrimmedEntity<BSplineCurveParam> ref {
           .param = {.degree = 2, .n_ctrl = 5, .knots = knots, .ctrl = ctrl},
           .trim = {.t0 = 0.0, .t1 = 3.0, .closed = false}};
         const PtN<2> q {2.5, 0.5};
-        const PtN<2> pr = std::visit([&](const auto& e) { return e.project(q); }, ent);
+        const PtN<2> pr = ent.project(q);
         const PtN<2> expref = ref.project(q);
         expect(close(pr[0], expref[0], 1e-7) && close(pr[1], expref[1], 1e-7))
           << std::format("arena B-spline proj ({},{}) vs ({},{})",
@@ -278,7 +277,7 @@ static const suite<"composite"> composite_suite = [] {
         expect(close(pl[0], 0.3) && close(pl[1], 0.0));
     };
 
-    "make_entity decodes the composite blob from the arena"_test = [push_rec] {
+    "decode_entity decodes the composite blob from the arena"_test = [push_rec] {
         std::vector<double> arena;
         arena.push_back(99.0);  // padding so rec_off != 0
         const auto rec_off = arena.size();
@@ -288,9 +287,100 @@ static const suite<"composite"> composite_suite = [] {
         std::array<double, kParamPad> blob {};
         blob[0] = 2.0;
         blob[1] = static_cast<double>(rec_off);
-        const auto ent = make_entity(TAG_COMPOSITE, blob.data(), arena.data());
+        const auto ent = decode_entity<CompositePath>(blob.data(), arena.data());
         const PtN<2> q {1.5, 0.6};
-        const PtN<2> pr = std::visit([&](const auto& e) { return e.project(q); }, ent);
+        const PtN<2> pr = ent.project(q);
         expect(close(pr[0], 1.0) && close(pr[1], 0.6)) << std::format("({},{})", pr[0], pr[1]);
+    };
+};
+
+// EntitySoA<CompositePath> reconstruction (the device SoA load path). A composite
+// owns one self-contained arena slice — any variable-length sub-segment data
+// (B-spline knots/ctrl) first, then the fixed-stride segment records at rec_off —
+// exactly the per-composite layout the Python wire builds. These tests rebuild a
+// CompositePath via EntitySoA<CompositePath>::load from such a slice and verify it
+// projects identically to the directly-constructed entity, for fixed-size segments
+// AND a B-spline sub-segment (the NURBS-relevant case the blob path never carried).
+static const suite<"composite_soa"> composite_soa_suite = [] {
+    constexpr auto push_rec =
+      [](std::vector<double>& arena, Tag tag, std::initializer_list<double> params) {
+          arena.push_back(static_cast<double>(tag));
+          std::size_t n = 0;
+          for (const double v : params) {
+              arena.push_back(v);
+              ++n;
+          }
+          for (; n < kParamPad; ++n) { arena.push_back(0.0); }
+      };
+
+    // Rebuild a CompositePath from a self-contained arena slice via the device
+    // SoA load path: records = {n_segs, rec_off}, one CSR slot = the whole slice.
+    constexpr auto soa_load =
+      [](const std::vector<double>& arena, int n_segs, int rec_off) -> CompositePath {
+          using SoA = EntitySoA<CompositePath>;
+          const std::array<double, 2> fields {static_cast<double>(n_segs),
+                                              static_cast<double>(rec_off)};
+          const std::array<int, 2> off {0, static_cast<int>(arena.size())};
+          const SoAView<const double> recs_view {fields.data(), 1, SoA::kFields};
+          const SegmentedView<double> seg {arena.data(), off.data()};
+          return SoA::load(SoA::tie_view(recs_view, &seg), 0);
+      };
+
+    "fixed-size segments (lines, arc) round-trip through SoA load"_test = [push_rec, soa_load] {
+        // L-shaped line path + a quarter arc: records only, rec_off == 0.
+        std::vector<double> arena;
+        push_rec(arena, TAG_LINESEG, {0.0, 0.0, 1.0, 0.0});
+        push_rec(arena, TAG_LINESEG, {1.0, 0.0, 1.0, 1.0});
+        push_rec(arena, TAG_CIRCLEARC, {1.0, 2.0, 1.0, -std::numbers::pi / 2, 0.0, 0.0});
+        const CompositePath ref {.n_segs = 3,
+                                 .recs = {arena.data(), arena.size()},
+                                 .arena = arena.data()};
+        const CompositePath got = soa_load(arena, 3, 0);
+        for (const PtN<2> q : {PtN<2> {0.4, -0.5}, PtN<2> {1.5, 0.6}, PtN<2> {2.0, 2.0}}) {
+            const PtN<2> a = ref.project(q);
+            const PtN<2> b = got.project(q);
+            expect(close(a[0], b[0]) && close(a[1], b[1]))
+              << std::format("SoA load mismatch q=({},{}): ({},{}) vs ({},{})",
+                             q[0], q[1], b[0], b[1], a[0], a[1]);
+        }
+    };
+
+    "B-spline sub-segment round-trips through SoA load"_test = [push_rec, soa_load] {
+        // Self-contained slice: [knots | ctrl | records]. A degree-2 B-spline arch
+        // (ctrl (0,0),(1,1),(2,0), clamped knots) joined to a return line.
+        const std::array<double, 6> knots {0, 0, 0, 1, 1, 1};
+        const std::array<double, 6> ctrl {0, 0, 1, 1, 2, 0};
+        std::vector<double> arena;
+        const auto knot_off = arena.size();
+        arena.insert(arena.end(), knots.begin(), knots.end());
+        const auto ctrl_off = arena.size();
+        arena.insert(arena.end(), ctrl.begin(), ctrl.end());
+        const auto rec_off = arena.size();
+        push_rec(arena, TAG_BSPLINE,
+                 {2, 3, static_cast<double>(knot_off), static_cast<double>(ctrl_off), 0.0, 1.0});
+        push_rec(arena, TAG_LINESEG, {2.0, 0.0, 0.0, 0.0});
+
+        const CompositePath ref {
+          .n_segs = 2,
+          .recs = {arena.data() + rec_off, 2 * static_cast<std::size_t>(kCompositeRecSize)},
+          .arena = arena.data()};
+        const CompositePath got = soa_load(arena, 2, static_cast<int>(rec_off));
+
+        // The standalone B-spline, to confirm the sub-segment is reconstructed
+        // (not just that ref == got): a query above the arch projects onto it.
+        const TrimmedEntity<BSplineCurveParam> bs {
+          .param = {.degree = 2, .n_ctrl = 3, .knots = knots, .ctrl = ctrl},
+          .trim = {.t0 = 0.0, .t1 = 1.0, .closed = false}};
+
+        const PtN<2> q {1.0, 2.0};  // above the arch's apex (1, 0.5)
+        const PtN<2> a = ref.project(q);
+        const PtN<2> b = got.project(q);
+        const PtN<2> s = bs.project(q);
+        expect(close(a[0], b[0]) && close(a[1], b[1]))
+          << std::format("SoA load mismatch: ({},{}) vs ({},{})", b[0], b[1], a[0], a[1]);
+        expect(close(b[0], s[0]) && close(b[1], s[1]))
+          << std::format("composite did not project onto its B-spline: ({},{}) vs ({},{})",
+                         b[0], b[1], s[0], s[1]);
+        expect(b[1] > 0.1_d) << "B-spline arch projection should sit above the return line";
     };
 };

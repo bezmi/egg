@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <array>
 #include <limits>
-#include <variant>
 
 namespace egg
 {
@@ -253,13 +252,18 @@ inline VecN<D> newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& po
 }
 
 // (tag, params) convenience overload for host-side / oracle callers (e.g. the
-// newton_step binding). Visits once; not on the device hot path.
+// newton_step binding). Selects the concrete entity type once via
+// dispatch_entity_type + decode_entity<E> (no std::visit, no variant); not on
+// the device hot path. Fixed-size entities only (no arena).
 template <int D = kDefaultDim>
 inline VecN<D>
   newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& pos, Tag tag, const double* params)
 {
-    return std::visit([&](const auto& e) { return newton_delta<D>(g, H, pos, e); },
-                      make_entity<D>(tag, params));
+    VecN<D> out {};
+    dispatch_entity_type<D>(static_cast<EntityTag>(tag), [&]<class E>() {
+        out = newton_delta<D>(g, H, pos, decode_entity<E>(params));
+    });
+    return out;
 }
 
 // D=2 legacy aliases for the oracle surface and existing call sites.

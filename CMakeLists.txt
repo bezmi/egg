@@ -308,11 +308,6 @@ if(EGG_BUILD_BENCH)
     GITHUB_REPOSITORY martinus/nanobench
     GIT_TAG v4.3.11
   )
-  # CPU-vs-GPU comparison at matched N (explicit per-device SYCL queues).
-  add_executable(cpp_bench_compare bench/bench_compare.cpp)
-  target_link_libraries(cpp_bench_compare PRIVATE egg_core nanobench)
-  add_sycl_to_target(TARGET cpp_bench_compare SOURCES bench/bench_compare.cpp)
-
   # CPU-vs-GPU sweep benchmark: warm sweep-only ms/sweep of the colored GS
   # sweep on a fixed demo-grid context (golden data). Reports per device
   # (CPU omp, GPU resident). Uses golden_sweep.hpp from gen_golden.py.

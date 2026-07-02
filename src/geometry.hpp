@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core.hpp"
+#include "entity_soa.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,7 +10,6 @@
 #include <numbers>
 #include <span>
 #include <type_traits>
-#include <variant>
 
 namespace egg
 {
@@ -38,13 +38,12 @@ inline constexpr int kCompositeRecSize = 1 + kParamPad;
 
 // ===========================================================================
 // Concept-modelled geometry entities (the single source of truth used by the
-// kernels). Each entity is a trivially-copyable typed value type: the flat
-// upload blob (`const double* params`) is parsed ONCE by make_entity into typed
-// fields, and the per-shape math is inlined into each entity (bit-identical to the
-// old raw-pointer free functions). The closed set lives in an EntityKind variant;
-// the in-kernel dispatch is a per-DOF std::visit over make_entity (geometry is
-// per-DOF, so — unlike the run-once Objective visit — the variant is rebuilt and
-// visited inside the loop, but the projection/tangent bodies are monomorphic).
+// kernels). Each entity is a trivially-copyable typed value type with its
+// per-shape math inlined (bit-identical to the old raw-pointer free functions).
+// The concrete type is selected per launch by `dispatch_entity_type<2>(tag, f)`
+// and built with `EntitySoA<E>::load` (the device sweep) or `decode_entity<E>`
+// (cold blob/oracle paths) — the kernel body is fully monomorphic in `E`, with
+// no per-DOF `std::visit` and no value-level entity variant (retired in Phase 4).
 // ===========================================================================
 
 /// @brief Parameter-space coordinate: @f$ (t) @f$ for a curve, @f$ (u,v) @f$ for a surface.
@@ -663,73 +662,91 @@ static_assert(GeometryEntity<Free<2>> && GeometryEntity<LineSeg> && GeometryEnti
               GeometryEntity<TrimmedEntity<QuadBezierParam>> &&
               GeometryEntity<TrimmedEntity<CubicBezierParam>> && GeometryEntity<CompositePath>);
 
-// --- Per-dimension closed entity set + the host-side factory ------------------
+// --- The closed 2D entity set --------------------------------------------------
+//
+// The per-DOF entity variant (`EntityKind<D>` / `std::variant<…>`) was retired in
+// Phase 4: no value-level variant is materialized anywhere. The closed set now
+// lives as (a) the `static_assert(GeometryEntity<…>)` block above (every type
+// models the entity interface), (b) the `dispatch_entity_type<2>` switch arms,
+// and (c) the `decode_entity_fn<E>` / `EntitySoA<E>` specializations — all three
+// must list the same types, which a missing specialization fails to compile.
 
-/// @brief The closed entity set for embedding dimension @p D.
-/// @tparam D Embedding dimension; the primary template is left undefined and each
-///           supported dimension provides a specialization (only `EntityKind<2>`
-///           so far; the 3D set arrives with the surface parametrizations).
-template <int D> struct EntityKind;
-template <> struct EntityKind<2> {
-    using type = std::variant<Free<2>,
-                              LineSeg,
-                              Circle,
-                              Ellipse,
-                              TrimmedEntity<CircleArcParam>,
-                              TrimmedEntity<EllipseArcParam>,
-                              TrimmedEntity<QuadBezierParam>,
-                              TrimmedEntity<CubicBezierParam>,
-                              TrimmedEntity<BSplineCurveParam>,
-                              CompositePath>;
+// ---------------------------------------------------------------------------
+// decode_entity<E>: the per-type positional blob decoder (single source).
+//
+// Each make_entity arm is split into a decode_entity_fn<E> specialization that
+// builds a concrete typed E from the positional (params, arena) blob. This is
+// the ONE place the untyped `params` pointer is read per type; make_entity
+// delegates to it (single source), and the Phase 1a monomorphic sweep kernel
+// calls decode_entity<E> directly — no variant, no make_entity on the device
+// hot path. Variable-length entities (B-spline net/knots, composite records)
+// keep their data in `arena` and store only offsets/counts in `params`;
+// fixed-size entities ignore `arena`.
+//
+// Selected via dispatch_entity_type<D>(tag, [&]<class E>{ decode_entity<E>(...); }),
+// so even the cold oracle/test paths never materialize a variant (Phase 4).
+// ---------------------------------------------------------------------------
+
+/// @brief Per-type positional blob decoder trait. Specialize per entity type @p E.
+/// @tparam E The entity type to decode into.
+template <class E> struct decode_entity_fn;  // primary undefined
+
+template <> struct decode_entity_fn<Free<2>> {
+    [[nodiscard]] static Free<2> apply(const double*, const double*) { return Free<2> {}; }
 };
-/// @brief Convenience alias for the entity variant at embedding dimension @p D.
-template <int D> using EntityKindT = typename EntityKind<D>::type;
-
-/// @brief The single dispatch point: parse the flat upload blob into a typed entity.
-///
-/// This is the ONE place the untyped `params` pointer is read. Variable-length
-/// entities (the B-spline net/knots) keep their data in @p arena and store only
-/// offsets/counts in @p params; fixed-size entities ignore @p arena.
-/// @param tag Entity type tag (`TAG_*`).
-/// @param params Flat parameter blob (`kParamPad` doubles per DOF).
-/// @param arena Base of the per-group double arena for span-backed entities, or
-///              nullptr when no variable-length entity is in play.
-/// @return The typed entity variant.
-inline EntityKindT<2> make_entity(Tag tag, const double* params, const double* arena = nullptr)
-{
-    switch (tag) {
-    case TAG_LINESEG:
-        return LineSeg {.sx = params[0], .sy = params[1], .ex = params[2], .ey = params[3]};
-    case TAG_CIRCLE: return Circle {.cx = params[0], .cy = params[1], .r = params[2]};
-    case TAG_ELLIPSE:
-        return Ellipse {.cx = params[0], .cy = params[1], .rx = params[2], .ry = params[3]};
-    case TAG_CIRCLEARC:
+template <> struct decode_entity_fn<LineSeg> {
+    [[nodiscard]] static LineSeg apply(const double* p, const double*)
+    { return LineSeg {.sx = p[0], .sy = p[1], .ex = p[2], .ey = p[3]}; }
+};
+template <> struct decode_entity_fn<Circle> {
+    [[nodiscard]] static Circle apply(const double* p, const double*)
+    { return Circle {.cx = p[0], .cy = p[1], .r = p[2]}; }
+};
+template <> struct decode_entity_fn<Ellipse> {
+    [[nodiscard]] static Ellipse apply(const double* p, const double*)
+    { return Ellipse {.cx = p[0], .cy = p[1], .rx = p[2], .ry = p[3]}; }
+};
+template <> struct decode_entity_fn<TrimmedEntity<CircleArcParam>> {
+    [[nodiscard]] static TrimmedEntity<CircleArcParam> apply(const double* p, const double*)
+    {
         return TrimmedEntity<CircleArcParam> {
-          .param = {.c = {params[0], params[1]}, .r = params[2]},
-          .trim = {.t0 = params[3], .t1 = params[4], .closed = params[5] != 0.0}};
-    case TAG_ELLIPSEARC:
+          .param = {.c = {p[0], p[1]}, .r = p[2]},
+          .trim = {.t0 = p[3], .t1 = p[4], .closed = p[5] != 0.0}};
+    }
+};
+template <> struct decode_entity_fn<TrimmedEntity<EllipseArcParam>> {
+    [[nodiscard]] static TrimmedEntity<EllipseArcParam> apply(const double* p, const double*)
+    {
         return TrimmedEntity<EllipseArcParam> {
-          .param = {.c = {params[0], params[1]}, .a = params[2], .b = params[3], .phi = params[4]},
-          .trim = {.t0 = params[5], .t1 = params[6], .closed = params[7] != 0.0}};
-    case TAG_QUADBEZIER:
+          .param = {.c = {p[0], p[1]}, .a = p[2], .b = p[3], .phi = p[4]},
+          .trim = {.t0 = p[5], .t1 = p[6], .closed = p[7] != 0.0}};
+    }
+};
+template <> struct decode_entity_fn<TrimmedEntity<QuadBezierParam>> {
+    [[nodiscard]] static TrimmedEntity<QuadBezierParam> apply(const double* p, const double*)
+    {
         return TrimmedEntity<QuadBezierParam> {
-          .param =
-            {.p = {{{params[0], params[1]}, {params[2], params[3]}, {params[4], params[5]}}}},
-          .trim = {.t0 = params[6], .t1 = params[7], .closed = false}};
-    case TAG_CUBICBEZIER:
+          .param = {.p = {{{p[0], p[1]}, {p[2], p[3]}, {p[4], p[5]}}}},
+          .trim = {.t0 = p[6], .t1 = p[7], .closed = false}};
+    }
+};
+template <> struct decode_entity_fn<TrimmedEntity<CubicBezierParam>> {
+    [[nodiscard]] static TrimmedEntity<CubicBezierParam> apply(const double* p, const double*)
+    {
         return TrimmedEntity<CubicBezierParam> {
-          .param = {.p = {{{params[0], params[1]},
-                           {params[2], params[3]},
-                           {params[4], params[5]},
-                           {params[6], params[7]}}}},
-          .trim = {.t0 = params[8], .t1 = params[9], .closed = false}};
-    case TAG_BSPLINE: {
+          .param = {.p = {{{p[0], p[1]}, {p[2], p[3]}, {p[4], p[5]}, {p[6], p[7]}}}},
+          .trim = {.t0 = p[8], .t1 = p[9], .closed = false}};
+    }
+};
+template <> struct decode_entity_fn<TrimmedEntity<BSplineCurveParam>> {
+    [[nodiscard]] static TrimmedEntity<BSplineCurveParam> apply(const double* p, const double* arena)
+    {
         // Blob: [degree, n_ctrl, knot_off, ctrl_off, t0, t1]; knots/control points
         // live in the arena. Counts derive from degree and n_ctrl.
-        const int degree = static_cast<int>(params[0]);
-        const int n_ctrl = static_cast<int>(params[1]);
-        const auto knot_off = static_cast<std::size_t>(params[2]);
-        const auto ctrl_off = static_cast<std::size_t>(params[3]);
+        const int degree = static_cast<int>(p[0]);
+        const int n_ctrl = static_cast<int>(p[1]);
+        const auto knot_off = static_cast<std::size_t>(p[2]);
+        const auto ctrl_off = static_cast<std::size_t>(p[3]);
         const auto n_knots =
           static_cast<std::size_t>(n_ctrl) + static_cast<std::size_t>(degree) + 1;
         const auto n_ctrl_d = 2 * static_cast<std::size_t>(n_ctrl);
@@ -738,98 +755,631 @@ inline EntityKindT<2> make_entity(Tag tag, const double* params, const double* a
                     .n_ctrl = n_ctrl,
                     .knots = {arena + knot_off, n_knots},
                     .ctrl = {arena + ctrl_off, n_ctrl_d}},
-          .trim = {.t0 = params[4], .t1 = params[5], .closed = false}};
+          .trim = {.t0 = p[4], .t1 = p[5], .closed = false}};
     }
-    case TAG_COMPOSITE: {
+};
+template <> struct decode_entity_fn<CompositePath> {
+    [[nodiscard]] static CompositePath apply(const double* p, const double* arena)
+    {
         // Blob: [n_segs, rec_off]; the segment records live in the arena.
-        const int n_segs = static_cast<int>(params[0]);
-        const auto rec_off = static_cast<std::size_t>(params[1]);
+        const int n_segs = static_cast<int>(p[0]);
+        const auto rec_off = static_cast<std::size_t>(p[1]);
         return CompositePath {
           .n_segs = n_segs,
           .recs = {arena + rec_off, static_cast<std::size_t>(n_segs) * kCompositeRecSize},
           .arena = arena};
     }
-    // TAG_SPHERE / TAG_PLANE are 3D surfaces; they have no 2D entity, so they
-    // fall through to Free here.
-    case TAG_FREE:
-    default: return Free<2> {};
+};
+
+/// @brief Build a typed entity @p E from its positional blob (single source).
+///
+/// This is the per-type builder that replaces the make_entity arms: it reads the
+/// untyped `params` pointer ONCE per type and returns a concrete `E`. Variable-
+/// length entities (B-spline, composite) read their payload from @p arena via
+/// the offsets stored in @p params; fixed-size entities ignore @p arena.
+/// @tparam E The entity type to decode into.
+/// @param params Flat parameter blob (`kParamPad` doubles per DOF).
+/// @param arena Base of the per-group double arena for span-backed entities, or
+///              nullptr when no variable-length entity is in play.
+/// @return The typed entity.
+template <class E>
+[[nodiscard]] inline E decode_entity(const double* params, const double* arena = nullptr)
+{
+    return decode_entity_fn<E>::apply(params, arena);
+}
+
+// The per-DOF entity variant (`make_entity` returning `EntityKind<D>`) was
+// retired in Phase 4. Every call site now selects the concrete entity type via
+// `dispatch_entity_type<D>(tag, f)` and builds it with `decode_entity<E>` (cold
+// blob/oracle paths) or `EntitySoA<E>::load` (the device sweep) — no variant is
+// ever materialized. CompositePath::project_frame is defined below
+// dispatch_entity_type (it builds each segment the same way).
+
+// ===========================================================================
+// Data-oriented entity registry.
+//
+// The strong `EntityTag` and the per-entity `EntitySoA<E>` trait live in
+// entity_soa.hpp; here they are tied to the concrete 2D entity set. `EntityTag`
+// is locked to the legacy `TAG_*` integer values (the frozen wire contract), and
+// `dispatch_entity_type` is the host-side, run-once tag -> entity-type dispatch
+// that selects a monomorphic kernel per launch (the launch-granularity
+// counterpart to the per-element `std::visit`). The device sweep, the composite
+// inner loop, and the oracle bindings all dispatch through it — there is no
+// value-level entity variant left to visit.
+// ===========================================================================
+
+// The strong tag must agree, value for value, with the legacy `TAG_*` blob
+// constants used by make_entity, the Python encoder, and the golden tables.
+static_assert(to_int(EntityTag::Free) == TAG_FREE);
+static_assert(to_int(EntityTag::LineSeg) == TAG_LINESEG);
+static_assert(to_int(EntityTag::Circle) == TAG_CIRCLE);
+static_assert(to_int(EntityTag::Ellipse) == TAG_ELLIPSE);
+static_assert(to_int(EntityTag::Sphere) == TAG_SPHERE);
+static_assert(to_int(EntityTag::Plane) == TAG_PLANE);
+static_assert(to_int(EntityTag::CircleArc) == TAG_CIRCLEARC);
+static_assert(to_int(EntityTag::EllipseArc) == TAG_ELLIPSEARC);
+static_assert(to_int(EntityTag::QuadBezier) == TAG_QUADBEZIER);
+static_assert(to_int(EntityTag::CubicBezier) == TAG_CUBICBEZIER);
+static_assert(to_int(EntityTag::BSpline) == TAG_BSPLINE);
+static_assert(to_int(EntityTag::Composite) == TAG_COMPOSITE);
+
+/// @brief SoA schema for the interior (free) DOF: no per-entity fields.
+///
+/// A free node carries no geometry, so its storage is a bare count and its
+/// device builder reconstructs a default `Free<D>`. The `View` is an empty
+/// `SoAView<const double>` (0×0 extents) so every `EntitySoA<E>` specialization
+/// shares the one typed View type — `PartitionView` then holds a
+/// `SoAView<const double>` directly, no `const void*`, no type erasure. `load`
+/// ignores the view and returns a default-constructed `Free<D>`.
+template <int D> struct EntitySoA<Free<D>> {
+    static constexpr EntityTag tag = EntityTag::Free;
+    static constexpr int kFields = 0;  ///< No fields; `records` is empty.
+    static constexpr int kSeg = 0;     ///< No segmented fields.
+    struct Host {
+        std::vector<double> records;  ///< Empty (kFields == 0).
+        std::size_t count = 0;        ///< Number of free DOFs in the partition.
+        std::vector<SegmentedHost<double>> seg;  ///< Empty (kSeg == 0).
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, 0};  ///< Empty (no fields).
+        SegmentedView<double> seg[kMaxSoASeg]{};       ///< Null (no segmented fields).
+    };
+    /// @brief Reconstruct the (field-less) free entity.
+    [[nodiscard]] static Free<D> load(const View&, std::size_t) { return Free<D> {}; }
+    /// @brief Scatter a free entity into the host (no-op: no fields).
+    static void load_into(Host&, std::size_t, const Free<D>&) {}
+    /// @brief Construct the typed View from the generic partition slots.
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+static_assert(HasEntitySoA<Free<2>>);
+
+// ---------------------------------------------------------------------------
+// Fixed-size 2D entity SoA specializations (Phase 1b-A, uniformized Phase 2-A).
+//
+// Each is a packed contiguous record store: one flat `double[count*kFields]`
+// per partition, stride `kFields` per entity — the layout that matches the
+// sweep's per-entity-load access pattern (one coalesced read of entity i's
+// kFields doubles per work item, no per-field array indirection). The View is
+// a `SoAView<const double>` mdspan with extents `(count, kFields)`; `load`
+// reads `view.records(i, FIELD)` via named compile-time offsets and returns via
+// designated initializers (matching make_entity's style). `bool` trim fields
+// are stored as `0.0`/`1.0` doubles on the wire and reconstituted via `!= 0.0`.
+//
+// Phase 2-A uniformized all specializations to the same Host/View shape with
+// segmented slots (kSeg == 0 for fixed-size — `seg` vectors/views are empty/
+// null), `load_into(Host&, i, const E&)`, and `tie_view`. This makes the ctor
+// and kernel code fully generic across fixed-size and segmented types.
+// ---------------------------------------------------------------------------
+
+/// @brief SoA schema for @ref LineSeg: packed `(sx, sy, ex, ey)` records.
+template <> struct EntitySoA<LineSeg> {
+    static constexpr EntityTag tag = EntityTag::LineSeg;
+    static constexpr int kFields = 4;
+    static constexpr int kSeg = 0;
+    static constexpr int SX = 0, SY = 1, EX = 2, EY = 3;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static LineSeg load(const View& v, std::size_t i)
+    {
+        return LineSeg {
+          .sx = v.records[i, SX], .sy = v.records[i, SY],
+          .ex = v.records[i, EX], .ey = v.records[i, EY]};
+    }
+    static void load_into(Host& h, std::size_t i, const LineSeg& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        r[SX] = e.sx; r[SY] = e.sy; r[EX] = e.ex; r[EY] = e.ey;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for @ref Circle: packed `(cx, cy, r)` records.
+template <> struct EntitySoA<Circle> {
+    static constexpr EntityTag tag = EntityTag::Circle;
+    static constexpr int kFields = 3;
+    static constexpr int kSeg = 0;
+    static constexpr int CX = 0, CY = 1, R = 2;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static Circle load(const View& v, std::size_t i)
+    {
+        return Circle {.cx = v.records[i, CX], .cy = v.records[i, CY], .r = v.records[i, R]};
+    }
+    static void load_into(Host& h, std::size_t i, const Circle& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        r[CX] = e.cx; r[CY] = e.cy; r[R] = e.r;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for @ref Ellipse: packed `(cx, cy, rx, ry)` records.
+template <> struct EntitySoA<Ellipse> {
+    static constexpr EntityTag tag = EntityTag::Ellipse;
+    static constexpr int kFields = 4;
+    static constexpr int kSeg = 0;
+    static constexpr int CX = 0, CY = 1, RX = 2, RY = 3;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static Ellipse load(const View& v, std::size_t i)
+    {
+        return Ellipse {
+          .cx = v.records[i, CX], .cy = v.records[i, CY],
+          .rx = v.records[i, RX], .ry = v.records[i, RY]};
+    }
+    static void load_into(Host& h, std::size_t i, const Ellipse& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        r[CX] = e.cx; r[CY] = e.cy; r[RX] = e.rx; r[RY] = e.ry;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for `TrimmedEntity<CircleArcParam>`:
+///        packed `(cx, cy, r, t0, t1, closed)` records.
+template <> struct EntitySoA<TrimmedEntity<CircleArcParam>> {
+    static constexpr EntityTag tag = EntityTag::CircleArc;
+    static constexpr int kFields = 6;
+    static constexpr int kSeg = 0;
+    static constexpr int CX = 0, CY = 1, R = 2, T0 = 3, T1 = 4, CLOSED = 5;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static TrimmedEntity<CircleArcParam> load(const View& v, std::size_t i)
+    {
+        return TrimmedEntity<CircleArcParam> {
+          .param = {.c = {v.records[i, CX], v.records[i, CY]}, .r = v.records[i, R]},
+          .trim = {.t0 = v.records[i, T0], .t1 = v.records[i, T1],
+                   .closed = v.records[i, CLOSED] != 0.0}};
+    }
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<CircleArcParam>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        r[CX] = e.param.c[0]; r[CY] = e.param.c[1]; r[R] = e.param.r;
+        r[T0] = e.trim.t0; r[T1] = e.trim.t1; r[CLOSED] = e.trim.closed ? 1.0 : 0.0;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for `TrimmedEntity<EllipseArcParam>`:
+///        packed `(cx, cy, a, b, phi, t0, t1, closed)` records.
+template <> struct EntitySoA<TrimmedEntity<EllipseArcParam>> {
+    static constexpr EntityTag tag = EntityTag::EllipseArc;
+    static constexpr int kFields = 8;
+    static constexpr int kSeg = 0;
+    static constexpr int CX = 0, CY = 1, A = 2, B = 3, PHI = 4, T0 = 5, T1 = 6, CLOSED = 7;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static TrimmedEntity<EllipseArcParam> load(const View& v, std::size_t i)
+    {
+        return TrimmedEntity<EllipseArcParam> {
+          .param = {.c = {v.records[i, CX], v.records[i, CY]},
+                    .a = v.records[i, A], .b = v.records[i, B], .phi = v.records[i, PHI]},
+          .trim = {.t0 = v.records[i, T0], .t1 = v.records[i, T1],
+                   .closed = v.records[i, CLOSED] != 0.0}};
+    }
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<EllipseArcParam>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        r[CX] = e.param.c[0]; r[CY] = e.param.c[1];
+        r[A] = e.param.a; r[B] = e.param.b; r[PHI] = e.param.phi;
+        r[T0] = e.trim.t0; r[T1] = e.trim.t1; r[CLOSED] = e.trim.closed ? 1.0 : 0.0;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for `TrimmedEntity<QuadBezierParam>`:
+///        packed `(P0x, P0y, P1x, P1y, P2x, P2y, t0, t1)` records.
+template <> struct EntitySoA<TrimmedEntity<QuadBezierParam>> {
+    static constexpr EntityTag tag = EntityTag::QuadBezier;
+    static constexpr int kFields = 8;
+    static constexpr int kSeg = 0;
+    static constexpr int P0X = 0, P0Y = 1, P1X = 2, P1Y = 3, P2X = 4, P2Y = 5, T0 = 6, T1 = 7;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static TrimmedEntity<QuadBezierParam> load(const View& v, std::size_t i)
+    {
+        return TrimmedEntity<QuadBezierParam> {
+          .param = {.p = {{{v.records[i, P0X], v.records[i, P0Y]},
+                           {v.records[i, P1X], v.records[i, P1Y]},
+                           {v.records[i, P2X], v.records[i, P2Y]}}}},
+          .trim = {.t0 = v.records[i, T0], .t1 = v.records[i, T1], .closed = false}};
+    }
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<QuadBezierParam>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        r[P0X] = e.param.p[0][0]; r[P0Y] = e.param.p[0][1];
+        r[P1X] = e.param.p[1][0]; r[P1Y] = e.param.p[1][1];
+        r[P2X] = e.param.p[2][0]; r[P2Y] = e.param.p[2][1];
+        r[T0] = e.trim.t0; r[T1] = e.trim.t1;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for `TrimmedEntity<CubicBezierParam>`:
+///        packed `(P0x, P0y, P1x, P1y, P2x, P2y, P3x, P3y, t0, t1)` records.
+template <> struct EntitySoA<TrimmedEntity<CubicBezierParam>> {
+    static constexpr EntityTag tag = EntityTag::CubicBezier;
+    static constexpr int kFields = 10;
+    static constexpr int kSeg = 0;
+    static constexpr int P0X = 0, P0Y = 1, P1X = 2, P1Y = 3, P2X = 4, P2Y = 5, P3X = 6, P3Y = 7,
+                          T0 = 8, T1 = 9;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static TrimmedEntity<CubicBezierParam> load(const View& v, std::size_t i)
+    {
+        return TrimmedEntity<CubicBezierParam> {
+          .param = {.p = {{{v.records[i, P0X], v.records[i, P0Y]},
+                           {v.records[i, P1X], v.records[i, P1Y]},
+                           {v.records[i, P2X], v.records[i, P2Y]},
+                           {v.records[i, P3X], v.records[i, P3Y]}}}},
+          .trim = {.t0 = v.records[i, T0], .t1 = v.records[i, T1], .closed = false}};
+    }
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<CubicBezierParam>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        r[P0X] = e.param.p[0][0]; r[P0Y] = e.param.p[0][1];
+        r[P1X] = e.param.p[1][0]; r[P1Y] = e.param.p[1][1];
+        r[P2X] = e.param.p[2][0]; r[P2Y] = e.param.p[2][1];
+        r[P3X] = e.param.p[3][0]; r[P3Y] = e.param.p[3][1];
+        r[T0] = e.trim.t0; r[T1] = e.trim.t1;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+static_assert(HasEntitySoA<LineSeg>);
+static_assert(HasEntitySoA<Circle>);
+static_assert(HasEntitySoA<Ellipse>);
+static_assert(HasEntitySoA<TrimmedEntity<CircleArcParam>>);
+static_assert(HasEntitySoA<TrimmedEntity<EllipseArcParam>>);
+static_assert(HasEntitySoA<TrimmedEntity<QuadBezierParam>>);
+static_assert(HasEntitySoA<TrimmedEntity<CubicBezierParam>>);
+
+// ---------------------------------------------------------------------------
+// Segmented 2D entity SoA specialization (Phase 2-A).
+//
+// The B-spline curve carries variable-length data (knot vector + control net)
+// that the packed-record layout cannot hold. The scalar fields (degree,
+// n_ctrl, t0, t1, closed) go in the packed records; the variable-length knots
+// and ctrl go in two SegmentedHost/SegmentedView CSR slots (kSeg == 2).
+//
+// `load` constructs `std::span<const double>` from the SegmentedView's data/off
+// arrays — the same idiom the existing `decode_entity` uses from the blob arena,
+// and unavoidable because `BSplineCurveParam` itself stores `std::span`. The
+// toolchain supports `std::span` in device code (GCC 16.1.1 + AdaptiveCpp); the
+// golden tests gate correctness.
+// ---------------------------------------------------------------------------
+
+/// @brief SoA schema for `TrimmedEntity<BSplineCurveParam>`:
+///        packed `(degree, n_ctrl, t0, t1, closed)` records + 2 segmented CSR
+///        fields (knots, ctrl).
+template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
+    static constexpr EntityTag tag = EntityTag::BSpline;
+    static constexpr int kFields = 5;
+    static constexpr int kSeg = 2;  ///< knots (slot 0), ctrl (slot 1).
+    static constexpr int DEGREE = 0, N_CTRL = 1, T0 = 2, T1 = 3, CLOSED = 4;
+    static constexpr int KNOTS = 0, CTRL = 1;  ///< Segmented slot indices.
+
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+
+    [[nodiscard]] static TrimmedEntity<BSplineCurveParam> load(const View& v, std::size_t i)
+    {
+        return TrimmedEntity<BSplineCurveParam> {
+          .param = {.degree = static_cast<int>(v.records[i, DEGREE]),
+                    .n_ctrl = static_cast<int>(v.records[i, N_CTRL]),
+                    .knots = v.seg[KNOTS][i],
+                    .ctrl = v.seg[CTRL][i]},
+          .trim = {.t0 = v.records[i, T0], .t1 = v.records[i, T1],
+                   .closed = v.records[i, CLOSED] != 0.0}};
+    }
+
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<BSplineCurveParam>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        r[DEGREE] = static_cast<double>(e.param.degree);
+        r[N_CTRL] = static_cast<double>(e.param.n_ctrl);
+        r[T0] = e.trim.t0;
+        r[T1] = e.trim.t1;
+        r[CLOSED] = e.trim.closed ? 1.0 : 0.0;
+        h.seg[KNOTS].push_back(e.param.knots);
+        h.seg[CTRL].push_back(e.param.ctrl);
+    }
+
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>* seg)
+    {
+        View v{.records = soa};
+        if (seg != nullptr) {
+            v.seg[KNOTS] = seg[KNOTS];
+            v.seg[CTRL] = seg[CTRL];
+        }
+        return v;
+    }
+};
+
+static_assert(HasEntitySoA<TrimmedEntity<BSplineCurveParam>>);
+
+// ---------------------------------------------------------------------------
+// Composite-path SoA specialization (Phase 3; nested arena added later).
+//
+// A composite owns a single self-contained arena slice — the same positional
+// layout the global blob/oracle path uses, but per-composite: any
+// variable-length sub-segment data (B-spline knots/ctrl) is laid down first,
+// then the `n_segs` fixed-stride segment records `[seg_tag, params(kParamPad)]`
+// (kCompositeRecSize doubles each) at offset `rec_off`. The whole slice goes in
+// one SegmentedHost/SegmentedView CSR slot (kSeg == 1); the packed fields are
+// `n_segs` and `rec_off` (kFields == 2). On load the reconstructed
+// `CompositePath` points `recs` at `slice[rec_off..]` and `arena` at the slice
+// base, so each segment is decoded by the one `decode_entity<E>` source in
+// `project_frame` — including B-spline sub-segments, whose knot_off/ctrl_off in
+// their record are offsets into this same self-contained slice.
+//
+// This makes a Polyline/Spline of *any* curve type (lines, arcs, Béziers,
+// B-splines — the NURBS-relevant case) self-describing on the device, with no
+// global arena and no blob fallback. Nested composites remain unsupported (a
+// recursive device projection is illegal; CompositePath rejects them at
+// construction).
+// ---------------------------------------------------------------------------
+
+/// @brief SoA schema for `CompositePath`: packed `(n_segs, rec_off)` + one
+///        segmented CSR slot holding the per-composite self-contained arena
+///        slice (`[sub-segment data | segment records]`).
+template <> struct EntitySoA<CompositePath> {
+    static constexpr EntityTag tag = EntityTag::Composite;
+    static constexpr int kFields = 2;
+    static constexpr int kSeg = 1;  ///< self-contained arena slice (slot 0).
+    static constexpr int N_SEGS = 0, REC_OFF = 1;
+    static constexpr int ARENA = 0;  ///< Segmented slot index.
+
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+
+    [[nodiscard]] static CompositePath load(const View& v, std::size_t i)
+    {
+        const std::span<const double> slice = v.seg[ARENA][i];
+        const auto n_segs = static_cast<int>(v.records[i, N_SEGS]);
+        const auto rec_off = static_cast<std::size_t>(v.records[i, REC_OFF]);
+        return CompositePath {
+          .n_segs = n_segs,
+          .recs = slice.subspan(rec_off,
+                                static_cast<std::size_t>(n_segs) * kCompositeRecSize),
+          .arena = slice.data()};
+    }
+
+    static void load_into(Host& h, std::size_t i, const CompositePath& e)
+    {
+        double* r = h.records.data() + (i * kFields);
+        r[N_SEGS] = static_cast<double>(e.n_segs);
+        // Blob→SoA host path (golden test/bench): the decoded entity's records
+        // are self-contained for fixed-size segments, so the slice is exactly
+        // the record block at rec_off == 0. (A composite carrying B-spline
+        // sub-segment data is built via the Python wire, not this path.)
+        r[REC_OFF] = 0.0;
+        h.seg[ARENA].push_back(e.recs);
+    }
+
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>* seg)
+    {
+        View v{.records = soa};
+        if (seg != nullptr) { v.seg[ARENA] = seg[ARENA]; }
+        return v;
+    }
+};
+
+static_assert(HasEntitySoA<CompositePath>);
+
+/// @brief Host-side tag -> concrete entity TYPE dispatch for the 2D entity set.
+///
+/// Invokes `f.template operator()<E>()` with the entity type `E` that
+/// @ref make_entity produces for @p tag. This is the launch-granularity
+/// counterpart to the per-element `std::visit`: it lets the sweep instantiate a
+/// kernel for ONE entity type per launch (no all-alternatives inlining, no
+/// per-lane dispatch). The type list mirrors @ref EntityKind and @ref make_entity
+/// exactly; `Sphere`/`Plane` have no 2D entity and map to `Free`, matching
+/// make_entity's fall-through. `F` is constrained by @ref EntityDispatchFn per
+/// dispatched type, so a malformed callable fails at the concept rather than
+/// deep in instantiation.
+/// @tparam D Embedding dimension (only 2 is currently supported; the 3D case
+///           arrives as an additive `if constexpr (D == 3)` arm at the
+///           `feat_3d_math` merge — the 3D tags/case are deferred to that merge).
+/// @tparam F Callable with a templated `operator()<E>()` for each entity type.
+/// @param tag Entity kind tag.
+/// @param f The type-consuming callable.
+template <int D = kDefaultDim, class F>
+    requires EntityDispatchFn<F, Free<D>> && EntityDispatchFn<F, LineSeg> &&
+             EntityDispatchFn<F, Circle> && EntityDispatchFn<F, Ellipse> &&
+             EntityDispatchFn<F, TrimmedEntity<CircleArcParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<EllipseArcParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<QuadBezierParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<CubicBezierParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<BSplineCurveParam>> &&
+             EntityDispatchFn<F, CompositePath>
+inline void dispatch_entity_type(EntityTag tag, F f)
+{
+    static_assert(D == 2, "dispatch_entity_type: only the 2D entity set is implemented");
+    switch (tag) {
+    case EntityTag::LineSeg: f.template operator()<LineSeg>(); break;
+    case EntityTag::Circle: f.template operator()<Circle>(); break;
+    case EntityTag::Ellipse: f.template operator()<Ellipse>(); break;
+    case EntityTag::CircleArc: f.template operator()<TrimmedEntity<CircleArcParam>>(); break;
+    case EntityTag::EllipseArc: f.template operator()<TrimmedEntity<EllipseArcParam>>(); break;
+    case EntityTag::QuadBezier: f.template operator()<TrimmedEntity<QuadBezierParam>>(); break;
+    case EntityTag::CubicBezier: f.template operator()<TrimmedEntity<CubicBezierParam>>(); break;
+    case EntityTag::BSpline: f.template operator()<TrimmedEntity<BSplineCurveParam>>(); break;
+    case EntityTag::Composite: f.template operator()<CompositePath>(); break;
+    case EntityTag::Free:
+    case EntityTag::Sphere:  // 3D surfaces: no 2D entity, fall through to Free.
+    case EntityTag::Plane:
+    default: f.template operator()<Free<D>>(); break;
     }
 }
 
+/// @brief Fused frame of the nearest segment to @p p (no entity variant).
+///
+/// Projects onto every non-nested curve segment and keeps the nearest. Each
+/// segment is built monomorphically via @ref dispatch_entity_type +
+/// @ref decode_entity<E> — the per-segment positional record is decoded into a
+/// concrete `E`, with NO `std::visit` and NO `make_entity` variant (the last
+/// device-hot-path variant retired in Phase 3). Nested composites and free
+/// records are filtered by tag before dispatch (a recursive device call is
+/// illegal); the `if constexpr` guard additionally excludes them at compile
+/// time so the `CompositePath`/`Free` dispatch arms instantiate to a no-op.
 inline Frame<2, 1> CompositePath::project_frame(const Pt& p) const
 {
     Frame<2, 1> best {.pos = p, .basis = {Vec {1.0, 0.0}}, .eff_tdim = 1};
     double best_d = std::numeric_limits<double>::infinity();
     for (int s = 0; s < n_segs; ++s) {
         const double* rec = recs.data() + (static_cast<std::size_t>(s) * kCompositeRecSize);
-        const Tag tag = static_cast<Tag>(rec[0]);
-        if (tag == TAG_COMPOSITE || tag == TAG_FREE) { continue; }  // no nesting
-        std::visit(
-          [&](const auto& e) {
-              // Only non-composite curve segments (tdim==1) participate;
-              // Free/composite records are filtered by tag above. Excluding
-              // CompositePath here is a compile-time necessity, not just an
-              // optimisation: a recursive call is illegal in device code.
-              using Seg = std::decay_t<decltype(e)>;
-              if constexpr (Seg::tdim == 1 && !std::is_same_v<Seg, CompositePath>) {
-                  Frame<2, 1> f = e.project_frame(p);
-                  const Vec d = f.pos - p;
-                  const double dd = dot(d, d);
-                  if (dd < best_d) {
-                      best_d = dd;
-                      // A clamped segment endpoint is an interior joint of the
-                      // continuous path, not a pinned vertex.
-                      f.eff_tdim = 1;
-                      best = f;
-                  }
-              }
-          },
-          make_entity(tag, rec + 1, arena));
+        const auto seg_tag = static_cast<EntityTag>(static_cast<int>(rec[0]));
+        if (seg_tag == EntityTag::Composite || seg_tag == EntityTag::Free) {
+            continue;  // no nesting; filtered before dispatch (recursion illegal)
+        }
+        dispatch_entity_type<2>(seg_tag, [&]<class E>() {
+            // Only non-composite curve segments (tdim==1) participate; excluding
+            // CompositePath is a compile-time necessity (a recursive call is
+            // illegal in device code), and the tag skip above keeps it off the
+            // runtime path. The Free arm is likewise a compile-time no-op.
+            if constexpr (E::tdim == 1 && !std::is_same_v<E, CompositePath>) {
+                const E e = decode_entity<E>(rec + 1, arena);
+                Frame<2, 1> f = e.project_frame(p);
+                const Vec d = f.pos - p;
+                const double dd = dot(d, d);
+                if (dd < best_d) {
+                    best_d = dd;
+                    // A clamped segment endpoint is an interior joint of the
+                    // continuous path, not a pinned vertex.
+                    f.eff_tdim = 1;
+                    best = f;
+                }
+            }
+        });
     }
     return best;
 }
 
-/// @brief Dimension-templated dispatch over @ref make_entity.
-///
-/// `make_entity<2>` returns today's variant; other dimensions are gated until
-/// their entity set + projections exist.
-/// @tparam D Embedding dimension (only 2 is currently supported).
-/// @param tag Entity type tag (`TAG_*`).
-/// @param params Flat parameter blob.
-/// @param arena Base of the per-group double arena for span-backed entities.
-/// @return The typed entity variant.
-template <int D = kDefaultDim>
-inline EntityKindT<D> make_entity(Tag tag, const double* params, const double* arena = nullptr)
-{
-    static_assert(D == 2, "make_entity: only the 2D entity set is implemented");
-    return make_entity(tag, params, arena);
-}
-
 /// @brief Project @p p onto the entity @p (tag, params).
 ///
-/// Dispatched through the concept entities via `std::visit` — monomorphic per
-/// entity type, no virtuals.
+/// Builds the concrete entity monomorphically via @ref dispatch_entity_type +
+/// @ref decode_entity<E> (no `std::visit`, no entity variant). Cold oracle path
+/// (the `geometry_project` binding); fixed-size entities only (no arena).
 /// @param p Query point.
 /// @param tag Entity type tag.
 /// @param params Flat parameter blob.
 /// @return The projected point.
 inline Pt project(const Pt& p, Tag tag, const double* params)
 {
-    return std::visit([&](const auto& e) { return e.project(p); }, make_entity(tag, params));
+    Pt out {};
+    dispatch_entity_type<2>(static_cast<EntityTag>(tag),
+                            [&]<class E>() { out = decode_entity<E>(params).project(p); });
+    return out;
 }
 
 /// @brief The @f$ (d, 1) @f$ tangent column at @p p on the entity @p (tag, params).
 ///
 /// The first column of the entity tangent basis (the single tangent for a curve;
-/// @f$ e_0 @f$ for Free).
+/// @f$ e_0 @f$ for Free). Built monomorphically via @ref dispatch_entity_type +
+/// @ref decode_entity<E> (no `std::visit`, no entity variant).
 /// @param p Query point.
 /// @param tag Entity type tag.
 /// @param params Flat parameter blob.
 /// @return The tangent column.
 inline Pt tangent_space(const Pt& p, Tag tag, const double* params)
 {
-    return std::visit([&](const auto& e) { return e.tangent_basis(p)[0]; },
-                      make_entity(tag, params));
+    Pt out {};
+    dispatch_entity_type<2>(static_cast<EntityTag>(tag),
+                            [&]<class E>() { out = decode_entity<E>(params).tangent_basis(p)[0]; });
+    return out;
 }
 
 }  // namespace egg

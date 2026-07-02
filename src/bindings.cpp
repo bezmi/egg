@@ -106,9 +106,7 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         eq(g.W_inv.size(), ts * egg::dim::wInv(D), "W_inv");
         eq(g.J.size(), ts * egg::dim::jSize(D), "J");
         eq(g.dof_idx.size(), g.ndof, "dof_idx");
-        eq(g.tag.size(), g.ndof, "tag");
         eq(g.P_of.size(), g.ndof, "P_of");
-        eq(g.params.size(), g.ndof * egg::kParamPad, "params");
 
         // role selects the per-corner stencil branch (corner / neighbour axis /
         // absent) and, via c0 = D*role, the J columns in patch_eval — an
@@ -139,6 +137,50 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
             check_index(g.gn[k], ("gn" + std::to_string(k)).c_str(), grp);
         }
         check_index(g.dof_idx, "dof_idx", grp);
+
+        // Per-type SoA record + segmented field validation (Phase 2-B). Also
+        // verify the SoA partitions cover every group-local DOF exactly once:
+        // the entity data is now carried solely by `soa` (Phase 4 retired the
+        // positional blob), so an uncovered DOF would silently never be swept.
+        std::vector<int> covered(g.ndof, 0);
+        for (std::size_t si = 0; si < g.soa.size(); ++si) {
+            const auto& s = g.soa[si];
+            const std::string snm = grp + " soa[" + std::to_string(si) + "] (tag=" +
+                                    std::to_string(egg::to_int(s.tag)) + ")";
+            if (s.records.size() != s.count * static_cast<std::size_t>(s.k_fields)) {
+                throw std::invalid_argument("validate_context: " + snm + " records size " +
+                    std::to_string(s.records.size()) + " != count*kFields " +
+                    std::to_string(s.count * static_cast<std::size_t>(s.k_fields)));
+            }
+            if (s.dof_local.size() != s.count) {
+                throw std::invalid_argument("validate_context: " + snm + " dof_local size " +
+                    std::to_string(s.dof_local.size()) + " != count " + std::to_string(s.count));
+            }
+            for (std::size_t j = 0; j < s.seg.size(); ++j) {
+                if (s.seg[j].off.size() != s.count + 1) {
+                    throw std::invalid_argument("validate_context: " + snm +
+                        " seg[" + std::to_string(j) + "].off size " +
+                        std::to_string(s.seg[j].off.size()) + " != count+1 " +
+                        std::to_string(s.count + 1));
+                }
+            }
+            for (int dl : s.dof_local) {
+                if (dl < 0 || static_cast<std::size_t>(dl) >= g.ndof) {
+                    throw std::invalid_argument("validate_context: " + snm + " dof_local " +
+                        std::to_string(dl) + " out of range [0, " + std::to_string(g.ndof) + ")");
+                }
+                if (covered[static_cast<std::size_t>(dl)]++ != 0) {
+                    throw std::invalid_argument("validate_context: " + snm + " dof_local " +
+                        std::to_string(dl) + " covered by more than one SoA partition");
+                }
+            }
+        }
+        for (std::size_t d = 0; d < g.ndof; ++d) {
+            if (covered[d] == 0) {
+                throw std::invalid_argument("validate_context: " + grp + " DOF " +
+                    std::to_string(d) + " not covered by any SoA partition");
+            }
+        }
     }
 
     const auto& es = host.energy_stencil;
@@ -241,12 +283,45 @@ egg::SweepContextHostT<D>
         sg.role = extract_int(gd, "role");
         sg.J = extract_double(gd, "J");
         sg.dof_idx = extract_int(gd, "dof_idx");
-        sg.tag = extract_int(gd, "tag");
         sg.P_of = extract_int(gd, "P_of");
-        sg.params = extract_double(gd, "params");
-        // Optional: variable-length entity data (B-spline nets/knots). Absent for
-        // contexts with only fixed-size entities.
-        if (gd.contains("arena")) { sg.arena = extract_double(gd, "arena"); }
+
+        // Typed per-entity-type SoA sub-dicts (the entity data — Phase 4 retired
+        // the positional tag/params/arena blob). Each present type contributes
+        // {tag, kFields, dof_local, records, [seg]}, where records is a packed
+        // (count, kFields) row-major double array and seg is a list of {data, off}
+        // CSR fields (absent for fixed-size types). Every constrained and free DOF
+        // is covered by exactly one entity sub-dict (validated below).
+        if (gd.contains("entities")) {
+            auto entities = gd["entities"].cast<py::dict>();
+            for (auto [name, val] : entities) {
+                auto ed = val.cast<py::dict>();
+                if (!ed.contains("tag")) {  // "__blob__" marker: unsupported post-Phase 4
+                    throw std::invalid_argument(
+                      "unpack_context: entities carries a '__blob__' group (an entity "
+                      "with no SoA encoder, e.g. a composite with a nested B-spline); "
+                      "the positional blob path was retired in Phase 4");
+                }
+                egg::SoAHostRecord rec;
+                rec.tag = static_cast<egg::EntityTag>(ed["tag"].cast<int>());
+                rec.k_fields = ed["kFields"].cast<int>();
+                rec.records = extract_double(ed, "records");
+                rec.dof_local = extract_int(ed, "dof_local");  // group-local DOF indices
+                rec.count = rec.dof_local.size();
+                // Ingest segmented CSR fields (B-spline knots/ctrl). Each slot
+                // is {data: f64, off: i32[count+1]}. Absent for fixed-size types.
+                if (ed.contains("seg")) {
+                    auto seg_list = ed["seg"].cast<py::list>();
+                    for (auto seg_val : seg_list) {
+                        auto sd = seg_val.cast<py::dict>();
+                        egg::SoAHostRecord::SegmentedField sf;
+                        sf.data = extract_double(sd, "data");
+                        sf.off = extract_int(sd, "off");
+                        rec.seg.push_back(std::move(sf));
+                    }
+                }
+                sg.soa.push_back(std::move(rec));
+            }
+        }
 
         sg.total_samples = sg.gc.size();
 

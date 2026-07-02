@@ -96,6 +96,8 @@ def flatten_context(ctx: SweepContext) -> dict:
     """
     _ensure_group_batches(ctx)
 
+    from egg.geometry.entity_soa import group_entities_by_type
+
     # One ragged group per colour: merge the colour's (colour, P) batches into a
     # single launch (#1 — see cpp_backend_plan.md §5). Per-sample arrays are
     # concatenated DOF-major over the colour's DOFs (each DOF contributes its P
@@ -109,7 +111,10 @@ def flatten_context(ctx: SweepContext) -> dict:
 
         gc, gn0, gn1, s0, s1, role = [], [], [], [], [], []
         W_inv, J = [], []
-        dof_idx, tag, params, P_of = [], [], [], []
+        dof_idx, P_of = [], []
+
+        # Collect the colour group's DOF indices in order (for entity typing).
+        group_dof_indices: list[int] = []
 
         for P, _dofs in cg.items():
             b = ctx.jax_group_batches[(colour, P)]
@@ -125,11 +130,10 @@ def flatten_context(ctx: SweepContext) -> dict:
             W_inv.append(b["W_inv"].reshape(D * P, 4))     # (D,P,2,2) -> (D*P,4)
             J.append(b["J"].reshape(D * P, 24))            # (D,P,4,6) -> (D*P,24)
             dof_idx.append(b["dof_idx"])
-            tag.append(b["tag"])
-            params.append(b["params"].reshape(D, 12))
             P_of.append(np.full(D, P, dtype=np.int32))
+            group_dof_indices.extend(int(x) for x in b["dof_idx"])
 
-        groups.append({
+        group_dict = {
             "D": int(np.concatenate(dof_idx).shape[0]),
             "gc": np.ascontiguousarray(np.concatenate(gc), dtype=np.int32),
             "gn0": np.ascontiguousarray(np.concatenate(gn0), dtype=np.int32),
@@ -140,16 +144,36 @@ def flatten_context(ctx: SweepContext) -> dict:
             "role": np.ascontiguousarray(np.concatenate(role), dtype=np.int32),
             "J": np.ascontiguousarray(np.concatenate(J), dtype=np.float64),
             "dof_idx": np.ascontiguousarray(np.concatenate(dof_idx), dtype=np.int32),
-            "tag": np.ascontiguousarray(np.concatenate(tag), dtype=np.int32),
             "P_of": np.ascontiguousarray(np.concatenate(P_of), dtype=np.int32),
-            "params": np.ascontiguousarray(np.concatenate(params), dtype=np.float64),
-        })
-        # Variable-length entity data (B-spline knots/nets, composite-path
-        # records). Offsets in params index into this shared array, so every
-        # group gets the same arena.
-        arena = getattr(ctx, "entity_arena", None)
-        if arena is not None and arena.size > 0:
-            groups[-1]["arena"] = np.ascontiguousarray(arena, dtype=np.float64)
+        }
+
+        # Typed per-entity-type SoA sub-dict — the sole entity transport (Phase 4
+        # retired the positional tag/params/arena blob). Python partitions the
+        # group's DOFs by entity type and emits packed-record arrays (+ CSR seg
+        # fields) matching the C++ EntitySoA<E>::Host layout, covering every DOF
+        # (free + constrained). All 2D types are covered, including B-spline
+        # (segmented) and composite (Phase 3).
+        entities = ctx.dof_entities
+        if entities is None:
+            raise ValueError(
+                "flatten_context: ctx.dof_entities is required (the entity SoA wire "
+                "has no positional-blob fallback since Phase 4); build the context "
+                "via build_sweep_context"
+            )
+        typed = group_entities_by_type(group_dof_indices, entities, d=2)
+        if "__blob__" in typed:
+            # Every 2D entity now has an SoA encoder (composites carry any curve
+            # type, incl. B-splines, via a self-contained per-composite arena), so
+            # this is reachable only by a future/unencodable entity. The positional
+            # blob path was retired in Phase 4, so there is no fallback.
+            raise NotImplementedError(
+                "flatten_context: a DOF has an entity with no SoA encoder; the "
+                "positional blob path was retired in Phase 4 — add an EntitySoA "
+                "encoder for it (see egg.geometry.entity_soa)"
+            )
+        group_dict["entities"] = typed
+
+        groups.append(group_dict)
 
     es = ctx.energy_stencil
     n = int(es["gc"].shape[0])
