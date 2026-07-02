@@ -1,4 +1,9 @@
-"""2D analytic geometry primitives: Circle, LineSegment, Ellipse."""
+"""2D analytic geometry primitives: Circle, LineSegment, Ellipse.
+
+Each entity also carries a standalone-Python parametric form ``eval(t)`` /
+``deriv(t)`` over ``[t0, t1]`` (with ``closed`` marking periodic curves) so
+grid edges can place nodes along it without touching the C++ core.
+"""
 
 import numpy as np
 
@@ -8,7 +13,14 @@ __all__ = ["Circle", "Ellipse", "LineSegment"]
 
 
 class Circle(GeometryEntity):
-    """A circle in 2D — a 1D curve."""
+    """A circle in 2D — a 1D curve.
+
+    Parametric form: ``C + r (cos t, sin t)``, t in [0, 2*pi), periodic.
+    """
+
+    t0: float = 0.0
+    t1: float = 2.0 * np.pi
+    closed: bool = True
 
     @property
     def dim(self) -> int:
@@ -17,6 +29,12 @@ class Circle(GeometryEntity):
     def __init__(self, center, radius: float):
         self.center = np.asarray(center, dtype=float)
         self.radius = float(radius)
+
+    def eval(self, t: float) -> np.ndarray:
+        return self.center + self.radius * np.array([np.cos(t), np.sin(t)])
+
+    def deriv(self, t: float) -> np.ndarray:
+        return self.radius * np.array([-np.sin(t), np.cos(t)])
 
     def project(self, p: np.ndarray) -> np.ndarray:
         """Closest point on the circle to p."""
@@ -46,7 +64,14 @@ class Circle(GeometryEntity):
 
 
 class LineSegment(GeometryEntity):
-    """A line segment in 2D — a 1D curve."""
+    """A line segment in 2D — a 1D curve.
+
+    Parametric form: ``start + t (end - start)``, t in [0, 1].
+    """
+
+    t0: float = 0.0
+    t1: float = 1.0
+    closed: bool = False
 
     @property
     def dim(self) -> int:
@@ -55,6 +80,12 @@ class LineSegment(GeometryEntity):
     def __init__(self, start, end):
         self.start = np.asarray(start, dtype=float)
         self.end = np.asarray(end, dtype=float)
+
+    def eval(self, t: float) -> np.ndarray:
+        return self.start + t * (self.end - self.start)
+
+    def deriv(self, t: float) -> np.ndarray:
+        return self.end - self.start
 
     def project(self, p: np.ndarray) -> np.ndarray:
         """Closest point on the segment to p."""
@@ -85,7 +116,13 @@ class Ellipse(GeometryEntity):
     """An ellipse in 2D — a 1D curve.
 
     Uses radial-scaling projection (exact for circles, approximate for ellipses).
+
+    Parametric form: ``C + (rx cos t, ry sin t)``, t in [0, 2*pi), periodic.
     """
+
+    t0: float = 0.0
+    t1: float = 2.0 * np.pi
+    closed: bool = True
 
     @property
     def dim(self) -> int:
@@ -95,6 +132,12 @@ class Ellipse(GeometryEntity):
         self.center = np.asarray(center, dtype=float)
         self.rx = float(rx)
         self.ry = float(ry)
+
+    def eval(self, t: float) -> np.ndarray:
+        return self.center + np.array([self.rx * np.cos(t), self.ry * np.sin(t)])
+
+    def deriv(self, t: float) -> np.ndarray:
+        return np.array([-self.rx * np.sin(t), self.ry * np.cos(t)])
 
     def project(self, p: np.ndarray) -> np.ndarray:
         """Closest point on the ellipse (radial-scaling approximation)."""

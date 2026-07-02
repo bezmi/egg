@@ -11,6 +11,8 @@ trim, and evaluates; the tangent space is the normalized ``C'(t)``.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from .base import GeometryEntity
@@ -246,7 +248,16 @@ class CompositePath(GeometryEntity):
 
     Projection projects onto every segment and keeps the nearest; the tangent
     is the matched segment's. Nested composites are not supported.
+
+    Parametric form: ``eval(t)`` over t in [0, 1], with sub-intervals allotted
+    to segments in proportion to their (numerically sampled) arc lengths and
+    mapped linearly onto each segment's own parameter — standalone Python, so
+    grid edges can place nodes along the wire without touching the C++ core.
     """
+
+    t0: float = 0.0
+    t1: float = 1.0
+    closed: bool = False
 
     def __init__(self, segments):
         segments = list(segments)
@@ -255,10 +266,51 @@ class CompositePath(GeometryEntity):
         if any(isinstance(s, CompositePath) for s in segments):
             raise ValueError("nested CompositePath segments are not supported")
         self.segments = segments
+        self._breaks = None  # cumulative arc-length fractions, computed lazily
 
     @property
     def dim(self) -> int:
         return 1
+
+    def _segment_breaks(self, samples_per_segment: int = 64) -> np.ndarray:
+        """Cumulative arc-length fractions [0, ..., 1] over the segments."""
+        if self._breaks is None:
+            lengths = []
+            for seg in self.segments:
+                ts = seg.t0 + (seg.t1 - seg.t0) * np.linspace(
+                    0.0, 1.0, samples_per_segment + 1
+                )
+                pts = np.stack([seg.eval(t) for t in ts])
+                lengths.append(float(np.linalg.norm(np.diff(pts, axis=0),
+                                                    axis=1).sum()))
+            total = sum(lengths)
+            if total <= 0.0:
+                raise ValueError("CompositePath has zero total arc length")
+            self._breaks = np.concatenate(
+                [[0.0], np.cumsum(lengths) / total])
+            self._breaks[-1] = 1.0
+        return self._breaks
+
+    def _locate(self, t: float) -> tuple[Any, float, float]:
+        """Segment, local parameter, and d(local)/d(global) at global t."""
+        br = self._segment_breaks()
+        t = float(np.clip(t, 0.0, 1.0))
+        i = min(int(np.searchsorted(br, t, side="right")) - 1,
+                len(self.segments) - 1)
+        i = max(i, 0)
+        seg = self.segments[i]
+        width = br[i + 1] - br[i]
+        u = (t - br[i]) / width
+        scale = (seg.t1 - seg.t0) / width
+        return seg, seg.t0 + u * (seg.t1 - seg.t0), scale
+
+    def eval(self, t: float) -> np.ndarray:
+        seg, tl, _ = self._locate(t)
+        return seg.eval(tl)
+
+    def deriv(self, t: float) -> np.ndarray:
+        seg, tl, scale = self._locate(t)
+        return seg.deriv(tl) * scale
 
     def _nearest(self, p: np.ndarray):
         p = np.asarray(p, dtype=float)

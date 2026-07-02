@@ -29,3 +29,14 @@ class GeometryEntity(ABC):
     def normal(self, q: np.ndarray) -> np.ndarray:
         """Normal vector at q, shape (d,). Defined for entities of codimension 1."""
         raise NotImplementedError
+
+    def eval_frac(self, t: float) -> np.ndarray:
+        """Evaluate at fractional parameter t in [0, 1] mapped onto [t0, t1].
+
+        The fractional counterpart of ``eval``, which takes the curve's native
+        parameter (radians for arcs, knot values for B-splines, ...). Available
+        on entities that expose the standalone parametric interface
+        (``eval``/``t0``/``t1``); raises AttributeError otherwise.
+        """
+        t = min(max(float(t), 0.0), 1.0)
+        return self.eval(self.t0 + t * (self.t1 - self.t0))

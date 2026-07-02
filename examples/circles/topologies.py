@@ -1,96 +1,79 @@
+"""Circle-in-channel topologies, authored with the egg 2D front-end.
+
+Geometry is declared gdtk/Eilmer-style — :class:`~egg.geometry.Vector3`
+points and :class:`~egg.geometry.Line` walls, with wall corners placed
+parametrically along :class:`~egg.geometry.Edge` wrappers
+(``edge.place_node(t)``). Blocks take their corner objects directly
+(compass keywords); block-to-block connectivity is inferred from shared
+corner objects, and wall-face associations are inferred from node
+provenance. Only the O-ring→circle and corner-block associations remain
+explicit (their corners are rough points / points shared by two walls).
+"""
+
 from __future__ import annotations
 
-import numpy as np
-
-from egg.geometry.analytic2d import Circle, LineSegment
+from egg.geometry import Circle, Edge, Line, Vector3
 from egg.topology.builder import TopologyBuilder
 
 __all__ = ["build_circle_in_rectangle", "build_twin_circle"]
 
 
 # Proper vs. rough (folded) inner O-ring corner placements.
-_INNER_PROPER = [
-    ("isw", (1.3, 1.3)),
-    ("ise", (2.7, 1.3)),
-    ("ine", (2.7, 2.7)),
-    ("inw", (1.3, 2.7)),
-]
-_INNER_ROUGH = [
-    ("isw", (2.5, 2.4)),
-    ("ise", (1.6, 2.5)),
-    ("ine", (1.5, 1.6)),
-    ("inw", (2.4, 1.5)),
-]
+_INNER_PROPER = [(1.3, 1.3), (2.7, 1.3), (2.7, 2.7), (1.3, 2.7)]
+_INNER_ROUGH = [(2.5, 2.4), (1.6, 2.5), (1.5, 1.6), (2.4, 1.5)]
 
 
 def build_circle_in_rectangle(rough: bool = False, R: int = 1):
     circle = Circle(center=(2.0, 2.0), radius=0.8)
-    bottom = LineSegment(start=(0.0, 0.0), end=(4.0, 0.0))
-    right = LineSegment(start=(4.0, 0.0), end=(4.0, 4.0))
-    top = LineSegment(start=(4.0, 4.0), end=(0.0, 4.0))
-    left = LineSegment(start=(0.0, 0.0), end=(0.0, 4.0))
+
+    sw = Vector3(x=0.0, y=0.0, fixed=True)
+    se = Vector3(x=4.0, y=0.0, fixed=True)
+    ne = Vector3(x=4.0, y=4.0, fixed=True)
+    nw = Vector3(x=0.0, y=4.0, fixed=True)
+    bottom = Edge(Line(p0=sw, p1=se))
+    right = Edge(Line(p0=se, p1=ne))
+    top = Edge(Line(p0=ne, p1=nw))
+    left = Edge(Line(p0=sw, p1=nw))
+
+    # O-ring corners: mid square and (rough or proper) inner square.
+    msw, mse, mne, mnw = (Vector3(*p) for p in [(1, 1), (3, 1), (3, 3), (1, 3)])
+    isw, ise, ine, inw = (
+        Vector3(*p) for p in (_INNER_ROUGH if rough else _INNER_PROPER)
+    )
+    # Wall corners placed along the wall edges in parametric space.
+    bsw, bse = bottom.place_node(0.25), bottom.place_node(0.75)
+    rse, rne = right.place_node(0.25), right.place_node(0.75)
+    tne, tnw = top.place_node(0.25), top.place_node(0.75)
+    lnw, lsw = left.place_node(0.75), left.place_node(0.25)
 
     b = TopologyBuilder(d=2)
-    for n, p in [("sw", (0, 0)), ("se", (4, 0)), ("ne", (4, 4)), ("nw", (0, 4))]:
-        b.add_corner(n, p, fixed=True)
-    for n, p in [("msw", (1, 1)), ("mse", (3, 1)), ("mne", (3, 3)), ("mnw", (1, 3))]:
-        b.add_corner(n, p, fixed=False)
-    for n, p in _INNER_ROUGH if rough else _INNER_PROPER:
-        b.add_corner(n, p, fixed=False)
-    for n, p in [
-        ("bsw", (1, 0)),
-        ("bse", (3, 0)),
-        ("rse", (4, 1)),
-        ("rne", (4, 3)),
-        ("tne", (3, 4)),
-        ("tnw", (1, 4)),
-        ("lnw", (0, 3)),
-        ("lsw", (0, 1)),
+    for nm, c_sw, c_nw, c_se, c_ne in [
+        ("o_s", msw, isw, mse, ise),
+        ("o_e", mse, ise, mne, ine),
+        ("o_n", mne, ine, mnw, inw),
+        ("o_w", mnw, inw, msw, isw),
     ]:
-        b.add_corner(n, p, fixed=False)
+        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=(10 * R, 4 * R))
+    for nm, c_sw, c_nw, c_se, c_ne in [
+        ("e_s", bsw, msw, bse, mse),
+        ("e_e", rse, mse, rne, mne),
+        ("e_n", tne, mne, tnw, mnw),
+        ("e_w", lnw, mnw, lsw, msw),
+    ]:
+        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=(10 * R, 5 * R))
+    for nm, c_sw, c_nw, c_se, c_ne in [
+        ("c_sw", sw, lsw, bsw, msw),
+        ("c_se", se, bse, rse, mse),
+        ("c_ne", ne, rne, tne, mne),
+        ("c_nw", nw, tnw, lnw, mnw),
+    ]:
+        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=(5 * R, 5 * R))
 
-    for nm, sw, nw, se, ne in [
-        ("o_s", "msw", "isw", "mse", "ise"),
-        ("o_e", "mse", "ise", "mne", "ine"),
-        ("o_n", "mne", "ine", "mnw", "inw"),
-        ("o_w", "mnw", "inw", "msw", "isw"),
-    ]:
-        b.add_block(nm, (sw, nw, se, ne), (10 * R, 4 * R))
-    for nm, sw, nw, se, ne in [
-        ("e_s", "bsw", "msw", "bse", "mse"),
-        ("e_e", "rse", "mse", "rne", "mne"),
-        ("e_n", "tne", "mne", "tnw", "mnw"),
-        ("e_w", "lnw", "mnw", "lsw", "msw"),
-    ]:
-        b.add_block(nm, (sw, nw, se, ne), (10 * R, 5 * R))
-    for nm, sw, nw, se, ne in [
-        ("c_sw", "sw", "lsw", "bsw", "msw"),
-        ("c_se", "se", "bse", "rse", "mse"),
-        ("c_ne", "ne", "rne", "tne", "mne"),
-        ("c_nw", "nw", "tnw", "lnw", "mnw"),
-    ]:
-        b.add_block(nm, (sw, nw, se, ne), (5 * R, 5 * R))
-
-    for a, b_ in [("o_s", "o_e"), ("o_e", "o_n"), ("o_n", "o_w"), ("o_w", "o_s")]:
-        b.connect(a, 0, 1, b_, 0, 0)
-    for e, o in [("e_s", "o_s"), ("e_e", "o_e"), ("e_n", "o_n"), ("e_w", "o_w")]:
-        b.connect(e, 1, 1, o, 1, 0)
-    for cb, ca, cs, eb, ea, es in [
-        ("c_sw", 0, 1, "e_s", 0, 0),
-        ("c_sw", 1, 1, "e_w", 0, 1),
-        ("c_se", 0, 1, "e_e", 0, 0),
-        ("c_se", 1, 1, "e_s", 0, 1),
-        ("c_ne", 0, 1, "e_n", 0, 0),
-        ("c_ne", 1, 1, "e_e", 0, 1),
-        ("c_nw", 0, 1, "e_w", 0, 0),
-        ("c_nw", 1, 1, "e_n", 0, 1),
-    ]:
-        b.connect(cb, ca, cs, eb, ea, es)
-
+    # Connectivity and wall associations are inferred; the O-ring faces on
+    # the circle (rough corners) and the corner-block faces (corners shared
+    # by two walls) stay explicit.
     for blk in ("o_s", "o_e", "o_n", "o_w"):
         b.associate(blk, 1, 1, circle)
-    for blk, ent in [("e_s", bottom), ("e_e", right), ("e_n", top), ("e_w", left)]:
-        b.associate(blk, 1, 0, ent)
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_se", bottom, right),
@@ -103,42 +86,22 @@ def build_circle_in_rectangle(rough: bool = False, R: int = 1):
     topology = b.build()
     entities = {
         "circle": circle,
-        "bottom": bottom,
-        "right": right,
-        "top": top,
-        "left": left,
+        "bottom": bottom.entity,
+        "right": right.entity,
+        "top": top.entity,
+        "left": left.entity,
     }
     return topology, entities
 
 
 _PROPER_TWIN = {
-    "c1": [
-        ("isw", (1.3, 1.3)),
-        ("ise", (2.7, 1.3)),
-        ("ine", (2.7, 2.7)),
-        ("inw", (1.3, 2.7)),
-    ],
-    "c2": [
-        ("i2sw", (4.3, 1.3)),
-        ("i2se", (5.7, 1.3)),
-        ("i2ne", (5.7, 2.7)),
-        ("i2nw", (4.3, 2.7)),
-    ],
+    "c1": [(1.3, 1.3), (2.7, 1.3), (2.7, 2.7), (1.3, 2.7)],
+    "c2": [(4.3, 1.3), (5.7, 1.3), (5.7, 2.7), (4.3, 2.7)],
 }
 
 _ROUGH_TWIN = {
-    "c1": [
-        ("isw", (2.5, 2.4)),
-        ("ise", (1.6, 2.5)),
-        ("ine", (1.5, 1.6)),
-        ("inw", (2.4, 1.5)),
-    ],
-    "c2": [
-        ("i2sw", (5.5, 2.4)),
-        ("i2se", (4.6, 2.5)),
-        ("i2ne", (4.5, 1.6)),
-        ("i2nw", (5.4, 1.5)),
-    ],
+    "c1": [(2.5, 2.4), (1.6, 2.5), (1.5, 1.6), (2.4, 1.5)],
+    "c2": [(5.5, 2.4), (4.6, 2.5), (4.5, 1.6), (5.4, 1.5)],
 }
 
 
@@ -152,128 +115,71 @@ def build_twin_circle(rough: bool = False, bl=None, R: int = 1):
     """
     circle = Circle(center=(2.0, 2.0), radius=0.8)
     circle2 = Circle(center=(5.0, 2.0), radius=0.8)
-    bottom = LineSegment((0.0, 0.0), (7.0, 0.0))
-    right = LineSegment((7.0, 0.0), (7.0, 4.0))
-    top = LineSegment((7.0, 4.0), (0.0, 4.0))
-    left = LineSegment((0.0, 0.0), (0.0, 4.0))
+
+    sw = Vector3(x=0.0, y=0.0, fixed=True)
+    s2e = Vector3(x=7.0, y=0.0, fixed=True)
+    n2e = Vector3(x=7.0, y=4.0, fixed=True)
+    nw = Vector3(x=0.0, y=4.0, fixed=True)
+    bottom = Edge(Line(p0=sw, p1=s2e))
+    right = Edge(Line(p0=s2e, p1=n2e))
+    top = Edge(Line(p0=n2e, p1=nw))
+    left = Edge(Line(p0=sw, p1=nw))
+
+    # O-ring corners around each circle.
+    msw, mse, mne, mnw = (Vector3(*p) for p in [(1, 1), (3, 1), (3, 3), (1, 3)])
+    m2sw, m2se, m2ne, m2nw = (
+        Vector3(*p) for p in [(4, 1), (6, 1), (6, 3), (4, 3)]
+    )
+    inner = _ROUGH_TWIN if rough else _PROPER_TWIN
+    isw, ise, ine, inw = (Vector3(*p) for p in inner["c1"])
+    i2sw, i2se, i2ne, i2nw = (Vector3(*p) for p in inner["c2"])
+    # Wall corners placed along the wall edges in parametric space.
+    bsw, bse = bottom.place_node(1 / 7), bottom.place_node(3 / 7)
+    b2sw, b2se = bottom.place_node(4 / 7), bottom.place_node(6 / 7)
+    r2se, r2ne = right.place_node(0.25), right.place_node(0.75)
+    tne, tnw = top.place_node(4 / 7), top.place_node(6 / 7)
+    t2ne, t2nw = top.place_node(1 / 7), top.place_node(3 / 7)
+    lnw, lsw = left.place_node(0.75), left.place_node(0.25)
 
     b = TopologyBuilder(d=2)
-    for n, p in [("sw", (0, 0)), ("nw", (0, 4)), ("n2e", (7, 4)), ("s2e", (7, 0))]:
-        b.add_corner(n, p, fixed=True)
-    for n, p in [("msw", (1, 1)), ("mse", (3, 1)), ("mne", (3, 3)), ("mnw", (1, 3))]:
-        b.add_corner(n, p, fixed=False)
-    for n, p in [
-        ("m2sw", (4, 1)),
-        ("m2se", (6, 1)),
-        ("m2ne", (6, 3)),
-        ("m2nw", (4, 3)),
+    for nm, c_sw, c_nw, c_se, c_ne in [
+        ("o_s", msw, isw, mse, ise),
+        ("o_e", mse, ise, mne, ine),
+        ("o_n", mne, ine, mnw, inw),
+        ("o_w", mnw, inw, msw, isw),
+        ("o2_s", m2sw, i2sw, m2se, i2se),
+        ("o2_e", m2se, i2se, m2ne, i2ne),
+        ("o2_n", m2ne, i2ne, m2nw, i2nw),
+        ("o2_w", m2nw, i2nw, m2sw, i2sw),
     ]:
-        b.add_corner(n, p, fixed=False)
-    inner = _ROUGH_TWIN if rough else _PROPER_TWIN
-    for n, p in inner["c1"] + inner["c2"]:
-        b.add_corner(n, p, fixed=False)
-    for n, p in [
-        ("bsw", (1, 0)),
-        ("bse", (3, 0)),
-        ("b2sw", (4, 0)),
-        ("b2se", (6, 0)),
-        ("r2se", (7, 1)),
-        ("r2ne", (7, 3)),
-        ("tne", (3, 4)),
-        ("tnw", (1, 4)),
-        ("t2ne", (6, 4)),
-        ("t2nw", (4, 4)),
-        ("lnw", (0, 3)),
-        ("lsw", (0, 1)),
+        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=(10 * R, 4 * R))
+    for nm, c_sw, c_nw, c_se, c_ne in [
+        ("e_s", bsw, msw, bse, mse),
+        ("e_e", m2sw, mse, m2nw, mne),
+        ("e_n", tne, mne, tnw, mnw),
+        ("e_w", lnw, mnw, lsw, msw),
+        ("e2_s", b2sw, m2sw, b2se, m2se),
+        ("e2_e", r2se, m2se, r2ne, m2ne),
+        ("e2_n", t2ne, m2ne, t2nw, m2nw),
     ]:
-        b.add_corner(n, p, fixed=False)
+        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=(10 * R, 5 * R))
+    for nm, c_sw, c_nw, c_se, c_ne in [
+        ("c_sw", sw, lsw, bsw, msw),
+        ("c_se", b2sw, bse, m2sw, mse),
+        ("c_ne", t2nw, m2nw, tne, mne),
+        ("c_nw", nw, tnw, lnw, mnw),
+        ("c2_se", s2e, b2se, r2se, m2se),
+        ("c2_ne", n2e, r2ne, t2ne, m2ne),
+    ]:
+        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=(5 * R, 5 * R))
 
-    for nm, sw, nw, se, ne in [
-        ("o_s", "msw", "isw", "mse", "ise"),
-        ("o_e", "mse", "ise", "mne", "ine"),
-        ("o_n", "mne", "ine", "mnw", "inw"),
-        ("o_w", "mnw", "inw", "msw", "isw"),
-        ("o2_s", "m2sw", "i2sw", "m2se", "i2se"),
-        ("o2_e", "m2se", "i2se", "m2ne", "i2ne"),
-        ("o2_n", "m2ne", "i2ne", "m2nw", "i2nw"),
-        ("o2_w", "m2nw", "i2nw", "m2sw", "i2sw"),
-    ]:
-        b.add_block(nm, (sw, nw, se, ne), (10 * R, 4 * R))
-    for nm, sw, nw, se, ne in [
-        ("e_s", "bsw", "msw", "bse", "mse"),
-        ("e_e", "m2sw", "mse", "m2nw", "mne"),
-        ("e_n", "tne", "mne", "tnw", "mnw"),
-        ("e_w", "lnw", "mnw", "lsw", "msw"),
-        ("e2_s", "b2sw", "m2sw", "b2se", "m2se"),
-        ("e2_e", "r2se", "m2se", "r2ne", "m2ne"),
-        ("e2_n", "t2ne", "m2ne", "t2nw", "m2nw"),
-    ]:
-        b.add_block(nm, (sw, nw, se, ne), (10 * R, 5 * R))
-    for nm, sw, nw, se, ne in [
-        ("c_sw", "sw", "lsw", "bsw", "msw"),
-        ("c_se", "b2sw", "bse", "m2sw", "mse"),
-        ("c_ne", "t2nw", "m2nw", "tne", "mne"),
-        ("c_nw", "nw", "tnw", "lnw", "mnw"),
-        ("c2_se", "s2e", "b2se", "r2se", "m2se"),
-        ("c2_ne", "n2e", "r2ne", "t2ne", "m2ne"),
-    ]:
-        b.add_block(nm, (sw, nw, se, ne), (5 * R, 5 * R))
-
-    for a, b_ in [
-        ("o_s", "o_e"),
-        ("o_e", "o_n"),
-        ("o_n", "o_w"),
-        ("o_w", "o_s"),
-        ("o2_s", "o2_e"),
-        ("o2_e", "o2_n"),
-        ("o2_n", "o2_w"),
-        ("o2_w", "o2_s"),
-    ]:
-        b.connect(a, 0, 1, b_, 0, 0)
-    for e, o in [
-        ("e_s", "o_s"),
-        ("e_e", "o_e"),
-        ("e_n", "o_n"),
-        ("e_w", "o_w"),
-        ("e2_s", "o2_s"),
-        ("e2_e", "o2_e"),
-        ("e2_n", "o2_n"),
-    ]:
-        b.connect(e, 1, 1, o, 1, 0)
-    b.connect("e_e", 1, 0, "o2_w", 1, 0)
-    for cb, ca, cs, eb, ea, es in [
-        ("c_sw", 0, 1, "e_s", 0, 0),
-        ("c_sw", 1, 1, "e_w", 0, 1),
-        ("c_se", 0, 1, "e_e", 0, 0),
-        ("c_se", 1, 1, "e_s", 0, 1),
-        ("c_se", 1, 0, "e2_s", 0, 0),
-        ("c2_se", 0, 1, "e2_e", 0, 0),
-        ("c2_se", 1, 1, "e2_s", 0, 1),
-        ("c_ne", 0, 1, "e_n", 0, 0),
-        ("c_ne", 1, 1, "e_e", 0, 1),
-        ("c_ne", 0, 0, "e2_n", 0, 1),
-        ("c2_ne", 0, 1, "e2_n", 0, 0),
-        ("c2_ne", 1, 1, "e2_e", 0, 1),
-        ("c_nw", 0, 1, "e_w", 0, 0),
-        ("c_nw", 1, 1, "e_n", 0, 1),
-    ]:
-        b.connect(cb, ca, cs, eb, ea, es)
-
+    # Connectivity and wall associations are inferred; the O-ring faces on
+    # the circles (rough corners) and the corner-block faces (corners shared
+    # by two walls) stay explicit.
     for blk in ("o_s", "o_e", "o_n", "o_w"):
         b.associate(blk, 1, 1, circle)
     for blk in ("o2_s", "o2_e", "o2_n", "o2_w"):
         b.associate(blk, 1, 1, circle2)
-    for blk, ent in [
-        ("e_s", bottom),
-        ("e2_s", bottom),
-        ("e_n", top),
-        ("e2_n", top),
-        ("e_w", left),
-        ("e2_e", right),
-        ("c_ne", top),
-    ]:
-        b.associate(blk, 1, 0, ent)
-    b.associate("c_se", 0, 0, bottom)
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_nw", top, left),
@@ -291,9 +197,9 @@ def build_twin_circle(rough: bool = False, bl=None, R: int = 1):
     entities = {
         "circle": circle,
         "circle2": circle2,
-        "bottom": bottom,
-        "right": right,
-        "top": top,
-        "left": left,
+        "bottom": bottom.entity,
+        "right": right.entity,
+        "top": top.entity,
+        "left": left.entity,
     }
     return topology, entities

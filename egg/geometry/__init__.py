@@ -11,11 +11,21 @@ from .curves2d import (
     EllipseArc,
     QuadBezier,
 )
+from .frontend2d import Arc, Bezier, Edge, Line, Node, Polyline, Spline, Vector3
 from .surfaces3d import BSplineSurface
 
 __all__ = [
     # base
     "GeometryEntity",
+    # 2D construction front-end (gdtk/Eilmer-style)
+    "Vector3",
+    "Line",
+    "Arc",
+    "Bezier",
+    "Polyline",
+    "Spline",
+    "Edge",
+    "Node",
     # 2D analytic
     "Circle",
     "Ellipse",

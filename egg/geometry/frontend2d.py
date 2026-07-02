@@ -54,6 +54,8 @@ __all__ = [
     "Bezier",
     "Polyline",
     "Spline",
+    "Edge",
+    "Node",
 ]
 
 
@@ -63,16 +65,20 @@ class Vector3:
     Supports addition, subtraction, scalar multiplication, negation, and
     magnitude (``abs``), matching the gdtk ``Vector3`` interface for 2D point
     construction. The geometry is planar: ``z`` must be zero (defaults to 0.0).
+
+    ``fixed=True`` marks the point as a pinned grid corner when used as a
+    topology corner position; results of arithmetic are never fixed.
     """
 
-    __slots__ = ("x", "y", "z")
+    __slots__ = ("x", "y", "z", "fixed")
 
-    def __init__(self, x, y, z=0.0):
+    def __init__(self, x, y, z=0.0, *, fixed=False):
         if abs(float(z)) > 1e-12:
             raise ValueError(f"Vector3 z must be 0 for 2D geometry, got {z}")
         self.x = float(x)
         self.y = float(y)
         self.z = float(z)
+        self.fixed = bool(fixed)
 
     def __repr__(self) -> str:
         return f"Vector3({self.x}, {self.y}, {self.z})"
@@ -148,19 +154,20 @@ class Line(LineSegment):
 
 
 class Arc:
-    """A circular arc through endpoints ``a``, ``b`` about centre ``c``.
+    """A circular arc from ``p0`` to ``p1`` about ``centre``.
 
+    Keyword names match the gdtk/Eilmer ``Arc:new{p0=, p1=, centre=}`` form.
     Returns a :class:`~egg.geometry.curves2d.CircleArc`. The signed sweep from
-    ``a`` to ``b`` (about ``c``) picks the arc direction. As with the former
-    gdtk adapter, the C++ inverse returns angles in ``(-pi, pi]``, so the
-    angular range is rejected if it cannot be represented in that branch (after
-    a possible antipodal flip of the start angle).
+    ``p0`` to ``p1`` (about ``centre``) picks the arc direction. As with the
+    former gdtk adapter, the C++ inverse returns angles in ``(-pi, pi]``, so
+    the angular range is rejected if it cannot be represented in that branch
+    (after a possible antipodal flip of the start angle).
     """
 
-    def __new__(cls, a, b, c) -> CircleArc:
-        center = _vec2(c)
-        pa = _vec2(a)
-        pb = _vec2(b)
+    def __new__(cls, p0, p1, centre) -> CircleArc:
+        center = _vec2(centre)
+        pa = _vec2(p0)
+        pb = _vec2(p1)
         ra = float(np.linalg.norm(pa - center))
         rb = float(np.linalg.norm(pb - center))
         if abs(ra - rb) > 1e-9 * max(ra, 1.0):
@@ -314,3 +321,140 @@ class Spline:
             pts = np.vstack([pts, pts[0:1]])
         segs = _spline_to_beziers(pts)
         return CompositePath(segs)
+
+
+class Edge:
+    """A grid edge: a 1D entity re-parameterized over normalized t in [0, 1].
+
+    Wraps any egg 2D curve entity that exposes the standalone-Python
+    parametric interface (``eval``/``t0``/``t1``; every entity constructed by
+    this module, plus :class:`~egg.geometry.analytic2d.Circle` /
+    :class:`~egg.geometry.analytic2d.Ellipse`, does). Nodes can then be placed
+    along the edge in parametric space::
+
+        bottom = Edge(Line(p0=Vector3(0, 0), p1=Vector3(4, 0)))
+        n = bottom.place_node(0.25)  # Node a quarter of the way along
+        p = bottom.point_at(0.25)    # plain Vector3, no grid identity
+
+    Both methods take the fractional parameter by default; pass
+    ``param="native"`` to use the wrapped entity's own parameter instead
+    (e.g. placing a node on an arc at an exact angle). The entities
+    themselves expose the same pair as ``eval`` (native) / ``eval_frac``
+    (fractional).
+
+    ``arc_length=True`` re-parameterizes by normalized arc length (numerically
+    sampled), so equal steps in t give equal steps in distance along curves
+    with non-uniform native speed (Béziers, splines, composite wires).
+
+    The wrapper is pure Python and never reaches the C++ core: consumers that
+    encode entities (e.g. the topology builder) unwrap :attr:`entity` first.
+    Projection-style queries delegate to the wrapped entity.
+    """
+
+    def __init__(self, entity, arc_length: bool = False, samples: int = 256):
+        for attr in ("eval", "t0", "t1"):
+            if not hasattr(entity, attr):
+                raise TypeError(
+                    f"Edge needs an entity with a parametric interface "
+                    f"(missing '{attr}'): {entity!r}"
+                )
+        self.entity = entity
+        self._table = None
+        if arc_length:
+            ts = np.linspace(entity.t0, entity.t1, samples + 1)
+            pts = np.stack([np.asarray(entity.eval(t), dtype=float)
+                            for t in ts])
+            s = np.concatenate(
+                [[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0),
+                                                 axis=1))])
+            if s[-1] <= 0.0:
+                raise ValueError("Edge has zero arc length")
+            self._table = (s / s[-1], ts)
+
+    @property
+    def dim(self) -> int:
+        return 1
+
+    def _tau(self, t: float) -> float:
+        """Native parameter for fractional t in [0, 1]."""
+        t = float(np.clip(t, 0.0, 1.0))
+        if self._table is not None:
+            frac, ts = self._table
+            return float(np.interp(t, frac, ts))
+        return self.entity.t0 + t * (self.entity.t1 - self.entity.t0)
+
+    def _frac(self, tau: float) -> float:
+        """Fractional parameter in [0, 1] for native parameter tau."""
+        tau = float(np.clip(tau, self.entity.t0, self.entity.t1))
+        if self._table is not None:
+            frac, ts = self._table
+            return float(np.interp(tau, ts, frac))
+        return (tau - self.entity.t0) / (self.entity.t1 - self.entity.t0)
+
+    @staticmethod
+    def _as_frac_param(t: float, param: str, frac_of_native) -> float:
+        if param == "frac":
+            return float(t)
+        if param == "native":
+            return frac_of_native(t)
+        raise ValueError(f"param must be 'frac' or 'native', got {param!r}")
+
+    def point_at(self, t: float, param: str = "frac") -> Vector3:
+        """Physical point at parameter t (a plain Vector3).
+
+        ``param`` selects the parametrisation of ``t``: ``"frac"`` (default)
+        is the fraction in [0, 1] along the edge; ``"native"`` is the wrapped
+        entity's own parameter (radians for arcs, knot values for B-splines).
+        """
+        t = self._as_frac_param(t, param, self._frac)
+        p = np.asarray(self.entity.eval(self._tau(t)), dtype=float)
+        return Vector3(p[0], p[1])
+
+    def place_node(self, t: float, param: str = "frac",
+                   *, fixed: bool = False) -> "Node":
+        """A grid node placed on this edge at parameter t.
+
+        ``param`` selects the parametrisation of ``t`` as in :meth:`point_at`.
+        The node's ``t`` attribute is always stored fractionally.
+        ``fixed=True`` pins the node when used as a topology corner.
+        """
+        return Node(self, self._as_frac_param(t, param, self._frac),
+                    fixed=fixed)
+
+    def point_at_native(self, t: float) -> Vector3:
+        """Convenience for ``point_at(t, param="native")``."""
+        return self.point_at(t, param="native")
+
+    def place_node_native(self, t: float, *, fixed: bool = False) -> "Node":
+        """Convenience for ``place_node(t, param="native")``."""
+        return self.place_node(t, param="native", fixed=fixed)
+
+    # Entity-protocol queries delegate to the wrapped entity.
+    def project(self, p):
+        return self.entity.project(p)
+
+    def tangent_space(self, q):
+        return self.entity.tangent_space(q)
+
+    def normal(self, q):
+        return self.entity.normal(q)
+
+
+class Node(Vector3):
+    """A point placed on an :class:`Edge` at normalized parameter ``t``.
+
+    Behaves as a :class:`Vector3` (so it can be used anywhere a point is
+    expected, e.g. as a topology corner position) while remembering its host
+    ``edge`` and parameter ``t``.
+    """
+
+    __slots__ = ("edge", "t")
+
+    def __init__(self, edge: Edge, t: float, *, fixed: bool = False):
+        p = edge.point_at(t)
+        super().__init__(p.x, p.y, fixed=fixed)
+        self.edge = edge
+        self.t = float(t)
+
+    def __repr__(self) -> str:
+        return f"Node({self.x}, {self.y}, t={self.t})"
