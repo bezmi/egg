@@ -4,12 +4,48 @@
 #   ./.devcontainer/podman-run.sh            # CPU-only (default)
 #   ./.devcontainer/podman-run.sh rocm       # AMD GPU (ROCm/HIP) passthrough
 #   ./.devcontainer/podman-run.sh cuda       # NVIDIA GPU (CUDA, via CDI)
+#   ./.devcontainer/podman-run.sh all        # both backends in one image
+#                                            #   (alias: cuda+rocm)
+#
+# Options (must come before the backend):
+#   --rocm-version VERSION   override the ROCm version (default: Containerfile's
+#                            ROCM_VERSION). Only affects rocm/all builds.
+#     e.g. ./.devcontainer/podman-run.sh --rocm-version 7.0.2 rocm
 #
 # Mounts the repo at /egg-workspace and keeps your UID so written files stay yours.
 set -euo pipefail
 
-BACKEND="${1:-cpu}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Parse leading options, leaving "$@" = [backend] [explicit command...].
+ROCM_VERSION=""
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	--rocm-version)
+		[ "$#" -ge 2 ] || { echo "error: --rocm-version needs a value" >&2; exit 2; }
+		ROCM_VERSION="$2"
+		shift 2
+		;;
+	--rocm-version=*)
+		ROCM_VERSION="${1#*=}"
+		shift
+		;;
+	--)
+		shift
+		break
+		;;
+	-*)
+		echo "unknown option: $1" >&2
+		echo "usage: $0 [--rocm-version VERSION] [cpu|rocm|cuda|all] [command...]" >&2
+		exit 2
+		;;
+	*)
+		break
+		;;
+	esac
+done
+
+BACKEND="${1:-cpu}"
 
 build_args=()
 gpu_args=()
@@ -20,6 +56,7 @@ cpu)
 rocm)
 	IMAGE="egg-rocm"
 	build_args+=(--build-arg WITH_ROCM=1)
+	[ -n "$ROCM_VERSION" ] && build_args+=(--build-arg "ROCM_VERSION=$ROCM_VERSION")
 	# Requires CDI on the host (amd-container-toolkit):
 	#   amd-ctk cdi generate --output=/etc/cdi/amd.yaml
 	gpu_args+=(--device amd.com/gpu=all)
@@ -31,8 +68,25 @@ cuda)
 	#   nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 	gpu_args+=(--device nvidia.com/gpu=all)
 	;;
+all | cuda+rocm)
+	# acpp built with BOTH the CUDA and ROCm backends (CPU/SSCP always on), so a
+	# single generic build can deploy core;cuda;hip. The build needs no GPU; at
+	# runtime we pass through whichever vendor the host has a CDI spec for —
+	# best-effort, mirroring the display passthrough below. Each needs its own
+	# host container toolkit:
+	#   nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+	#   amd-ctk    cdi generate --output=/etc/cdi/amd.yaml
+	IMAGE="egg-gpu"
+	build_args+=(--build-arg WITH_CUDA=1 --build-arg WITH_ROCM=1)
+	[ -n "$ROCM_VERSION" ] && build_args+=(--build-arg "ROCM_VERSION=$ROCM_VERSION")
+	[ -f /etc/cdi/nvidia.yaml ] && gpu_args+=(--device nvidia.com/gpu=all)
+	[ -f /etc/cdi/amd.yaml ] && gpu_args+=(--device amd.com/gpu=all)
+	if [ "${#gpu_args[@]}" -eq 0 ]; then
+		echo ">> warning: no CDI spec at /etc/cdi/{nvidia,amd}.yaml; building both backends but passing through no GPU" >&2
+	fi
+	;;
 *)
-	echo "usage: $0 [cpu|rocm|cuda]" >&2
+	echo "usage: $0 [--rocm-version VERSION] [cpu|rocm|cuda|all] [command...]" >&2
 	exit 2
 	;;
 esac

@@ -22,12 +22,25 @@ ARG WITH_CUDA=0
 # CANONICAL VALUE: /ACPP_VERSION at the repo root (also read by CMakeLists.txt
 # for the superbuild). Keep this default in sync with that file.
 ARG ACPP_VERSION=54c31cd
-# NVIDIA CUDA apt repo + toolkit package (versioned). Only used with WITH_CUDA=1.
+# NVIDIA CUDA apt repo + packages (versioned). Only used with WITH_CUDA=1.
 ARG CUDA_REPO_DEBIAN=debian13
-ARG CUDA_TOOLKIT_PKG=cuda-toolkit-13-3
+# Minimal set for acpp's CUDA backend, NOT the full `cuda-toolkit-13-3`
+# meta-package (~6.3 GB: cuBLAS/cuFFT/Nsight/samples/docs, none of which the
+# generic-SSCP backend uses). acpp JITs PTX via its own LLVM, so no nvcc codegen;
+# nvcc is kept only because find_package(CUDAToolkit) may require a compiler
+# component. Validate on a `cuda`/`all` build; add specific packages if CMake
+# complains rather than reverting to the meta-package.
+ARG CUDA_TOOLKIT_PKG="cuda-cudart-dev-13-3 cuda-driver-dev-13-3 cuda-nvcc-13-3"
 # ROCm version from AMD's repo.radeon.com (Debian 13 uses the `noble` codename
 # per AMD docs). Only used with WITH_ROCM=1.
 ARG ROCM_VERSION=7.2.4
+# Minimal set for acpp's ROCm/HIP backend, NOT the full `rocm` meta-package
+# (~6.8 GB: rocBLAS/Tensile/MIOpen/FFT/profilers, none of which the generic-SSCP
+# backend uses). HIP runtime + HSA/ROCr + comgr + device libs are what the
+# backend builds/finalizes against. ROCm apt names shift between versions —
+# validate on a `rocm`/`all` build at ROCM_VERSION and add specific packages if
+# find_package(hip)/HSA/comgr fails, rather than reverting to `rocm`.
+ARG ROCM_PKGS="rocm-core hip-dev hsa-rocr-dev comgr rocm-device-libs"
 ARG UV_VERSION=0.11.19
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -35,7 +48,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
     ROCM_PATH=/opt/rocm \
     CUDA_HOME=/usr/local/cuda \
-    PATH=/opt/adaptivecpp/bin:/usr/lib/llvm-21/bin:/opt/rocm/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/opt/adaptivecpp/bin:/usr/lib/llvm-21/bin:/opt/rocm/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # trixie-backports for the LLVM 21 toolchain + cmake (+ rocm-podman-support).
 RUN echo 'deb http://deb.debian.org/debian trixie-backports main contrib non-free non-free-firmware' \
@@ -55,6 +68,7 @@ RUN apt-get update \
         llvm-21 llvm-21-dev \
         clang-21 clangd-21 clang-format-21 clang-tools-21 clang-tidy-21 \
         libclang-21-dev libclang-cpp21-dev libclang-common-21-dev \
+        libclang-rt-21-dev \
         lld-21 liblld-21-dev \
         libomp5 libomp-21-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -72,7 +86,7 @@ RUN if [ "$WITH_ROCM" = "1" ]; then \
         && printf 'Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n' \
              > /etc/apt/preferences.d/rocm-pin-600 \
         && apt-get update \
-        && apt-get install -y --no-install-recommends rocm \
+        && apt-get install -y --no-install-recommends ${ROCM_PKGS} \
         && rm -rf /var/lib/apt/lists/* ; \
     fi
 
