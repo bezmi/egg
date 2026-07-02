@@ -139,6 +139,17 @@ CPMAddPackage(
 # ---------------------------------------------------------------------------
 # Core compute library.
 # ---------------------------------------------------------------------------
+# Precision knob: -DEGG_REAL_IS_FLOAT=ON selects float for egg::real (see
+# src/core.hpp). Default OFF => double (the bit-for-bit baseline). Use a
+# directory-level definition (not a target INTERFACE one) so it reaches the
+# AdaptiveCpp-wrapped compile of bindings.cpp / the SYCL tests too — acpp's
+# add_sycl_to_target does not reliably propagate INTERFACE compile definitions.
+option(EGG_REAL_IS_FLOAT "Use float (fp32) as egg::real instead of double" OFF)
+if(EGG_REAL_IS_FLOAT)
+  add_compile_definitions(EGG_REAL_IS_FLOAT=1)
+  message(STATUS "egg::real = float (fp32 build)")
+endif()
+
 add_library(egg_core INTERFACE)
 target_include_directories(egg_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(egg_core INTERFACE cxx_std_23)
@@ -301,6 +312,40 @@ if(EGG_BUILD_TESTS)
   target_include_directories(cpp_sweep_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp")
   add_sycl_to_target(TARGET cpp_sweep_tests SOURCES tests/cpp/test_sweep_device.cpp)
   add_test(NAME cpp_sweep_tests COMMAND cpp_sweep_tests)
+
+  # cpp_tests under the AdaptiveCpp clang toolchain. The default cpp_tests
+  # (above) compiles under the host compiler (g++); this build uses acpp/clang
+  # as the C++ compiler so the fp32/Double codegen is validated by the same
+  # compiler pipeline that emits the GPU kernels (acpp wraps clang). Off by
+  # default — pass -DEGG_TEST_ACPP_CLANG=ON to enable.
+  option(EGG_TEST_ACPP_CLANG "Build cpp_tests with acpp/clang for codegen parity" OFF)
+  if(EGG_TEST_ACPP_CLANG)
+    find_program(ACPP_COMPILER acpp REQUIRED)
+    include(ExternalProject)
+    # Propagate the precision macro so the internal build picks it up.
+    set(_acpp_float_arg "")
+    if(EGG_REAL_IS_FLOAT)
+      set(_acpp_float_arg "-DEGG_REAL_IS_FLOAT=ON")
+    endif()
+    ExternalProject_Add(cpp_tests_acpp_proj
+      SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+      BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/cpp_tests_acpp_build"
+      CMAKE_ARGS
+        "-DCMAKE_CXX_COMPILER=${ACPP_COMPILER}"
+        "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+        "-DAdaptiveCpp_DIR=${AdaptiveCpp_DIR}"
+        "-DACPP_TARGETS=${ACPP_TARGETS}"
+        "-DEGG_BUILD_TESTS=ON"
+        "-DEGG_BUILD_BENCH=OFF"
+        "-DEGG_BUILD_ADAPTIVECPP=OFF"
+        ${_acpp_float_arg}
+      BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target cpp_tests
+      INSTALL_COMMAND ""
+      BUILD_ALWAYS OFF
+    )
+    add_test(NAME cpp_tests_acpp
+      COMMAND "${CMAKE_CURRENT_BINARY_DIR}/cpp_tests_acpp_build/cpp_tests")
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------

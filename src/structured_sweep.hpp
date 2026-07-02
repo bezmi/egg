@@ -56,7 +56,7 @@ template <int D> class StructuredExecutorT
     /// Run n_sweeps with a per-sweep halo exchange; returns (energies, min-dets).
     /// @p report_every throttles the energy/min-det reduction cadence
     /// (see @ref run_colored_gs); default preserves the legacy per-sweep contract.
-    std::pair<std::vector<double>, std::vector<double>>
+    std::pair<std::vector<real>, std::vector<real>>
       run_sweeps(int n_sweeps, const ObjectiveKindT<D>& kind = ShapeObjectiveT<D> {},
                  int report_every = 1)
     {
@@ -73,9 +73,9 @@ template <int D> class StructuredExecutorT
     /// @p omega is the SOR/damping weight (1.0 = undamped).
     /// @p report_every throttles the energy/min-det reduction cadence
     /// (see @ref run_block_jacobi); default preserves the legacy per-sweep contract.
-    std::pair<std::vector<double>, std::vector<double>>
+    std::pair<std::vector<real>, std::vector<real>>
       run_jacobi(int n_sweeps, const ObjectiveKindT<D>& kind = ShapeObjectiveT<D> {},
-                 double omega = 1.0, int report_every = 1)
+                 real omega = 1.0_r, int report_every = 1)
     {
         return std::visit(
           [&](auto objective) {
@@ -93,7 +93,7 @@ template <int D> class StructuredExecutorT
     /// fusion preserves behaviour (see @ref fused_halo_broadcast).
     auto halo_hook()
     {
-        return [this](sycl::queue& q, double* X) {
+        return [this](sycl::queue& q, real* X) {
             fused_halo_broadcast<D>(q, X, topo_);
         };
     }

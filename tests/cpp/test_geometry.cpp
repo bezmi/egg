@@ -7,6 +7,7 @@
 // SYCL device variant (CPU + GPU) lives in test_geometry_device.cpp.
 #include "geometry.hpp"
 #include "golden_geometry.hpp"
+#include "real_tol.hpp"
 #include "ut_cfg.hpp"
 
 #include <cmath>
@@ -18,7 +19,11 @@ using namespace egg;
 namespace
 {
 constexpr double kTol = 1e-12;
-bool close(double a, double b, double tol) { return std::abs(a - b) <= tol * (1.0 + std::abs(b)); }
+bool close(double a, double b, double tol)
+{
+    tol = egg_test::real_tol(tol);
+    return std::abs(a - b) <= tol * (1.0 + std::abs(b));
+}
 }  // namespace
 
 static const suite<"geometry"> geometry_suite = [] {
@@ -28,7 +33,8 @@ static const suite<"geometry"> geometry_suite = [] {
         boost::ut::log << std::format("  checking project over {} golden samples\n", n);
         for (std::size_t k = 0; k < n; ++k) {
             const auto& s = golden::kGeoSamples[k];
-            const Pt pr = project(Pt {s.p[0], s.p[1]}, s.tag, s.params.data());
+            const auto prm = egg_test::to_real(s.params);
+            const Pt pr = project(Pt {egg::real(s.p[0]), egg::real(s.p[1])}, s.tag, prm.data());
             for (int i = 0; i < 2; ++i)
                 expect(close(pr[i], s.proj[i], kTol))
                   << std::format("sample {} (tag {}) proj[{}]: {} vs {}",
@@ -44,7 +50,8 @@ static const suite<"geometry"> geometry_suite = [] {
         boost::ut::log << std::format("  checking tangent over {} golden samples\n", n);
         for (std::size_t k = 0; k < n; ++k) {
             const auto& s = golden::kGeoSamples[k];
-            const Pt tg = tangent_space(Pt {s.p[0], s.p[1]}, s.tag, s.params.data());
+            const auto prm = egg_test::to_real(s.params);
+            const Pt tg = tangent_space(Pt {egg::real(s.p[0]), egg::real(s.p[1])}, s.tag, prm.data());
             for (int i = 0; i < 2; ++i)
                 expect(close(tg[i], s.tang[i], kTol))
                   << std::format("sample {} (tag {}) tang[{}]: {} vs {}",

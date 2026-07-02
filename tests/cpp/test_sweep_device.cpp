@@ -74,8 +74,8 @@ SweepContextHost build_context_from_golden()
         // SoA records the device ctx consumes (Phase 4 retired the blob from
         // SweepGroupHost). This mirrors the Python wire's group_entities_by_type.
         const std::vector<int> tag(gg.tag.begin(), gg.tag.begin() + gg.D);
-        const std::vector<double> params(gg.params.begin(), gg.params.begin() + gg.D * 12);
-        const std::vector<double> arena(golden::kArena.begin(), golden::kArena.end());
+        const std::vector<egg::real> params(gg.params.begin(), gg.params.begin() + gg.D * 12);
+        const std::vector<egg::real> arena(golden::kArena.begin(), golden::kArena.end());
         sg.soa = build_soa_from_blob(tag.data(), params.data(), arena, sg.ndof);
 
         host.groups.push_back(std::move(sg));
@@ -96,8 +96,9 @@ SweepContextHost build_context_from_golden()
 }
 
 // Compare per-sweep energy/min-det and the final X against the golden tables.
-void check_against_golden(const std::vector<double>& energies, const std::vector<double>& mindets,
-                          const std::vector<double>& X_final)
+void check_against_golden(const std::vector<egg::real>& energies,
+                          const std::vector<egg::real>& mindets,
+                          const std::vector<egg::real>& X_final)
 {
     for (int s = 0; s < golden::kNumSweeps; ++s) {
         expect(close(energies[s], golden::kEnergies[s], 1e-10))
@@ -126,7 +127,7 @@ void test_sweep_on_device(sycl::queue& q, const std::string& name)
 
     auto [energies, mindets] = exec.run_sweeps(golden::kNumSweeps);
 
-    std::vector<double> X_final(golden::kNumNodes * 2);
+    std::vector<egg::real> X_final(golden::kNumNodes * 2);
     exec.ctx().download_X(X_final.data());
     check_against_golden(energies, mindets, X_final);
 }
@@ -146,7 +147,7 @@ void test_structured_executor_on_device(sycl::queue& q, const std::string& name)
 
     auto [energies, mindets] = exec.run_sweeps(golden::kNumSweeps);
 
-    std::vector<double> X_final(golden::kNumNodes * 2);
+    std::vector<egg::real> X_final(golden::kNumNodes * 2);
     exec.ctx().download_X(X_final.data());
     check_against_golden(energies, mindets, X_final);
 }

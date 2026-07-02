@@ -34,7 +34,7 @@ constexpr std::size_t kN0 = 4;
 constexpr std::size_t kN1 = 3;
 
 // Seed block b's interior so node (i,j) holds coordinate (x0 + i, j).
-void seed_interior(const BlockLayout<2>& layout, std::vector<double>& host, std::size_t b,
+void seed_interior(const BlockLayout<2>& layout, std::vector<egg::real>& host, std::size_t b,
                    double x0)
 {
     const auto shape = layout.interior_shape(b);
@@ -83,7 +83,7 @@ int main()
             boost::ut::log << std::format("  device: {}\n", name);
 
             BlockField<2> field {q, layout};
-            std::vector<double> host(field.size(), 0.0);
+            std::vector<egg::real> host(field.size(), 0.0_r);
             seed_interior(layout, host, 0, 0.0);  // block 0: x in [0,3]
             seed_interior(layout, host, 1, 3.0);  // block 1: x in [3,6]
             field.upload(host);
@@ -99,7 +99,7 @@ int main()
 
             halo_exchange<2>(q, field.data(), topo).wait();
 
-            std::vector<double> out;
+            std::vector<egg::real> out;
             field.download(out);
 
             for (std::size_t j = 0; j < kN1; ++j) {

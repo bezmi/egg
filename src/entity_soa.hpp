@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core.hpp"  // egg::real (SoA wire element type)
+
 #include <concepts>
 #include <cstddef>
 #include <experimental/mdspan>
@@ -15,7 +17,7 @@ namespace egg
 // Strongly-typed, data-oriented entity storage primitives.
 //
 // This header holds the *transport* layer that replaces the positional
-// `(int tag, double params[kParamPad])` blob: the strong entity tag, the single
+// `(int tag, real params[kParamPad])` blob: the strong entity tag, the single
 // segmented-array (CSR) idiom for variable-length payloads, and the per-entity
 // structure-of-arrays trait. It is deliberately geometry-agnostic — the concrete
 // `EntitySoA<E>` specializations (which name the entity types) live in
@@ -68,7 +70,7 @@ enum class EntityTag : int {
 // ---------------------------------------------------------------------------
 
 /// @brief Host-side concatenated segmented array: flat @c data + CSR @c off table.
-/// @tparam T Element type of the payload (e.g. `double`).
+/// @tparam T Element type of the payload (e.g. `real`).
 template <class T> struct SegmentedHost {
     std::vector<T> data;   ///< Concatenated payload of every entity, in entity order.
     std::vector<int> off;  ///< CSR offsets, length @c count+1 (@c off[0]==0).
@@ -111,7 +113,7 @@ template <class T> struct SegmentedView {
 //
 // `EntitySoA<E>` is specialized per entity type (in geometry.hpp). Each
 // specialization composes the entity's storage out of named field arrays —
-// packed contiguous records (one flat `double[count*kFields]` per partition,
+// packed contiguous records (one flat `real[count*kFields]` per partition,
 // stride `kFields` per entity) for fixed-size fields, SegmentedHost/
 // SegmentedView for variable-length ones — and supplies:
 //
@@ -124,10 +126,10 @@ template <class T> struct SegmentedView {
 //   from `PartitionView`'s generic slots, called once per launch (cold).
 //
 // All specializations share one uniform `Host`/`View` shape:
-//   Host: { std::vector<double> records; std::size_t count;
-//           std::vector<SegmentedHost<double>> seg; }  (seg empty for fixed-size)
-//   View: { SoAView<const double> records;
-//           SegmentedView<double> seg[kMaxSoASeg]{}; }  (null for fixed-size)
+//   Host: { std::vector<real> records; std::size_t count;
+//           std::vector<SegmentedHost<real>> seg; }  (seg empty for fixed-size)
+//   View: { SoAView<const real> records;
+//           SegmentedView<real> seg[kMaxSoASeg]{}; }  (null for fixed-size)
 //
 // `kSeg` (0 for fixed-size, 2 for B-spline, 4 for B-spline surface) is the
 // number of segmented slots the specialization actually uses. The primary
@@ -137,14 +139,14 @@ template <class T> struct SegmentedView {
 // The fixed-size View's `records` is a 2-D mdspan with extents (count,
 // kFields): non-owning, trivially-copyable (captured by value into SYCL
 // kernels), and indexed by `view.records(i, FIELD)` — no raw pointers. All
-// specializations share the one typed `SoAView<const double>` for `records`
+// specializations share the one typed `SoAView<const real>` for `records`
 // so `PartitionView` can hold it directly without `const void*` type erasure.
 // ---------------------------------------------------------------------------
 
 /// @brief Non-owning 2-D mdspan over packed per-entity records: `(count, kFields)`.
 ///
 /// SYCL-device-safe (mdspan, not `std::span`); trivially copyable, captured by
-/// value into kernels. Row `i` is entity `i`'s `kFields` contiguous doubles.
+/// value into kernels. Row `i` is entity `i`'s `kFields` contiguous reals.
 template <class T>
 using SoAView = stdex::mdspan<T, stdex::dextents<std::size_t, 2>>;
 
@@ -152,7 +154,7 @@ using SoAView = stdex::mdspan<T, stdex::dextents<std::size_t, 2>>;
 ///
 /// Sized for the 3D `BSplineSurfaceParam` (4 ragged fields: knots_u, knots_v,
 /// ctrl, weights) at the `feat_3d_math` merge. All `EntitySoA<E>::View` structs
-/// carry `SegmentedView<double> seg[kMaxSoASeg]{};` — null for fixed-size types
+/// carry `SegmentedView<real> seg[kMaxSoASeg]{};` — null for fixed-size types
 /// (kSeg == 0), filled for B-spline (kSeg == 2) and B-spline surface (kSeg == 4).
 inline constexpr int kMaxSoASeg = 4;
 
@@ -174,8 +176,8 @@ concept HasEntitySoA = requires(const typename EntitySoA<E>::View v,
                                 typename EntitySoA<E>::Host h,
                                 std::size_t i,
                                 const E e,
-                                SoAView<const double> soa,
-                                const SegmentedView<double>* seg) {
+                                SoAView<const real> soa,
+                                const SegmentedView<real>* seg) {
     typename EntitySoA<E>::Host;
     typename EntitySoA<E>::View;
     { EntitySoA<E>::tag } -> std::convertible_to<EntityTag>;

@@ -75,7 +75,7 @@ template <int D> class BlockFieldStructured
 
     [[nodiscard]] std::size_t num_blocks() const { return field_.num_blocks(); }
     [[nodiscard]] const BlockLayout<D>& layout() const { return field_.layout(); }
-    [[nodiscard]] double* data() const { return field_.data(); }
+    [[nodiscard]] real* data() const { return field_.data(); }
 
     [[nodiscard]] InteriorView<D> interior(std::size_t b) const { return field_.interior(b); }
     [[nodiscard]] HaloView<D> with_halo(std::size_t b) const { return field_.with_halo(b); }
@@ -84,8 +84,8 @@ template <int D> class BlockFieldStructured
     /// Returns the launch event (the caller waits / chains as the cadence needs).
     sycl::event exchange_halos() { return halo_exchange<D>(q_, field_.data(), topo_); }
 
-    void upload(const std::vector<double>& host) { field_.upload(host); }
-    void download(std::vector<double>& host) { field_.download(host); }
+    void upload(const std::vector<real>& host) { field_.upload(host); }
+    void download(std::vector<real>& host) { field_.download(host); }
 
   private:
     sycl::queue q_ {};

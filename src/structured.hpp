@@ -20,6 +20,8 @@
 //     property Phase 1 relies on for coalesced stencil reads.
 //   * All offsets and strides returned here are in units of DOUBLES.
 
+#include "core.hpp"  // egg::real (packed node store element type)
+
 #include <array>
 #include <cstddef>
 #include <experimental/mdspan>
@@ -162,17 +164,17 @@ template <int D> class BlockLayout
 
 /// Whole padded block including the ghost layer: extents (n0+2, …, n_{D-1}+2, D),
 /// contiguous row-major (layout_right) since a block occupies one packed run.
-template <int D> using HaloView = stdex::mdspan<double, stdex::dextents<std::size_t, D + 1>>;
+template <int D> using HaloView = stdex::mdspan<real, stdex::dextents<std::size_t, D + 1>>;
 
 /// Interior only (ghosts excluded): extents (n0, …, n_{D-1}, D). A centred,
 /// strided window into the padded block, so it is layout_stride.
 template <int D>
-using InteriorView = stdex::mdspan<double, stdex::dextents<std::size_t, D + 1>, stdex::layout_stride>;
+using InteriorView = stdex::mdspan<real, stdex::dextents<std::size_t, D + 1>, stdex::layout_stride>;
 
 namespace detail
 {
 template <int D, std::size_t... I>
-HaloView<D> make_halo_view(double* p, const std::array<std::size_t, D>& padded,
+HaloView<D> make_halo_view(real* p, const std::array<std::size_t, D>& padded,
                            std::index_sequence<I...>)
 {
     // (padded[0], …, padded[D-1], D) integral extents for the rank-(D+1) view.
@@ -180,7 +182,7 @@ HaloView<D> make_halo_view(double* p, const std::array<std::size_t, D>& padded,
 }
 
 template <int D, std::size_t... I>
-InteriorView<D> make_interior_view(double* p, const std::array<std::size_t, D>& interior,
+InteriorView<D> make_interior_view(real* p, const std::array<std::size_t, D>& interior,
                                    const std::array<std::size_t, D>& node_strides,
                                    std::index_sequence<I...>)
 {
@@ -195,7 +197,7 @@ InteriorView<D> make_interior_view(double* p, const std::array<std::size_t, D>& 
 
 /// Halo (whole padded block) view of block `b` over `base` (doubles).
 template <int D>
-[[nodiscard]] HaloView<D> halo_view(double* base, const BlockLayout<D>& layout, std::size_t b)
+[[nodiscard]] HaloView<D> halo_view(real* base, const BlockLayout<D>& layout, std::size_t b)
 {
     return detail::make_halo_view<D>(base + layout.block_offset(b), layout.padded_shape(b),
                                      std::make_index_sequence<D> {});
@@ -203,7 +205,7 @@ template <int D>
 
 /// Interior (ghost-excluded) view of block `b` over `base` (doubles).
 template <int D>
-[[nodiscard]] InteriorView<D> interior_view(double* base, const BlockLayout<D>& layout,
+[[nodiscard]] InteriorView<D> interior_view(real* base, const BlockLayout<D>& layout,
                                             std::size_t b)
 {
     return detail::make_interior_view<D>(base + layout.interior_origin_offset(b),

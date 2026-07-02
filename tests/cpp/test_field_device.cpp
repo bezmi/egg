@@ -39,23 +39,23 @@ constexpr std::size_t kInteriorDoubles = (3 * 4 + 2 * 2) * 2;
 // with the per-interior-node values seen through each view (packed block-major);
 // `buf_after` is the whole padded buffer after the marker write.
 void run_field(sycl::queue& q,
-               std::vector<double>& read_int,
-               std::vector<double>& read_halo,
-               std::vector<double>& buf_after)
+               std::vector<egg::real>& read_int,
+               std::vector<egg::real>& read_halo,
+               std::vector<egg::real>& buf_after)
 {
     BlockField<2> field {q, BlockLayout<2> {{{{3, 4}}, {{2, 2}}}}};
 
     // Seed every double with its own offset so a view read is self-describing.
-    std::vector<double> host(field.size());
-    for (std::size_t i = 0; i < host.size(); ++i) { host[i] = static_cast<double>(i); }
+    std::vector<egg::real> host(field.size());
+    for (std::size_t i = 0; i < host.size(); ++i) { host[i] = static_cast<egg::real>(i); }
     field.upload(host);
 
     // Views are non-owning + trivially copyable -> capture by value.
     std::array<InteriorView<2>, kNB> ivs {field.interior(0), field.interior(1)};
     std::array<HaloView<2>, kNB> hvs {field.with_halo(0), field.with_halo(1)};
 
-    auto* d_int = sycl::malloc_device<double>(kInteriorDoubles, q);
-    auto* d_halo = sycl::malloc_device<double>(kInteriorDoubles, q);
+    auto* d_int = sycl::malloc_device<egg::real>(kInteriorDoubles, q);
+    auto* d_halo = sycl::malloc_device<egg::real>(kInteriorDoubles, q);
 
     // One serial task walks both blocks; this is a correctness probe of the view
     // index math, not a performance kernel.
@@ -78,8 +78,8 @@ void run_field(sycl::queue& q,
 
     read_int.resize(kInteriorDoubles);
     read_halo.resize(kInteriorDoubles);
-    q.memcpy(read_int.data(), d_int, kInteriorDoubles * sizeof(double));
-    q.memcpy(read_halo.data(), d_halo, kInteriorDoubles * sizeof(double));
+    q.memcpy(read_int.data(), d_int, kInteriorDoubles * sizeof(egg::real));
+    q.memcpy(read_halo.data(), d_halo, kInteriorDoubles * sizeof(egg::real));
     q.wait();
 
     // Write a marker through the interior view only, then read the whole buffer
@@ -116,7 +116,7 @@ int main()
 
         test("BlockField on " + name) = [&] {
             boost::ut::log << std::format("  device: {}\n", name);
-            std::vector<double> read_int, read_halo, buf_after;
+            std::vector<egg::real> read_int, read_halo, buf_after;
             run_field(q, read_int, read_halo, buf_after);
 
             // Mark which buffer slots the interior view legitimately wrote to, so
@@ -130,7 +130,7 @@ int main()
                     for (std::size_t j = 0; j < interior[1]; ++j) {
                         const std::size_t off = layout.interior_node_offset(b, {i, j});
                         for (std::size_t k = 0; k < 2; ++k) {
-                            const double expected = static_cast<double>(off + k);
+                            const egg::real expected = static_cast<egg::real>(off + k);
                             expect(read_int[pos] == expected) << std::format(
                               "block {} interior[{},{},{}]: {} vs {}", b, i, j, k, read_int[pos],
                               expected);
@@ -150,7 +150,7 @@ int main()
             // Ghost slots (everything not flagged interior) keep their seed value.
             for (std::size_t off = 0; off < layout.total_doubles(); ++off) {
                 if (!is_interior[off]) {
-                    expect(buf_after[off] == static_cast<double>(off))
+                    expect(buf_after[off] == static_cast<egg::real>(off))
                       << std::format("ghost slot {} was modified: {}", off, buf_after[off]);
                 }
             }

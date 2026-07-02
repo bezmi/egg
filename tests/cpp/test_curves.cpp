@@ -4,6 +4,7 @@
 // must land on the curve, tangents must be unit and parallel to C', the inverse
 // must recover the parameter of an on-curve query, and the interval trim must
 // clamp out-of-range feet and drop the effective tangent dimension.
+#include "real_tol.hpp"
 #include "geometry.hpp"
 #include "ut_cfg.hpp"
 
@@ -20,10 +21,13 @@ namespace
 constexpr double kTol = 1e-9;
 
 bool close(double a, double b, double tol = kTol)
-{ return std::abs(a - b) <= tol * (1.0 + std::abs(b)); }
+{
+    tol = egg_test::real_tol(tol);
+    return std::abs(a - b) <= tol * (1.0 + std::abs(b));
+}
 
 // Foot-of-perpendicular residual: a true nearest foot has (C(t) - q) · C'(t) = 0.
-template <class C> double foot_residual(const C& c, const PtN<2>& q, double t)
+template <class C> double foot_residual(const C& c, const PtN<2>& q, egg::real t)
 {
     const VecN<2> d = c.eval({t}) - q;
     return dot(d, c.deriv({t}));
@@ -33,7 +37,7 @@ template <class C> double foot_residual(const C& c, const PtN<2>& q, double t)
 static const suite<"curves"> curves_suite = [] {
     "circular arc projects onto the circle"_test = [] {
         const PtN<2> centre {0.5, -0.3};
-        const double r = 2.0;
+        const egg::real r = 2.0_r;
         const CircleArcParam arc {.c = centre, .r = r};
         for (const PtN<2> q : {PtN<2> {3.0, 2.0}, PtN<2> {-1.0, -1.0}, PtN<2> {0.5, 5.0}}) {
             const PtN<2> pr = arc.eval(arc.invert(q));
@@ -44,7 +48,7 @@ static const suite<"curves"> curves_suite = [] {
 
     "tangent is unit and parallel to C'"_test = [] {
         const QuadBezierParam bez {.p = {{{0.0, 0.0}, {1.0, 2.0}, {3.0, 0.0}}}};
-        for (const double t : {0.1, 0.5, 0.9}) {
+        for (const egg::real t : {0.1, 0.5, 0.9}) {
             const std::array<VecN<2>, 1> raw = bez.frame({t});
             const std::array<VecN<2>, 1> on = orthonormalize<2, 1>(raw);
             expect(close(std::sqrt(dot(on[0], on[0])), 1.0)) << "tangent not unit";
@@ -56,7 +60,7 @@ static const suite<"curves"> curves_suite = [] {
 
     "Newton foot recovers the parameter of an on-curve point"_test = [] {
         const CubicBezierParam bez {.p = {{{0.0, 0.0}, {1.0, 3.0}, {2.0, -1.0}, {4.0, 1.0}}}};
-        for (const double t_true : {0.2, 0.45, 0.8}) {
+        for (const egg::real t_true : {0.2, 0.45, 0.8}) {
             const PtN<2> q = bez.eval({t_true});  // query is exactly on the curve
             const double t = bez.invert(q)[0];
             expect(close(t, t_true, 1e-7)) << std::format("recovered t = {} vs {}", t, t_true);
@@ -93,7 +97,7 @@ static const suite<"curves"> curves_suite = [] {
 
     "project dispatches the curve tags"_test = [] {
         // Cubic Bézier through the flat upload blob, full [0,1] range.
-        std::array<double, kParamPad> blob {};
+        std::array<egg::real, kParamPad> blob {};
         const std::array<PtN<2>, 4> cp {{{0.0, 0.0}, {1.0, 2.0}, {3.0, 2.0}, {4.0, 0.0}}};
         for (int i = 0; i < 4; ++i) {
             blob[2 * i] = cp[i][0];
@@ -120,11 +124,11 @@ static const suite<"bspline"> bspline_suite = [] {
     // control points is exactly the cubic Bézier over the same points — a strong
     // cross-check of the de Boor evaluation and its derivatives.
     "degree-3 B-spline on Bézier knots equals the cubic Bézier"_test = [] {
-        const std::array<double, 8> knots {0, 0, 0, 0, 1, 1, 1, 1};
-        const std::array<double, 8> ctrl {0, 0, 1, 3, 2, -1, 4, 1};  // (x,y) per control point
+        const std::array<egg::real, 8> knots {0, 0, 0, 0, 1, 1, 1, 1};
+        const std::array<egg::real, 8> ctrl {0, 0, 1, 3, 2, -1, 4, 1};  // (x,y) per control point
         const BSplineCurveParam bs {.degree = 3, .n_ctrl = 4, .knots = knots, .ctrl = ctrl};
         const CubicBezierParam bz {.p = {{{0, 0}, {1, 3}, {2, -1}, {4, 1}}}};
-        for (const double u : {0.0, 0.1, 0.5, 0.9, 1.0}) {
+        for (const egg::real u : {0.0, 0.1, 0.5, 0.9, 1.0}) {
             const PtN<2> a = bs.eval({u}), b = bz.eval({u});
             expect(close(a[0], b[0]) && close(a[1], b[1]))
               << std::format("eval u={}: ({},{}) vs ({},{})", u, a[0], a[1], b[0], b[1]);
@@ -137,8 +141,8 @@ static const suite<"bspline"> bspline_suite = [] {
 
     // Clamped knot vectors interpolate the first and last control points.
     "clamped endpoints interpolate the end control points"_test = [] {
-        const std::array<double, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};         // degree 2, clamped
-        const std::array<double, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};  // 5 control points
+        const std::array<egg::real, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};         // degree 2, clamped
+        const std::array<egg::real, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};  // 5 control points
         const BSplineCurveParam bs {.degree = 2, .n_ctrl = 5, .knots = knots, .ctrl = ctrl};
         const PtN<2> p0 = bs.eval({0.0});  // u = knots[degree]
         const PtN<2> pn = bs.eval({3.0});  // u = knots[n_ctrl]
@@ -148,25 +152,25 @@ static const suite<"bspline"> bspline_suite = [] {
 
     // Analytic derivatives must match central finite differences on a uniform spline.
     "derivatives match finite differences"_test = [] {
-        const std::array<double, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
-        const std::array<double, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
+        const std::array<egg::real, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
+        const std::array<egg::real, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
         const BSplineCurveParam bs {.degree = 2, .n_ctrl = 5, .knots = knots, .ctrl = ctrl};
-        const double h = 1e-6;
-        for (const double u : {0.5, 1.0, 1.7, 2.4}) {
+        const egg::real h = static_cast<egg::real>(egg_test::fd_step());
+        for (const egg::real u : {0.5, 1.0, 1.7, 2.4}) {
             const PtN<2> fp = bs.eval({u + h}), fm = bs.eval({u - h});
             const VecN<2> fd {(fp[0] - fm[0]) / (2 * h), (fp[1] - fm[1]) / (2 * h)};
             const VecN<2> an = bs.deriv({u});
-            expect(close(an[0], fd[0], 1e-5) && close(an[1], fd[1], 1e-5))
+            expect(close(an[0], fd[0], egg_test::fd_tol(1e-5)) && close(an[1], fd[1], egg_test::fd_tol(1e-5)))
               << std::format("deriv FD u={}: ({},{}) vs ({},{})", u, an[0], an[1], fd[0], fd[1]);
         }
     };
 
     // Seeded-Newton inverse recovers the parameter of an on-curve query point.
     "Newton foot recovers the parameter of an on-curve point"_test = [] {
-        const std::array<double, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
-        const std::array<double, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
+        const std::array<egg::real, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
+        const std::array<egg::real, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
         const BSplineCurveParam bs {.degree = 2, .n_ctrl = 5, .knots = knots, .ctrl = ctrl};
-        for (const double u_true : {0.6, 1.5, 2.3}) {
+        for (const egg::real u_true : {0.6, 1.5, 2.3}) {
             const PtN<2> q = bs.eval({u_true});
             const double u = bs.invert(q)[0];
             expect(close(u, u_true, 1e-6)) << std::format("recovered u={} vs {}", u, u_true);
@@ -176,15 +180,15 @@ static const suite<"bspline"> bspline_suite = [] {
     // decode_entity must slice the knot/control spans out of the arena using the
     // offsets in the flat blob, matching a directly-constructed entity.
     "decode_entity slices the B-spline arena"_test = [] {
-        const std::array<double, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
-        const std::array<double, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
-        std::vector<double> arena;
+        const std::array<egg::real, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
+        const std::array<egg::real, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
+        std::vector<egg::real> arena;
         const auto knot_off = arena.size();
         arena.insert(arena.end(), knots.begin(), knots.end());
         const auto ctrl_off = arena.size();
         arena.insert(arena.end(), ctrl.begin(), ctrl.end());
 
-        std::array<double, kParamPad> blob {};
+        std::array<egg::real, kParamPad> blob {};
         blob[0] = 2;  // degree
         blob[1] = 5;  // n_ctrl
         blob[2] = static_cast<double>(knot_off);
@@ -211,7 +215,7 @@ static const suite<"bspline"> bspline_suite = [] {
 static const suite<"composite"> composite_suite = [] {
     // Pack one segment record [tag, params(kParamPad)] into the arena.
     constexpr auto push_rec =
-      [](std::vector<double>& arena, Tag tag, std::initializer_list<double> params) {
+      [](std::vector<egg::real>& arena, Tag tag, std::initializer_list<double> params) {
           arena.push_back(static_cast<double>(tag));
           std::size_t n = 0;
           for (const double v : params) {
@@ -222,7 +226,7 @@ static const suite<"composite"> composite_suite = [] {
       };
 
     // L-shaped path: (0,0)->(1,0) then (1,0)->(1,1).
-    constexpr auto make_L = [push_rec](std::vector<double>& arena) {
+    constexpr auto make_L = [push_rec](std::vector<egg::real>& arena) {
         push_rec(arena, TAG_LINESEG, {0.0, 0.0, 1.0, 0.0});
         push_rec(arena, TAG_LINESEG, {1.0, 0.0, 1.0, 1.0});
         return CompositePath {.n_segs = 2,
@@ -231,7 +235,7 @@ static const suite<"composite"> composite_suite = [] {
     };
 
     "nearest-segment selection picks the right sub-chart"_test = [make_L] {
-        std::vector<double> arena;
+        std::vector<egg::real> arena;
         const CompositePath path = make_L(arena);
         const PtN<2> a = path.project({0.4, -0.5});
         expect(close(a[0], 0.4) && close(a[1], 0.0)) << std::format("({},{})", a[0], a[1]);
@@ -240,7 +244,7 @@ static const suite<"composite"> composite_suite = [] {
     };
 
     "tangent is the matched segment's"_test = [make_L] {
-        std::vector<double> arena;
+        std::vector<egg::real> arena;
         const CompositePath path = make_L(arena);
         const VecN<2> t0 = path.tangent_basis({0.4, -0.5})[0];
         expect(close(t0[0], 1.0) && close(t0[1], 0.0)) << "horizontal segment tangent";
@@ -249,7 +253,7 @@ static const suite<"composite"> composite_suite = [] {
     };
 
     "interior joint stays slidable (eff_tdim == 1)"_test = [make_L] {
-        std::vector<double> arena;
+        std::vector<egg::real> arena;
         const CompositePath path = make_L(arena);
         // Outside the corner: both segments clamp to the joint (1,0).
         const auto f = path.project_frame({1.4, -0.5});
@@ -261,7 +265,7 @@ static const suite<"composite"> composite_suite = [] {
     "mixed segment types: line + circular arc"_test = [push_rec] {
         // Line (0,0)->(1,0), then a quarter arc centred at (1,1), radius 1,
         // from angle -pi/2 (point (1,0)) to 0 (point (2,1)).
-        std::vector<double> arena;
+        std::vector<egg::real> arena;
         push_rec(arena, TAG_LINESEG, {0.0, 0.0, 1.0, 0.0});
         push_rec(arena, TAG_CIRCLEARC, {1.0, 1.0, 1.0, -std::numbers::pi / 2, 0.0, 0.0});
         const CompositePath path {.n_segs = 2,
@@ -278,13 +282,13 @@ static const suite<"composite"> composite_suite = [] {
     };
 
     "decode_entity decodes the composite blob from the arena"_test = [push_rec] {
-        std::vector<double> arena;
+        std::vector<egg::real> arena;
         arena.push_back(99.0);  // padding so rec_off != 0
         const auto rec_off = arena.size();
         push_rec(arena, TAG_LINESEG, {0.0, 0.0, 1.0, 0.0});
         push_rec(arena, TAG_LINESEG, {1.0, 0.0, 1.0, 1.0});
 
-        std::array<double, kParamPad> blob {};
+        std::array<egg::real, kParamPad> blob {};
         blob[0] = 2.0;
         blob[1] = static_cast<double>(rec_off);
         const auto ent = decode_entity<CompositePath>(blob.data(), arena.data());
@@ -303,7 +307,7 @@ static const suite<"composite"> composite_suite = [] {
 // AND a B-spline sub-segment (the NURBS-relevant case the blob path never carried).
 static const suite<"composite_soa"> composite_soa_suite = [] {
     constexpr auto push_rec =
-      [](std::vector<double>& arena, Tag tag, std::initializer_list<double> params) {
+      [](std::vector<egg::real>& arena, Tag tag, std::initializer_list<double> params) {
           arena.push_back(static_cast<double>(tag));
           std::size_t n = 0;
           for (const double v : params) {
@@ -316,19 +320,19 @@ static const suite<"composite_soa"> composite_soa_suite = [] {
     // Rebuild a CompositePath from a self-contained arena slice via the device
     // SoA load path: records = {n_segs, rec_off}, one CSR slot = the whole slice.
     constexpr auto soa_load =
-      [](const std::vector<double>& arena, int n_segs, int rec_off) -> CompositePath {
+      [](const std::vector<egg::real>& arena, int n_segs, int rec_off) -> CompositePath {
           using SoA = EntitySoA<CompositePath>;
-          const std::array<double, 2> fields {static_cast<double>(n_segs),
-                                              static_cast<double>(rec_off)};
+          const std::array<egg::real, 2> fields {static_cast<egg::real>(n_segs),
+                                                 static_cast<egg::real>(rec_off)};
           const std::array<int, 2> off {0, static_cast<int>(arena.size())};
-          const SoAView<const double> recs_view {fields.data(), 1, SoA::kFields};
-          const SegmentedView<double> seg {arena.data(), off.data()};
+          const SoAView<const egg::real> recs_view {fields.data(), 1, SoA::kFields};
+          const SegmentedView<egg::real> seg {arena.data(), off.data()};
           return SoA::load(SoA::tie_view(recs_view, &seg), 0);
       };
 
     "fixed-size segments (lines, arc) round-trip through SoA load"_test = [push_rec, soa_load] {
         // L-shaped line path + a quarter arc: records only, rec_off == 0.
-        std::vector<double> arena;
+        std::vector<egg::real> arena;
         push_rec(arena, TAG_LINESEG, {0.0, 0.0, 1.0, 0.0});
         push_rec(arena, TAG_LINESEG, {1.0, 0.0, 1.0, 1.0});
         push_rec(arena, TAG_CIRCLEARC, {1.0, 2.0, 1.0, -std::numbers::pi / 2, 0.0, 0.0});
@@ -348,9 +352,9 @@ static const suite<"composite_soa"> composite_soa_suite = [] {
     "B-spline sub-segment round-trips through SoA load"_test = [push_rec, soa_load] {
         // Self-contained slice: [knots | ctrl | records]. A degree-2 B-spline arch
         // (ctrl (0,0),(1,1),(2,0), clamped knots) joined to a return line.
-        const std::array<double, 6> knots {0, 0, 0, 1, 1, 1};
-        const std::array<double, 6> ctrl {0, 0, 1, 1, 2, 0};
-        std::vector<double> arena;
+        const std::array<egg::real, 6> knots {0, 0, 0, 1, 1, 1};
+        const std::array<egg::real, 6> ctrl {0, 0, 1, 1, 2, 0};
+        std::vector<egg::real> arena;
         const auto knot_off = arena.size();
         arena.insert(arena.end(), knots.begin(), knots.end());
         const auto ctrl_off = arena.size();
@@ -389,9 +393,9 @@ static const suite<"nurbs"> nurbs_suite = [] {
     // Rational quadratic Bézier quarter circle: ctrl (1,0),(1,1),(0,1),
     // weights {1, 1/sqrt2, 1} on clamped knots — exact unit circle.
     constexpr auto quarter = [] {
-        static const std::array<double, 6> knots {0, 0, 0, 1, 1, 1};
-        static const std::array<double, 6> ctrl {1, 0, 1, 1, 0, 1};
-        static const std::array<double, 3> w {1.0, 1.0 / std::numbers::sqrt2, 1.0};
+        static const std::array<egg::real, 6> knots {0, 0, 0, 1, 1, 1};
+        static const std::array<egg::real, 6> ctrl {1, 0, 1, 1, 0, 1};
+        static const std::array<egg::real, 3> w {egg::real(1.0), egg::real(1.0 / std::numbers::sqrt2), egg::real(1.0)};
         return BSplineCurveParam {.degree = 2,
                                   .n_ctrl = 3,
                                   .knots = knots,
@@ -401,7 +405,7 @@ static const suite<"nurbs"> nurbs_suite = [] {
 
     "rational quarter circle lies exactly on the unit circle"_test = [quarter] {
         const BSplineCurveParam c = quarter();
-        for (const double u : {0.0, 0.2, 0.5, 0.8, 1.0}) {
+        for (const egg::real u : {0.0, 0.2, 0.5, 0.8, 1.0}) {
             const PtN<2> p = c.eval({u});
             expect(close(std::hypot(p[0], p[1]), 1.0, 1e-14))
               << std::format("radius at u={}: {}", u, std::hypot(p[0], p[1]));
@@ -414,24 +418,24 @@ static const suite<"nurbs"> nurbs_suite = [] {
 
     "rational derivatives match finite differences"_test = [quarter] {
         const BSplineCurveParam c = quarter();
-        const double h = 1e-6;
-        for (const double u : {0.2, 0.5, 0.8}) {
+        const egg::real h = static_cast<egg::real>(egg_test::fd_step());
+        for (const egg::real u : {0.2, 0.5, 0.8}) {
             const PtN<2> fp = c.eval({u + h}), fm = c.eval({u - h});
             const VecN<2> fd {(fp[0] - fm[0]) / (2 * h), (fp[1] - fm[1]) / (2 * h)};
             const VecN<2> an = c.deriv({u});
-            expect(close(an[0], fd[0], 1e-6) && close(an[1], fd[1], 1e-6))
+            expect(close(an[0], fd[0], egg_test::fd_tol(1e-6)) && close(an[1], fd[1], egg_test::fd_tol(1e-6)))
               << std::format("deriv FD u={}", u);
             const VecN<2> d1p = c.deriv({u + h}), d1m = c.deriv({u - h});
             const VecN<2> fd2 {(d1p[0] - d1m[0]) / (2 * h), (d1p[1] - d1m[1]) / (2 * h)};
             const VecN<2> an2 = c.deriv2({u});
-            expect(close(an2[0], fd2[0], 1e-5) && close(an2[1], fd2[1], 1e-5))
+            expect(close(an2[0], fd2[0], egg_test::fd_tol(1e-5)) && close(an2[1], fd2[1], egg_test::fd_tol(1e-5)))
               << std::format("deriv2 FD u={}", u);
         }
     };
 
     "rational tangent is perpendicular to the radius"_test = [quarter] {
         const BSplineCurveParam c = quarter();
-        for (const double u : {0.1, 0.5, 0.9}) {
+        for (const egg::real u : {0.1, 0.5, 0.9}) {
             const PtN<2> p = c.eval({u});
             const VecN<2> d = c.deriv({u});
             expect(close(dot(p, d), 0.0, 1e-12)) << std::format("p·C' at u={}", u);
@@ -449,16 +453,16 @@ static const suite<"nurbs"> nurbs_suite = [] {
     };
 
     "all-ones weights reproduce the polynomial spline exactly"_test = [] {
-        const std::array<double, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
-        const std::array<double, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
-        const std::array<double, 5> ones {1, 1, 1, 1, 1};
+        const std::array<egg::real, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
+        const std::array<egg::real, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
+        const std::array<egg::real, 5> ones {1, 1, 1, 1, 1};
         const BSplineCurveParam poly {.degree = 2, .n_ctrl = 5, .knots = knots, .ctrl = ctrl};
         const BSplineCurveParam rat {.degree = 2,
                                      .n_ctrl = 5,
                                      .knots = knots,
                                      .ctrl = ctrl,
                                      .weights = ones};
-        for (const double u : {0.3, 1.1, 2.6}) {
+        for (const egg::real u : {0.3, 1.1, 2.6}) {
             for (int order = 0; order <= 2; ++order) {
                 const PtN<2> a = poly.point_at(u, order), b = rat.point_at(u, order);
                 expect(close(a[0], b[0], 1e-13) && close(a[1], b[1], 1e-13))
@@ -468,7 +472,7 @@ static const suite<"nurbs"> nurbs_suite = [] {
     };
 
     "decode_entity slices the weighted B-spline from the arena"_test = [] {
-        std::vector<double> arena;
+        std::vector<egg::real> arena;
         const auto knot_off = arena.size();
         for (const double k : {0.0, 0.0, 0.0, 1.0, 1.0, 1.0}) { arena.push_back(k); }
         const auto ctrl_off = arena.size();
@@ -476,7 +480,7 @@ static const suite<"nurbs"> nurbs_suite = [] {
         const auto w_off = arena.size();
         for (const double w : {1.0, 1.0 / std::numbers::sqrt2, 1.0}) { arena.push_back(w); }
 
-        std::array<double, kParamPad> blob {};
+        std::array<egg::real, kParamPad> blob {};
         blob[0] = 2;  // degree
         blob[1] = 3;  // n_ctrl
         blob[2] = static_cast<double>(knot_off);

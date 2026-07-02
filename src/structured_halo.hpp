@@ -146,7 +146,7 @@ template <int D> class BlockTopologyDevice
 /// halo and the shared-node broadcast — they differ only in which offset tables
 /// they pass. Returns the launch event (empty if `count == 0`).
 template <int D>
-inline sycl::event copy_nodes(sycl::queue& q, double* buf, const std::size_t* src,
+inline sycl::event copy_nodes(sycl::queue& q, real* buf, const std::size_t* src,
                               const std::size_t* dst, std::size_t count)
 {
     if (count == 0) { return {}; }
@@ -161,7 +161,7 @@ inline sycl::event copy_nodes(sycl::queue& q, double* buf, const std::size_t* sr
 /// Fill every destination ghost slot with its source interior node's D
 /// coordinates (the cross-block halo, interior -> ghost).
 template <int D>
-inline sycl::event halo_exchange(sycl::queue& q, double* buf,
+inline sycl::event halo_exchange(sycl::queue& q, real* buf,
                                  const BlockTopologyDevice<D>& topo)
 {
     return copy_nodes<D>(q, buf, topo.src_off(), topo.dst_off(), topo.num_entries());
@@ -173,7 +173,7 @@ inline sycl::event halo_exchange(sycl::queue& q, double* buf,
 /// 1.4b). The two write disjoint slots (ghost shell vs. non-owner interior) and
 /// read genuinely-interior sources, so their order is immaterial.
 template <int D>
-inline sycl::event broadcast_shared(sycl::queue& q, double* buf,
+inline sycl::event broadcast_shared(sycl::queue& q, real* buf,
                                     const BlockTopologyDevice<D>& topo)
 {
     return copy_nodes<D>(q, buf, topo.share_src_off(), topo.share_dst_off(), topo.num_share());
@@ -188,7 +188,7 @@ inline sycl::event broadcast_shared(sycl::queue& q, double* buf,
 /// with at most one work-group straddling the boundary. Cuts one launch per
 /// sweep on the halo-padded structured path.
 template <int D>
-inline sycl::event fused_halo_broadcast(sycl::queue& q, double* buf,
+inline sycl::event fused_halo_broadcast(sycl::queue& q, real* buf,
                                         const BlockTopologyDevice<D>& topo)
 {
     const std::size_t n_halo = topo.num_entries();

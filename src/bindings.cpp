@@ -256,12 +256,39 @@ std::vector<int> extract_int(const py::dict& d, const std::string& key)
     return std::vector<int>(arr.data(), arr.data() + arr.size());
 }
 
-// Extract a contiguous float64 numpy array from a dict key, returning a vector.
-std::vector<double> extract_double(const py::dict& d, const std::string& key)
+// Extract a contiguous float64 numpy array from a dict key, narrowing into the
+// device value type egg::real. The Python API stays float64; precision is
+// converted here at the boundary (a no-op copy when real == double).
+std::vector<egg::real> extract_real(const py::dict& d, const std::string& key)
 {
     auto arr =
       d[key.c_str()].cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
-    return std::vector<double>(arr.data(), arr.data() + arr.size());
+    const double* p = arr.data();
+    std::vector<egg::real> v(static_cast<std::size_t>(arr.size()));
+    for (std::size_t i = 0; i < v.size(); ++i) { v[i] = static_cast<egg::real>(p[i]); }
+    return v;
+}
+
+// Widen an egg::real span back to a freshly-allocated float64 numpy array (the
+// download side of the boundary; a plain copy when real == double).
+py::array_t<double> to_f64(const egg::real* src, py::ssize_t n)
+{
+    py::array_t<double> out(n);
+    double* dst = out.mutable_data();
+    for (py::ssize_t i = 0; i < n; ++i) { dst[i] = static_cast<double>(src[i]); }
+    return out;
+}
+
+// Narrow a contiguous float64 numpy array into an egg::real buffer (for the
+// SYCL-free math bindings that take const real* / real-typed views). The
+// returned vector must outlive the consuming call.
+std::vector<egg::real>
+  narrow(const py::array_t<double, py::array::c_style | py::array::forcecast>& a)
+{
+    const double* p = a.data();
+    std::vector<egg::real> v(static_cast<std::size_t>(a.size()));
+    for (std::size_t i = 0; i < v.size(); ++i) { v[i] = static_cast<egg::real>(p[i]); }
+    return v;
 }
 
 template <int D>
@@ -288,11 +315,11 @@ egg::SweepContextHostT<D>
         sg.gc = extract_int(gd, "gc");
         for (int k = 0; k < D; ++k) {
             sg.gn[k] = extract_int(gd, "gn" + std::to_string(k));
-            sg.s[k] = extract_double(gd, "s" + std::to_string(k));
+            sg.s[k] = extract_real(gd, "s" + std::to_string(k));
         }
-        sg.W_inv = extract_double(gd, "W_inv");
+        sg.W_inv = extract_real(gd, "W_inv");
         sg.role = extract_int(gd, "role");
-        sg.J = extract_double(gd, "J");
+        sg.J = extract_real(gd, "J");
         sg.dof_idx = extract_int(gd, "dof_idx");
         sg.P_of = extract_int(gd, "P_of");
 
@@ -315,7 +342,7 @@ egg::SweepContextHostT<D>
                 egg::SoAHostRecord rec;
                 rec.tag = static_cast<egg::EntityTag>(ed["tag"].cast<int>());
                 rec.k_fields = ed["kFields"].cast<int>();
-                rec.records = extract_double(ed, "records");
+                rec.records = extract_real(ed, "records");
                 rec.dof_local = extract_int(ed, "dof_local");  // group-local DOF indices
                 rec.count = rec.dof_local.size();
                 // Ingest segmented CSR fields (B-spline knots/ctrl). Each slot
@@ -325,7 +352,7 @@ egg::SweepContextHostT<D>
                     for (auto seg_val : seg_list) {
                         auto sd = seg_val.cast<py::dict>();
                         egg::SoAHostRecord::SegmentedField sf;
-                        sf.data = extract_double(sd, "data");
+                        sf.data = extract_real(sd, "data");
                         sf.off = extract_int(sd, "off");
                         rec.seg.push_back(std::move(sf));
                     }
@@ -349,9 +376,9 @@ egg::SweepContextHostT<D>
     host.energy_stencil.gc = extract_int(es, "gc");
     for (int k = 0; k < D; ++k) {
         host.energy_stencil.gn[k] = extract_int(es, "gn" + std::to_string(k));
-        host.energy_stencil.s[k] = extract_double(es, "s" + std::to_string(k));
+        host.energy_stencil.s[k] = extract_real(es, "s" + std::to_string(k));
     }
-    host.energy_stencil.W_inv = extract_double(es, "W_inv");
+    host.energy_stencil.W_inv = extract_real(es, "W_inv");
 
     // Fail fast on a malformed context before any device allocation / kernel.
     validate_context<D>(host);
@@ -429,7 +456,7 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     const std::size_t num_blocks = shapes.size();
 
     const std::size_t M = host.num_nodes;
-    const std::vector<double>& Xg = host.X;
+    const std::vector<egg::real>& Xg = host.X;
 
     // Unravel a row-major flat logical index (last axis fastest), matching the
     // C-order build_block_structured_context flattens block_global_dof in.
@@ -470,7 +497,7 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     // slots come from block_global_dof; the ghost shell from the halo table (a
     // dst-block ghost holds the src-block's interior node, keyed by its global id).
     std::vector<std::unordered_map<int, int>> block_map(num_blocks);
-    std::vector<double> Xp(layout.total_doubles(), 0.0);
+    std::vector<egg::real> Xp(layout.total_doubles(), egg::real(0));
     for (std::size_t b = 0; b < num_blocks; ++b) {
         const std::size_t n = bgd[b].size();
         for (std::size_t f = 0; f < n; ++f) {
@@ -695,27 +722,27 @@ class CppSweepSession
           },
           exec_);
         const auto n_reported = static_cast<py::ssize_t>(energies.size());
-        py::array_t<double> e_ret(n_reported, energies.data());
-        py::array_t<double> m_ret(n_reported, mindets.data());
-        return std::make_tuple(e_ret, m_ret);
+        return std::make_tuple(to_f64(energies.data(), n_reported), to_f64(mindets.data(), n_reported));
     }
 
-    // Download a host copy of the resident X.
+    // Download a host copy of the resident X (widened to float64 at the boundary).
     py::array_t<double> get_X()
     {
-        std::vector<double> X_out(num_nodes_ * dim_);
+        std::vector<egg::real> X_out(num_nodes_ * dim_);
         std::visit([&](auto& exec) { exec.ctx().download_X(X_out.data()); }, exec_);
-        return py::array_t<double>(static_cast<py::ssize_t>(num_nodes_ * dim_), X_out.data());
+        return to_f64(X_out.data(), static_cast<py::ssize_t>(num_nodes_ * dim_));
     }
 
-    // Re-upload X to the device.
+    // Re-upload X to the device (narrowed from the float64 Python array).
     void set_X(const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr)
     {
         auto buf = X_arr.request();
         if (static_cast<std::size_t>(buf.shape[0]) != num_nodes_ * dim_) {
             throw std::invalid_argument("set_X: shape mismatch with session num_nodes");
         }
-        std::vector<double> host(X_arr.data(), X_arr.data() + num_nodes_ * dim_);
+        const double* p = X_arr.data();
+        std::vector<egg::real> host(num_nodes_ * dim_);
+        for (std::size_t i = 0; i < host.size(); ++i) { host[i] = static_cast<egg::real>(p[i]); }
         std::visit([&](auto& exec) { exec.ctx().upload_X(host); }, exec_);
     }
 
@@ -794,9 +821,7 @@ class CppStructuredSweepSession
           },
           sess_);
         const auto n_reported = static_cast<py::ssize_t>(energies.size());
-        py::array_t<double> e_ret(n_reported, energies.data());
-        py::array_t<double> m_ret(n_reported, mindets.data());
-        return std::make_tuple(e_ret, m_ret);
+        return std::make_tuple(to_f64(energies.data(), n_reported), to_f64(mindets.data(), n_reported));
     }
 
     // Download the packed buffer and gather it back to global node order.
@@ -804,12 +829,14 @@ class CppStructuredSweepSession
     {
         return std::visit(
           [&]<int D>(StructuredSession<D>& s) {
-              std::vector<double> X_pad(s.rm.layout.total_doubles());
+              std::vector<egg::real> X_pad(s.rm.layout.total_doubles());
               s.exec.ctx().download_X(X_pad.data());
               std::vector<double> X_out(s.rm.global_num_nodes * D);
               for (std::size_t g = 0; g < s.rm.global_num_nodes; ++g) {
                   const auto slot = static_cast<std::size_t>(s.rm.g2s[g]);
-                  for (int k = 0; k < D; ++k) { X_out[(g * D) + k] = X_pad[(slot * D) + k]; }
+                  for (int k = 0; k < D; ++k) {
+                      X_out[(g * D) + k] = static_cast<double>(X_pad[(slot * D) + k]);
+                  }
               }
               return py::array_t<double>(static_cast<py::ssize_t>(s.rm.global_num_nodes * D),
                                          X_out.data());
@@ -937,17 +964,15 @@ PYBIND11_MODULE(cpp_core, m)
               // Run sweeps
               auto [energies, mindets] = exec.run_sweeps(n_sweeps, objective, report_every);
 
-              // Copy X back
-              std::vector<double> X_out(num_nodes * D);
+              // Copy X back (widened to float64 at the boundary).
+              std::vector<egg::real> X_out(num_nodes * D);
               exec.ctx().download_X(X_out.data());
 
-              // Return (X_out, energies, mindets) as numpy arrays. pybind11 copies
-              // by default when returning from raw pointers — correct here (the
-              // vectors go out of scope).
+              // Return (X_out, energies, mindets) as float64 numpy arrays.
               const auto n_reported = static_cast<py::ssize_t>(energies.size());
-              py::array_t<double> X_ret(static_cast<py::ssize_t>(num_nodes * D), X_out.data());
-              py::array_t<double> e_ret(n_reported, energies.data());
-              py::array_t<double> m_ret(n_reported, mindets.data());
+              py::array_t<double> X_ret = to_f64(X_out.data(), static_cast<py::ssize_t>(num_nodes * D));
+              py::array_t<double> e_ret = to_f64(energies.data(), n_reported);
+              py::array_t<double> m_ret = to_f64(mindets.data(), n_reported);
               return std::make_tuple(X_ret, e_ret, m_ret);
           };
           return dim == 2 ? run.template operator()<2>() : run.template operator()<3>();
@@ -1028,21 +1053,21 @@ PYBIND11_MODULE(cpp_core, m)
                                            : exec.run_sweeps(n_sweeps, objective, report_every);
 
               // Download the padded buffer and gather it back to global node order.
-              std::vector<double> X_pad(rm.layout.total_doubles());
+              std::vector<egg::real> X_pad(rm.layout.total_doubles());
               exec.ctx().download_X(X_pad.data());
               std::vector<double> X_out(rm.global_num_nodes * D);
               for (std::size_t g = 0; g < rm.global_num_nodes; ++g) {
                   const auto s = static_cast<std::size_t>(rm.g2s[g]);
                   for (int k = 0; k < D; ++k) {
-                      X_out[(g * D) + k] = X_pad[(s * D) + k];
+                      X_out[(g * D) + k] = static_cast<double>(X_pad[(s * D) + k]);
                   }
               }
 
               const auto n_reported = static_cast<py::ssize_t>(energies.size());
               py::array_t<double> X_ret(static_cast<py::ssize_t>(rm.global_num_nodes * D),
                                         X_out.data());
-              py::array_t<double> e_ret(n_reported, energies.data());
-              py::array_t<double> m_ret(n_reported, mindets.data());
+              py::array_t<double> e_ret = to_f64(energies.data(), n_reported);
+              py::array_t<double> m_ret = to_f64(mindets.data(), n_reported);
               return std::make_tuple(X_ret, e_ret, m_ret);
           };
           return dim == 2 ? run.template operator()<2>() : run.template operator()<3>();
@@ -1090,14 +1115,15 @@ PYBIND11_MODULE(cpp_core, m)
       [](const py::array_t<double, py::array::c_style | py::array::forcecast>& t_arr)
         -> std::tuple<double, py::array_t<double>, py::array_t<double>> {
           const auto* t = t_arr.data();
-          egg::VecT vt {t[0], t[1], t[2], t[3]};
+          egg::VecT vt {static_cast<egg::real>(t[0]),
+                        static_cast<egg::real>(t[1]),
+                        static_cast<egg::real>(t[2]),
+                        static_cast<egg::real>(t[3])};
           egg::ShapeObjective objective;
-          double mu = objective.value(vt);
+          double mu = static_cast<double>(objective.value(vt));
           auto g = objective.grad(vt);
           auto h = objective.hess(vt);
-          py::array_t<double> grad(4, g.data());
-          py::array_t<double> hess(16, h.data());
-          return std::make_tuple(mu, grad, hess);
+          return std::make_tuple(mu, to_f64(g.data(), 4), to_f64(h.data(), 16));
       },
       py::arg("t"),
       "Evaluate shape_2d metric. Returns (mu, grad(4,), hess(16,)).");
@@ -1106,11 +1132,10 @@ PYBIND11_MODULE(cpp_core, m)
       "metric_eval_3d",
       [](const py::array_t<double, py::array::c_style | py::array::forcecast>& t_arr)
         -> std::tuple<double, py::array_t<double>, py::array_t<double>> {
-          const auto* t = t_arr.data();
-          egg::MuCond3Eval r = egg::mu_cond3_eval(t);
-          py::array_t<double> grad(9, r.grad);
-          py::array_t<double> hess(81, r.hess);
-          return std::make_tuple(r.val, grad, hess);
+          const std::vector<egg::real> t = narrow(t_arr);
+          egg::MuCond3Eval r = egg::mu_cond3_eval(t.data());
+          return std::make_tuple(
+            static_cast<double>(r.val), to_f64(r.grad, 9), to_f64(r.hess, 81));
       },
       py::arg("t"),
       "Evaluate mu_cond3 metric (3D). vec(T) row-major [t00..t22]. "
@@ -1122,9 +1147,11 @@ PYBIND11_MODULE(cpp_core, m)
          int tag,
          const py::array_t<double, py::array::c_style | py::array::forcecast>& params_arr)
         -> py::array_t<double> {
-          egg::Pt p {p_arr.data()[0], p_arr.data()[1]};
-          egg::Pt proj = egg::project(p, tag, params_arr.data());
-          return py::array_t<double>(2, proj.data());
+          egg::Pt p {static_cast<egg::real>(p_arr.data()[0]),
+                     static_cast<egg::real>(p_arr.data()[1])};
+          const std::vector<egg::real> params = narrow(params_arr);
+          egg::Pt proj = egg::project(p, tag, params.data());
+          return to_f64(proj.data(), 2);
       },
       py::arg("p"),
       py::arg("tag"),
@@ -1137,9 +1164,11 @@ PYBIND11_MODULE(cpp_core, m)
          int tag,
          const py::array_t<double, py::array::c_style | py::array::forcecast>& params_arr)
         -> py::array_t<double> {
-          egg::Pt p {p_arr.data()[0], p_arr.data()[1]};
-          egg::Pt tang = egg::tangent_space(p, tag, params_arr.data());
-          return py::array_t<double>(2, tang.data());
+          egg::Pt p {static_cast<egg::real>(p_arr.data()[0]),
+                     static_cast<egg::real>(p_arr.data()[1])};
+          const std::vector<egg::real> params = narrow(params_arr);
+          egg::Pt tang = egg::tangent_space(p, tag, params.data());
+          return to_f64(tang.data(), 2);
       },
       py::arg("p"),
       py::arg("tag"),
@@ -1158,20 +1187,27 @@ PYBIND11_MODULE(cpp_core, m)
          const py::array_t<int, py::array::c_style | py::array::forcecast>& role_arr,
          const py::array_t<double, py::array::c_style | py::array::forcecast>& J_arr)
         -> std::tuple<py::array_t<double>, py::array_t<double>, double, double> {
+          // Narrow the real-typed views at the boundary (no-ops when real==double).
+          const std::vector<egg::real> X = narrow(X_arr);
+          const std::vector<egg::real> s0 = narrow(s0_arr);
+          const std::vector<egg::real> s1 = narrow(s1_arr);
+          const std::vector<egg::real> W_inv = narrow(W_inv_arr);
+          const std::vector<egg::real> J = narrow(J_arr);
           egg::PatchView pv;
           pv.P = static_cast<int>(gc_arr.size());
           pv.gc = gc_arr.data();
           pv.gn[0] = gn0_arr.data();
           pv.gn[1] = gn1_arr.data();
-          pv.s[0] = s0_arr.data();
-          pv.s[1] = s1_arr.data();
-          pv.W_inv = W_inv_arr.data();
+          pv.s[0] = s0.data();
+          pv.s[1] = s1.data();
+          pv.W_inv = W_inv.data();
           pv.role = role_arr.data();
-          pv.J = J_arr.data();
-          auto result = egg::patch_eval(pv, X_arr.data());
-          py::array_t<double> grad(2, result.grad.data());
-          py::array_t<double> hess(4, result.hess.data());
-          return std::make_tuple(grad, hess, result.energy, result.mindet);
+          pv.J = J.data();
+          auto result = egg::patch_eval(pv, X.data());
+          return std::make_tuple(to_f64(result.grad.data(), 2),
+                                 to_f64(result.hess.data(), 4),
+                                 static_cast<double>(result.energy),
+                                 static_cast<double>(result.mindet));
       },
       py::arg("X"),
       py::arg("gc"),
@@ -1194,17 +1230,21 @@ PYBIND11_MODULE(cpp_core, m)
          const py::array_t<double, py::array::c_style | py::array::forcecast>& s1_arr,
          const py::array_t<double, py::array::c_style | py::array::forcecast>& W_inv_arr)
         -> std::tuple<double, double> {
+          const std::vector<egg::real> X = narrow(X_arr);
+          const std::vector<egg::real> s0 = narrow(s0_arr);
+          const std::vector<egg::real> s1 = narrow(s1_arr);
+          const std::vector<egg::real> W_inv = narrow(W_inv_arr);
           egg::StencilSampleView sv;
           sv.P = static_cast<int>(gc_arr.size());
           sv.gc = gc_arr.data();
           sv.gn[0] = gn0_arr.data();
           sv.gn[1] = gn1_arr.data();
-          sv.s[0] = s0_arr.data();
-          sv.s[1] = s1_arr.data();
-          sv.W_inv = W_inv_arr.data();
-          double energy = 0.0, mindet = 0.0;
-          egg::patch_energy_mindet<2>(sv, X_arr.data(), energy, mindet);
-          return std::make_tuple(energy, mindet);
+          sv.s[0] = s0.data();
+          sv.s[1] = s1.data();
+          sv.W_inv = W_inv.data();
+          egg::real energy = egg::real(0), mindet = egg::real(0);
+          egg::patch_energy_mindet<2>(sv, X.data(), energy, mindet);
+          return std::make_tuple(static_cast<double>(energy), static_cast<double>(mindet));
       },
       py::arg("X"),
       py::arg("gc"),
@@ -1225,11 +1265,16 @@ PYBIND11_MODULE(cpp_core, m)
         -> py::array_t<double> {
           const auto* g = grad_arr.data();
           const auto* h = hess_arr.data();
-          egg::Vec2 gv {g[0], g[1]};
-          egg::Mat2 hv {h[0], h[1], h[2], h[3]};
-          egg::Pt pos {pos_arr.data()[0], pos_arr.data()[1]};
-          egg::Vec2 delta = egg::newton_delta<2>(gv, hv, pos, tag, params_arr.data());
-          return py::array_t<double>(2, delta.data());
+          egg::Vec2 gv {static_cast<egg::real>(g[0]), static_cast<egg::real>(g[1])};
+          egg::Mat2 hv {static_cast<egg::real>(h[0]),
+                        static_cast<egg::real>(h[1]),
+                        static_cast<egg::real>(h[2]),
+                        static_cast<egg::real>(h[3])};
+          egg::Pt pos {static_cast<egg::real>(pos_arr.data()[0]),
+                       static_cast<egg::real>(pos_arr.data()[1])};
+          const std::vector<egg::real> params = narrow(params_arr);
+          egg::Vec2 delta = egg::newton_delta<2>(gv, hv, pos, tag, params.data());
+          return to_f64(delta.data(), 2);
       },
       py::arg("grad"),
       py::arg("hess"),

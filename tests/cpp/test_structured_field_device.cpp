@@ -39,7 +39,7 @@ void sync(Field& f)
     f.exchange_halos().wait();
 }
 
-void seed_interior(const BlockLayout<2>& layout, std::vector<double>& host, std::size_t b,
+void seed_interior(const BlockLayout<2>& layout, std::vector<egg::real>& host, std::size_t b,
                    double x0)
 {
     const auto shape = layout.interior_shape(b);
@@ -94,14 +94,14 @@ int main()
 
             expect(sfield.num_blocks() == 2_u);
 
-            std::vector<double> host(sfield.layout().total_doubles(), 0.0);
+            std::vector<egg::real> host(sfield.layout().total_doubles(), 0.0_r);
             seed_interior(layout, host, 0, 0.0);
             seed_interior(layout, host, 1, 3.0);
             sfield.upload(host);
 
             sync<2>(sfield);  // exchange_halos() via the StructuredField concept
 
-            std::vector<double> out;
+            std::vector<egg::real> out;
             sfield.download(out);
 
             for (std::size_t j = 0; j < kN1; ++j) {

@@ -2,6 +2,7 @@
 // (mirroring batch_jax._solve_with_fallback).
 #include "metric.hpp"
 #include "solve.hpp"
+#include "real_tol.hpp"
 #include "ut_cfg.hpp"
 
 #include <cmath>
@@ -11,7 +12,11 @@ using namespace egg;
 
 namespace
 {
-bool close(double a, double b, double tol) { return std::abs(a - b) <= tol * (1.0 + std::abs(b)); }
+bool close(double a, double b, double tol)
+{
+    tol = egg_test::real_tol(tol);
+    return std::abs(a - b) <= tol * (1.0 + std::abs(b));
+}
 }  // namespace
 
 static const suite<"solve"> solve_suite = [] {

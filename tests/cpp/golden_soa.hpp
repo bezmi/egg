@@ -23,8 +23,8 @@ namespace egg_test
 // returning one egg::SoAHostRecord per present entity type. `dof_local` is the
 // group-local DOF list of each partition.
 inline std::vector<egg::SoAHostRecord> build_soa_from_blob(const int* tag,
-                                                           const double* params,
-                                                           const std::vector<double>& arena,
+                                                           const egg::real* params,
+                                                           const std::vector<egg::real>& arena,
                                                            std::size_t ndof)
 {
     using namespace egg;
@@ -42,7 +42,7 @@ inline std::vector<egg::SoAHostRecord> build_soa_from_blob(const int* tag,
         }
     }
 
-    const double* arena_ptr = arena.empty() ? nullptr : arena.data();
+    const egg::real* arena_ptr = arena.empty() ? nullptr : arena.data();
     std::vector<SoAHostRecord> out;
     out.reserve(order.size());
     for (std::size_t pi = 0; pi < order.size(); ++pi) {

@@ -103,7 +103,7 @@ static const suite<"structured"> structured_suite = [] {
     // (Same builders are used on the device base pointer in test_field_device.)
     "2D halo/interior views read the packed offsets"_test = [] {
         const BlockLayout<2> layout {{{{3, 4}}, {{2, 2}}}};
-        std::vector<double> buf(layout.total_doubles());
+        std::vector<egg::real> buf(layout.total_doubles());
         for (std::size_t i = 0; i < buf.size(); ++i) { buf[i] = static_cast<double>(i); }
 
         for (std::size_t b = 0; b < layout.num_blocks(); ++b) {
@@ -142,7 +142,7 @@ static const suite<"structured"> structured_suite = [] {
 
     "3D interior view strides match the layout"_test = [] {
         const BlockLayout<3> layout {{{{2, 3, 4}}}};
-        std::vector<double> buf(layout.total_doubles());
+        std::vector<egg::real> buf(layout.total_doubles());
         for (std::size_t i = 0; i < buf.size(); ++i) { buf[i] = static_cast<double>(i); }
 
         const InteriorView<3> iv = interior_view<3>(buf.data(), layout, 0);
@@ -174,11 +174,11 @@ static const suite<"structured"> structured_suite = [] {
         const BlockLayout<2> layout {{{{n, n}}}};
 
         auto pos = [](std::size_t i, std::size_t j) {
-            return PtN<2> {static_cast<double>(i) + (0.05 * static_cast<double>(i * j)),
-                           static_cast<double>(j) + (0.03 * static_cast<double>(i * i))};
+            return PtN<2> {static_cast<egg::real>(i) + 0.05_r * static_cast<egg::real>(i * j),
+                           static_cast<egg::real>(j) + 0.03_r * static_cast<egg::real>(i * i)};
         };
-        std::vector<double> Xc(n * n * 2);                // compact: global idx = i*n + j
-        std::vector<double> buf(layout.total_doubles());  // padded BlockField store
+        std::vector<egg::real> Xc(n * n * 2);                // compact: global idx = i*n + j
+        std::vector<egg::real> buf(layout.total_doubles());  // padded BlockField store
         for (std::size_t i = 0; i < n; ++i) {
             for (std::size_t j = 0; j < n; ++j) {
                 const PtN<2> p = pos(i, j);
@@ -200,7 +200,7 @@ static const suite<"structured"> structured_suite = [] {
         const std::array<std::array<int, 2>, 4> corner_offs {{{0, 0}, {1, 0}, {0, 1}, {1, 1}}};
 
         std::vector<int> gc_c, gn0_c, gn1_c, gc_p, gn0_p, gn1_p, role;
-        std::vector<double> s0, s1, W_inv, J;
+        std::vector<egg::real> s0, s1, W_inv, J;
         double jfill = 0.0;
         for (const auto& base : cell_bases) {
             for (const auto& co : corner_offs) {

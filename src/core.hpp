@@ -3,9 +3,54 @@
 #include <array>
 #include <cmath>
 #include <experimental/mdspan>
+#include <limits>
 
 namespace egg
 {
+
+// ---------------------------------------------------------------------------
+// Precision knob. Default `double`; -DEGG_REAL_IS_FLOAT=1 selects `float`.
+// `egg::real` is the single value type every numeric in src/ is expressed in,
+// so flipping this macro halves the register/memory footprint of every working
+// set without touching call sites. The `double` build must stay bit-for-bit
+// identical to the pre-refactor code (the macro off => the same codegen).
+// ---------------------------------------------------------------------------
+#if defined(EGG_REAL_IS_FLOAT) && EGG_REAL_IS_FLOAT
+using real = float;
+#else
+using real = double;
+#endif
+
+// Literal kit. In any `real`-typed expression a bare `2.0 * x` promotes the
+// whole subexpression to `double`, computes in `double`, then narrows back —
+// defeating both the perf and register goals, silently. Write `2.0_r` (or
+// `r(2.0)`) instead so every constant participating in `real` arithmetic stays
+// `real`. consteval/constexpr => pure compile-time casts, zero runtime cost.
+consteval real operator""_r(long double v) { return static_cast<real>(v); }
+constexpr real r(long double v) { return static_cast<real>(v); }
+
+// ---------------------------------------------------------------------------
+// Precision-scaled tolerances. Each is a double/float pair selected on the
+// precision macro: the `double` build keeps the EXACT legacy literals (parity),
+// the `float` build gets thresholds reachable in fp32 (otherwise loops that
+// break on 1e-9/1e-15 would never converge). Replaces the scattered
+// 1e-15/1e-9/1e-30/1e-12 literals across the geometry/solve/sweep paths.
+// ---------------------------------------------------------------------------
+namespace tol
+{
+inline constexpr real eps = std::numeric_limits<real>::epsilon();  // ~2.2e-16 / 1.2e-7
+#if defined(EGG_REAL_IS_FLOAT) && EGG_REAL_IS_FLOAT
+inline constexpr real tiny = 1e-20_r;    // det/denominator floor
+inline constexpr real znorm = 1e-7_r;    // "is this vector zero" guard
+inline constexpr real newton = 1e-5_r;   // projection |Δq| break
+inline constexpr real energy = 1e-6_r;   // line-search accept slack
+#else
+inline constexpr real tiny = 1e-30_r;    // det/denominator floor
+inline constexpr real znorm = 1e-15_r;   // "is this vector zero" guard
+inline constexpr real newton = 1e-9_r;   // projection |Δq| break
+inline constexpr real energy = 1e-12_r;  // line-search accept slack
+#endif
+}  // namespace tol
 
 // ---------------------------------------------------------------------------
 // Spatial dimension of the core (the single knob). The 2D pipeline wires
@@ -39,13 +84,13 @@ static_assert(dim::corners(3) == 8 && dim::vecT(3) == 9);
 
 // Dimension-parameterised value types. PtN/VecN/MatN are the per-axis shapes;
 // VecTN/GradN/HessN are the flattened vec(T)-space shapes used by the metric.
-template <int N> using PtN = std::array<double, N>;
-template <int N> using VecN = std::array<double, N>;
-template <int N> using MatN = std::array<double, N * N>;  // row-major d×d
+template <int N> using PtN = std::array<real, N>;
+template <int N> using VecN = std::array<real, N>;
+template <int N> using MatN = std::array<real, N * N>;  // row-major d×d
 
-template <int D> using VecTN = std::array<double, dim::vecT(D)>;  // vec(T)
-template <int D> using GradN = std::array<double, dim::vecT(D)>;  // dmu/dvec(T)
-template <int D> using HessN = std::array<double, dim::vecT(D) * dim::vecT(D)>;
+template <int D> using VecTN = std::array<real, dim::vecT(D)>;  // vec(T)
+template <int D> using GradN = std::array<real, dim::vecT(D)>;  // dmu/dvec(T)
+template <int D> using HessN = std::array<real, dim::vecT(D) * dim::vecT(D)>;
 
 // Transition default: the only remaining mention of a "global" dim. The
 // un-suffixed names survive as D=2 aliases so the oracle bindings and existing
@@ -81,24 +126,22 @@ inline constexpr int kJSize = dim::jSize(kDefaultDim);
 /// @param a,b Operands of equal length.
 /// @return The elementwise sum.
 template <std::size_t N>
-inline std::array<double, N> operator+(const std::array<double, N>& a,
-                                       const std::array<double, N>& b)
+inline std::array<real, N> operator+(const std::array<real, N>& a, const std::array<real, N>& b)
 {
-    std::array<double, N> r;
-    for (std::size_t i = 0; i < N; ++i) { r[i] = a[i] + b[i]; }
-    return r;
+    std::array<real, N> out;
+    for (std::size_t i = 0; i < N; ++i) { out[i] = a[i] + b[i]; }
+    return out;
 }
 /// @brief Elementwise difference @f$ a - b @f$.
 /// @tparam N Array length.
 /// @param a,b Operands of equal length.
 /// @return The elementwise difference.
 template <std::size_t N>
-inline std::array<double, N> operator-(const std::array<double, N>& a,
-                                       const std::array<double, N>& b)
+inline std::array<real, N> operator-(const std::array<real, N>& a, const std::array<real, N>& b)
 {
-    std::array<double, N> r;
-    for (std::size_t i = 0; i < N; ++i) { r[i] = a[i] - b[i]; }
-    return r;
+    std::array<real, N> out;
+    for (std::size_t i = 0; i < N; ++i) { out[i] = a[i] - b[i]; }
+    return out;
 }
 /// @brief Scalar–vector product @f$ s\,a @f$.
 /// @tparam N Array length.
@@ -106,20 +149,20 @@ inline std::array<double, N> operator-(const std::array<double, N>& a,
 /// @param a Vector operand.
 /// @return The scaled vector.
 template <std::size_t N>
-inline std::array<double, N> operator*(double s, const std::array<double, N>& a)
+inline std::array<real, N> operator*(real s, const std::array<real, N>& a)
 {
-    std::array<double, N> r;
-    for (std::size_t i = 0; i < N; ++i) { r[i] = s * a[i]; }
-    return r;
+    std::array<real, N> out;
+    for (std::size_t i = 0; i < N; ++i) { out[i] = s * a[i]; }
+    return out;
 }
 /// @brief Euclidean inner product @f$ a \cdot b @f$.
 /// @tparam N Array length.
 /// @param a,b Operands of equal length.
 /// @return The scalar dot product.
 template <std::size_t N>
-inline double dot(const std::array<double, N>& a, const std::array<double, N>& b)
+inline real dot(const std::array<real, N>& a, const std::array<real, N>& b)
 {
-    double acc = 0.0;
+    real acc = 0.0_r;
     for (std::size_t i = 0; i < N; ++i) { acc += a[i] * b[i]; }
     return acc;
 }
@@ -129,29 +172,29 @@ inline double dot(const std::array<double, N>& a, const std::array<double, N>& b
 /// @return @f$ a / \lVert a \rVert @f$, or the first basis axis @f$ e_0 @f$ when
 ///         @p a is degenerate (@f$ \lVert a \rVert < 10^{-15} @f$), matching the
 ///         legacy tangent fallbacks.
-template <std::size_t N> inline std::array<double, N> normalize(const std::array<double, N>& a)
+template <std::size_t N> inline std::array<real, N> normalize(const std::array<real, N>& a)
 {
-    const double n = std::sqrt(dot(a, a));
-    if (n < 1e-15) {
-        std::array<double, N> e {};
-        e[0] = 1.0;  // degenerate => first basis axis (matches the legacy fallbacks)
+    const real n = std::sqrt(dot(a, a));
+    if (n < tol::znorm) {
+        std::array<real, N> e {};
+        e[0] = 1.0_r;  // degenerate => first basis axis (matches the legacy fallbacks)
         return e;
     }
-    return (1.0 / n) * a;
+    return (1.0_r / n) * a;
 }
 /// @}
 
 // Node i occupies X[D*i + 0 .. D*i + D-1] in the flat coordinate array.
 // load_pt / store_pt loop over D, so the kernels never spell out per-axis
 // literals. Default D = kDefaultDim keeps every existing call site unchanged.
-template <int D = kDefaultDim> inline PtN<D> load_pt(const double* X, int i)
+template <int D = kDefaultDim> inline PtN<D> load_pt(const real* X, int i)
 {
     PtN<D> p;
     for (int k = 0; k < D; ++k) { p[k] = X[(D * i) + k]; }
     return p;
 }
 
-template <int D = kDefaultDim> inline void store_pt(double* X, int i, const PtN<D>& p)
+template <int D = kDefaultDim> inline void store_pt(real* X, int i, const PtN<D>& p)
 {
     for (int k = 0; k < D; ++k) { X[(D * i) + k] = p[k]; }
 }

@@ -45,16 +45,16 @@ template <int D> class BlockField
     [[nodiscard]] std::size_t num_blocks() const { return layout_.num_blocks(); }
 
     /// Device base pointer of the whole packed buffer (doubles).
-    [[nodiscard]] double* data() const { return buf_.data(); }
+    [[nodiscard]] real* data() const { return buf_.data(); }
     /// Size of the packed buffer in doubles.
     [[nodiscard]] std::size_t size() const { return buf_.size(); }
 
     /// Upload a host buffer of exactly total_doubles() values into the device
     /// store (padded layout, including ghost slots).
-    void upload(const std::vector<double>& host) { buf_.upload(host); }
+    void upload(const std::vector<real>& host) { buf_.upload(host); }
 
     /// Download the whole packed buffer into `host` (resized to size()).
-    void download(std::vector<double>& host)
+    void download(std::vector<real>& host)
     {
         host.resize(buf_.size());
         buf_.download(host.data());
@@ -75,7 +75,7 @@ template <int D> class BlockField
 
   private:
     BlockLayout<D> layout_;
-    UsmBuffer<double> buf_;
+    UsmBuffer<real> buf_;
 };
 
 }  // namespace egg

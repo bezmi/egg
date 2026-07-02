@@ -13,6 +13,7 @@
 // This pins the GPU hot-path closed form (mu_cond3_eval) to the de-risking
 // Dual2<9> AD reference (mu_cond3 over duals) — the parity the metric.hpp
 // header comment promises (~1e-14).
+#include "real_tol.hpp"
 #include "dual.hpp"
 #include "golden_metric_3d.hpp"
 #include "metric.hpp"
@@ -37,7 +38,11 @@ VecTN<3> to_vecT3(const std::array<double, 9>& a)
 
 // Absolute-or-relative closeness, robust to the larger Hessian magnitudes in
 // the near-singular sample.
-bool close(double a, double b, double tol) { return std::abs(a - b) <= tol * (1.0 + std::abs(b)); }
+bool close(double a, double b, double tol)
+{
+    tol = egg_test::real_tol(tol);
+    return std::abs(a - b) <= tol * (1.0 + std::abs(b));
+}
 
 // Dual<9> first-order AD gradient of mu_cond3.
 GradN<3> cond3_grad_dual(const VecTN<3>& t)
@@ -148,7 +153,7 @@ static const suite<"metric3d_parity"> metric3d_parity_suite = [] {
     "fused mu_cond3_jhj matches eval + explicit JtHJ"_test = [n] {
         boost::ut::log << std::format("  mu_cond3_jhj vs mu_cond3_eval contraction\n");
         // Curated chain matrices Jb (9×3 row-major): identity-ish, skewed, dense.
-        std::array<std::array<double, 27>, 3> jbs {};
+        std::array<std::array<egg::real, 27>, 3> jbs {};
         for (int a = 0; a < 9; ++a) {
             for (int k = 0; k < 3; ++k) {
                 jbs[0][(a * 3) + k] = (a % 3 == k) ? 1.0 : 0.0;
@@ -161,9 +166,9 @@ static const suite<"metric3d_parity"> metric3d_parity_suite = [] {
             const VecTN<3> t = to_vecT3(s.t);
             const MuCond3Eval ref = mu_cond3_eval(t.data());
             for (const auto& Jb : jbs) {
-                double val = 0.0;
-                std::array<double, 9> grad {};
-                std::array<double, 9> jhj {};
+                egg::real val = 0.0;
+                std::array<egg::real, 9> grad {};
+                std::array<egg::real, 9> jhj {};
                 mu_cond3_jhj(t.data(), Jb.data(), &val, grad.data(), jhj.data());
                 expect(close(val, ref.val, 1e-12)) << std::format("sample {} val", kk);
                 for (int i = 0; i < 9; ++i) {

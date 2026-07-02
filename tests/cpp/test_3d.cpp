@@ -4,6 +4,7 @@
 // (plane, sphere, cylinder, line), the K=2 Gram–Schmidt branch of
 // orthonormalize, the Trim<2> UV polygon, and the surface (k=2) arm of the
 // k-reduced constrained newton_delta. Self-contained (no oracle goldens).
+#include "real_tol.hpp"
 #include "geometry.hpp"
 #include "metric.hpp"
 #include "patch.hpp"
@@ -21,7 +22,10 @@ namespace
 constexpr double kTol = 1e-12;
 
 bool close(double a, double b, double tol = kTol)
-{ return std::abs(a - b) <= tol * (1.0 + std::abs(b)); }
+{
+    tol = egg_test::real_tol(tol);
+    return std::abs(a - b) <= tol * (1.0 + std::abs(b));
+}
 
 double norm3(const VecN<3>& v) { return std::sqrt(dot(v, v)); }
 }  // namespace
@@ -58,7 +62,7 @@ static const suite<"scalar3d"> scalar3d_suite = [] {
 static const suite<"metric3d"> metric3d_suite = [] {
     "mu_cond3 is zero at the identity and under rotation"_test = [] {
         expect(close(mu_cond3(VecTN<3> {1, 0, 0, 0, 1, 0, 0, 0, 1}), 0.0, 1e-14));
-        const double c = std::cos(0.7), s = std::sin(0.7);
+        const egg::real c = std::cos(0.7), s = std::sin(0.7);
         expect(close(mu_cond3(VecTN<3> {c, -s, 0, s, c, 0, 0, 0, 1}), 0.0, 1e-14));
     };
 
@@ -89,13 +93,13 @@ static const suite<"metric3d"> metric3d_suite = [] {
         const ShapeObjectiveT<3> obj;
         const VecTN<3> t {1.2, -0.3, 0.1, 0.2, 0.9, -0.1, 0.05, 0.15, 1.1};
         const GradN<3> g = obj.grad(t);
-        const double h = 1e-6;
+        const double h = egg_test::fd_step();
         for (int i = 0; i < 9; ++i) {
             VecTN<3> tp = t, tm = t;
             tp[i] += h;
             tm[i] -= h;
             const double fd = (obj.value(tp) - obj.value(tm)) / (2 * h);
-            expect(close(g[i], fd, 1e-6)) << std::format("grad[{}] {} vs FD {}", i, g[i], fd);
+            expect(close(g[i], fd, egg_test::fd_tol(1e-6))) << std::format("grad[{}] {} vs FD {}", i, g[i], fd);
         }
     };
 
@@ -103,7 +107,7 @@ static const suite<"metric3d"> metric3d_suite = [] {
         const ShapeObjectiveT<3> obj;
         const VecTN<3> t {1.2, -0.3, 0.1, 0.2, 0.9, -0.1, 0.05, 0.15, 1.1};
         const HessN<3> H = obj.hess(t);
-        const double h = 1e-6;
+        const double h = egg_test::fd_step();
         for (int i = 0; i < 9; ++i) {
             VecTN<3> tp = t, tm = t;
             tp[i] += h;
@@ -111,7 +115,7 @@ static const suite<"metric3d"> metric3d_suite = [] {
             const GradN<3> gp = obj.grad(tp), gm = obj.grad(tm);
             for (int j = 0; j < 9; ++j) {
                 const double fd = (gp[j] - gm[j]) / (2 * h);
-                expect(close(H[(i * 9) + j], fd, 1e-5))
+                expect(close(H[(i * 9) + j], fd, egg_test::fd_tol(1e-5)))
                   << std::format("hess[{},{}] {} vs FD {}", i, j, H[(i * 9) + j], fd);
             }
         }
@@ -121,13 +125,13 @@ static const suite<"metric3d"> metric3d_suite = [] {
         const UntangleObjectiveT<3> obj {.delta = 0.3};
         const VecTN<3> t {-0.8, 0.2, 0.1, 0.3, 1.1, -0.2, 0.0, 0.1, 0.9};
         const GradN<3> g = obj.grad(t);
-        const double h = 1e-6;
+        const double h = egg_test::fd_step();
         for (int i = 0; i < 9; ++i) {
             VecTN<3> tp = t, tm = t;
             tp[i] += h;
             tm[i] -= h;
             const double fd = (obj.value(tp) - obj.value(tm)) / (2 * h);
-            expect(close(g[i], fd, 1e-6)) << std::format("grad[{}] {} vs FD {}", i, g[i], fd);
+            expect(close(g[i], fd, egg_test::fd_tol(1e-6))) << std::format("grad[{}] {} vs FD {}", i, g[i], fd);
         }
     };
 };
@@ -218,7 +222,7 @@ static const suite<"geometry3d"> geometry3d_suite = [] {
     };
 
     "decode_entity decodes the surface blobs"_test = [] {
-        std::array<double, kParamPad> blob {};
+        std::array<egg::real, kParamPad> blob {};
         // Sphere: [c(3), r, ax(3), ay(3)].
         blob = {1, 2, 3, 2.0, 1, 0, 0, 0, 1, 0};
         const auto ent =
@@ -266,8 +270,8 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
     // bilinear interpolant, the frame must span the plane, and invert must be
     // the identity map (u,v) = (x, y).
     constexpr auto bilinear = [] {
-        static const std::array<double, 4> ku {0, 0, 1, 1};
-        static const std::array<double, 12> ctrl {0,
+        static const std::array<egg::real, 4> ku {0, 0, 1, 1};
+        static const std::array<egg::real, 12> ctrl {0,
                                                   0,
                                                   0,
                                                   0,
@@ -291,7 +295,7 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
     "bilinear patch reproduces the plane"_test = [bilinear] {
         const BSplineSurfaceParam s = bilinear();
         for (const auto& [u, v] :
-             std::array<std::pair<double, double>, 3> {{{0.3, 0.7}, {0.0, 1.0}, {0.5, 0.5}}}) {
+             std::array<std::pair<egg::real, egg::real>, 3> {{{0.3, 0.7}, {0.0, 1.0}, {0.5, 0.5}}}) {
             const PtN<3> p = s.eval({u, v});
             expect(close(p[0], u) && close(p[1], v) && close(p[2], 0.0))
               << std::format("eval({},{}) = ({},{},{})", u, v, p[0], p[1], p[2]);
@@ -306,11 +310,12 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
     // A curved bicubic patch (z = bump): FD-check the frame and recover the
     // parameters of an on-surface query through the seeded Newton inverse.
     constexpr auto bump = [] {
-        static const std::array<double, 8> k3 {0, 0, 0, 0, 1, 1, 1, 1};
-        static std::array<double, 48> ctrl {};
+        static const std::array<egg::real, 8> k3 {0, 0, 0, 0, 1, 1, 1, 1};
+        static std::array<egg::real, 48> ctrl {};
         for (int i = 0; i < 4; ++i) {
             for (int j = 0; j < 4; ++j) {
-                const double x = i / 3.0, y = j / 3.0;
+                const egg::real x = static_cast<egg::real>(i) / 3.0_r,
+                              y = static_cast<egg::real>(j) / 3.0_r;
                 ctrl[3 * ((i * 4) + j) + 0] = x;
                 ctrl[3 * ((i * 4) + j) + 1] = y;
                 // Interior control z lifts the middle of the patch.
@@ -328,16 +333,16 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
 
     "bicubic frame matches finite differences"_test = [bump] {
         const BSplineSurfaceParam s = bump();
-        const double h = 1e-6;
+        const egg::real h = static_cast<egg::real>(egg_test::fd_step());
         for (const auto& [u, v] :
-             std::array<std::pair<double, double>, 3> {{{0.3, 0.4}, {0.6, 0.2}, {0.5, 0.5}}}) {
+             std::array<std::pair<egg::real, egg::real>, 3> {{{0.3, 0.4}, {0.6, 0.2}, {0.5, 0.5}}}) {
             const auto fr = s.frame({u, v});
             const PtN<3> up = s.eval({u + h, v}), um = s.eval({u - h, v});
             const PtN<3> vp = s.eval({u, v + h}), vm = s.eval({u, v - h});
             for (int i = 0; i < 3; ++i) {
-                expect(close(fr[0][i], (up[i] - um[i]) / (2 * h), 1e-5))
+                expect(close(fr[0][i], (up[i] - um[i]) / (2 * h), egg_test::fd_tol(1e-5)))
                   << std::format("S_u[{}] at ({},{})", i, u, v);
-                expect(close(fr[1][i], (vp[i] - vm[i]) / (2 * h), 1e-5))
+                expect(close(fr[1][i], (vp[i] - vm[i]) / (2 * h), egg_test::fd_tol(1e-5)))
                   << std::format("S_v[{}] at ({},{})", i, u, v);
             }
         }
@@ -346,7 +351,7 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
     "Newton inverse recovers the parameters of an on-surface point"_test = [bump] {
         const BSplineSurfaceParam s = bump();
         for (const auto& [u, v] :
-             std::array<std::pair<double, double>, 3> {{{0.3, 0.4}, {0.7, 0.6}, {0.2, 0.8}}}) {
+             std::array<std::pair<egg::real, egg::real>, 3> {{{0.3, 0.4}, {0.7, 0.6}, {0.2, 0.8}}}) {
             const Param<2> q = s.invert(s.eval({u, v}));
             expect(close(q[0], u, 1e-7) && close(q[1], v, 1e-7))
               << std::format("recovered ({},{}) vs ({},{})", q[0], q[1], u, v);
@@ -369,9 +374,9 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
     // Rational (NURBS) quarter-cylinder: rational quadratic quarter circle in u
     // (weights {1, 1/sqrt2, 1}) extruded linearly in v — exact unit radius.
     constexpr auto quarter_cyl = [] {
-        static const std::array<double, 6> ku {0, 0, 0, 1, 1, 1};
-        static const std::array<double, 4> kv {0, 0, 1, 1};
-        static const std::array<double, 18> ctrl {1,
+        static const std::array<egg::real, 6> ku {0, 0, 0, 1, 1, 1};
+        static const std::array<egg::real, 4> kv {0, 0, 1, 1};
+        static const std::array<egg::real, 18> ctrl {1,
                                                   0,
                                                   0,
                                                   1,
@@ -389,7 +394,7 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
                                                   0,
                                                   1,
                                                   1};  // circle ctrl (0,1)
-        static const std::array<double, 6> w {1.0,
+        static const std::array<egg::real, 6> w {1.0,
                                               1.0,
                                               1.0 / std::numbers::sqrt2,
                                               1.0 / std::numbers::sqrt2,
@@ -407,8 +412,8 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
 
     "rational quarter-cylinder has exact unit radius"_test = [quarter_cyl] {
         const BSplineSurfaceParam s = quarter_cyl();
-        for (const double u : {0.0, 0.25, 0.5, 0.75, 1.0}) {
-            for (const double v : {0.0, 0.5, 1.0}) {
+        for (const egg::real u : {0.0_r, 0.25_r, 0.5_r, 0.75_r, 1.0_r}) {
+            for (const egg::real v : {0.0_r, 0.5_r, 1.0_r}) {
                 const PtN<3> p = s.eval({u, v});
                 expect(close(std::hypot(p[0], p[1]), 1.0, 1e-14))
                   << std::format("radius at ({},{})", u, v);
@@ -428,7 +433,7 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
 
     "decode_entity slices the surface from the arena"_test = [quarter_cyl] {
         const BSplineSurfaceParam ref = quarter_cyl();
-        std::vector<double> arena;
+        std::vector<egg::real> arena;
         const auto ku_off = arena.size();
         arena.insert(arena.end(), ref.knots_u.begin(), ref.knots_u.end());
         const auto kv_off = arena.size();
@@ -438,7 +443,7 @@ static const suite<"bsplinesurf"> bsplinesurf_suite = [] {
         const auto w_off = arena.size();
         arena.insert(arena.end(), ref.weights.begin(), ref.weights.end());
 
-        std::array<double, kParamPad> blob {};
+        std::array<egg::real, kParamPad> blob {};
         blob[0] = 2;  // pu
         blob[1] = 1;  // pv
         blob[2] = 3;  // nu
