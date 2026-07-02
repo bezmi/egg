@@ -114,13 +114,14 @@ def encode_entity(entity, d: int = 2, arena: list | None = None):
     if isinstance(entity, CircleArc):
         params[:2] = entity.center
         params[2] = entity.radius
-        params[3:5] = (entity.t0, entity.t1)
+        # Normalise a reversed (t1 < t0) traversal for the C++ clamp.
+        params[3:5] = sorted((entity.t0, entity.t1))
         params[5] = float(entity.closed)
         return TAG_CIRCLEARC, params
     if isinstance(entity, EllipseArc):
         params[:2] = entity.center
         params[2:5] = (entity.a, entity.b, entity.phi)
-        params[5:7] = (entity.t0, entity.t1)
+        params[5:7] = sorted((entity.t0, entity.t1))
         params[7] = float(entity.closed)
         return TAG_ELLIPSEARC, params
     if isinstance(entity, QuadBezier):

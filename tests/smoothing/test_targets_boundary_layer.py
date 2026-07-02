@@ -95,3 +95,81 @@ def test_backward_compat_existing_targets():
     assert np.allclose(idt(0, None, (0, 0), (0, 0)), np.eye(2))
     ani = AnisotropicTarget((0.1, 0.5))
     assert np.allclose(ani(0, None, (0, 0), (0, 0)), np.diag([0.1, 0.5]))
+
+
+def test_normal_spacing_capped_and_monotone():
+    """Growth is capped at interior_spacing — no overshoot band."""
+    blt = BoundaryLayerTarget(
+        None, first_height=0.1, growth=2.0, wall_axis=1, wall_side=1,
+        interior_spacing=0.5)
+    sn = [blt.normal_spacing(k) for k in range(12)]
+    assert sn[:3] == [0.1, 0.2, 0.4]
+    assert all(s <= 0.5 + 1e-15 for s in sn)
+    assert all(b >= a for a, b in zip(sn, sn[1:]))
+
+
+def test_far_field_isotropic_by_default():
+    """With no explicit interior cap, far layers ask for W with s_n = s_t."""
+    blt = BoundaryLayerTarget(
+        None, first_height=0.01, growth=1.5, wall_axis=1, wall_side=1,
+        tangential_spacing=0.3)
+    assert abs(blt.normal_spacing(50) - 0.3) < 1e-15
+
+
+def test_per_face_tangential_spacing():
+    """Wall blocks derive s_t from their own face length / cell count."""
+    topo, ents = build_circle_in_rectangle(rough=False)
+    topo.boundary_layer_specs = {id(ents["circle"]): dict(
+        first_height=0.002, growth=1.2, n_layers=4,
+        max_height=None, tangential_spacing=None)}
+    tgt = build_boundary_layer_target(topo)
+    names = list(topo.block_specs.keys())
+    bi = names.index("o_s")
+    spec = topo.block_specs["o_s"]
+    cnames = spec.face_corner_names(1, 1, 2)
+    p0 = topo.corners[cnames[0]].position
+    p1 = topo.corners[cnames[1]].position
+    expected = np.linalg.norm(p1 - p0) / spec.resolutions[0]
+    assert abs(tgt.per_block[bi].tangential_spacing - expected) < 1e-12
+
+
+def test_neighbour_blend_continues_profile():
+    """A slow-growing profile spills into the block behind the wall block."""
+    topo, ents = build_circle_in_rectangle(rough=False)
+    topo.boundary_layer_specs = {id(ents["circle"]): dict(
+        first_height=0.001, growth=1.05, n_layers=4,
+        max_height=None, tangential_spacing=None)}
+    tgt = build_boundary_layer_target(topo)
+    names = list(topo.block_specs.keys())
+    ring, behind = names.index("o_s"), names.index("e_s")
+    assert behind in tgt.per_block
+    rblt, nblt = tgt.per_block[ring], tgt.per_block[behind]
+    wall_cells = topo.block_specs["o_s"].resolutions[1]
+    assert nblt.k_offset == wall_cells
+    # Spacing is continuous across the shared interface.
+    assert abs(nblt.normal_spacing(wall_cells)
+               - rblt.normal_spacing(wall_cells)) < 1e-15
+    # The neighbour's wall side faces the ring block (its high axis-1 face).
+    assert (nblt.wall_axis, nblt.wall_side) == (1, 1)
+
+
+def test_no_neighbour_blend_once_isotropic():
+    """If the profile reaches the cap inside the wall block, no spill-over."""
+    topo, ents = build_circle_in_rectangle(rough=False)
+    topo.boundary_layer_specs = {id(ents["circle"]): dict(
+        first_height=0.05, growth=2.0, n_layers=4,
+        max_height=None, tangential_spacing=None)}
+    tgt = build_boundary_layer_target(topo)
+    names = list(topo.block_specs.keys())
+    ring_names = {"o_s", "o_e", "o_n", "o_w"}
+    assert {names[bi] for bi in tgt.per_block} == ring_names
+
+
+def test_blend_neighbours_off():
+    topo, ents = build_circle_in_rectangle(rough=False)
+    topo.boundary_layer_specs = {id(ents["circle"]): dict(
+        first_height=0.001, growth=1.05, n_layers=4,
+        max_height=None, tangential_spacing=None)}
+    tgt = build_boundary_layer_target(topo, blend_neighbours=False)
+    names = list(topo.block_specs.keys())
+    assert {names[bi] for bi in tgt.per_block} == {"o_s", "o_e", "o_n", "o_w"}

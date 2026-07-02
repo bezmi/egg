@@ -35,6 +35,50 @@ class TestLuaStyleConstructors:
         bz = Bezier(points=[Vector3(0, 0), Vector3(1, 1), Vector3(2, 0)])
         np.testing.assert_allclose(bz.eval(0.5), [1.0, 0.5])
 
+    def test_arc_preserves_direction(self):
+        """eval_frac runs p0 -> p1 regardless of the sweep's sense."""
+        ccw = Arc(p0=Vector3(1, 0), p1=Vector3(0, 1), centre=Vector3(0, 0))
+        np.testing.assert_allclose(ccw.eval_frac(0.0), [1.0, 0.0], atol=1e-14)
+        np.testing.assert_allclose(ccw.eval_frac(1.0), [0.0, 1.0], atol=1e-14)
+        cw = Arc(p0=Vector3(0, 1), p1=Vector3(1, 0), centre=Vector3(0, 0))
+        assert cw.t1 < cw.t0
+        np.testing.assert_allclose(cw.eval_frac(0.0), [0.0, 1.0], atol=1e-14)
+        np.testing.assert_allclose(cw.eval_frac(1.0), [1.0, 0.0], atol=1e-14)
+
+    def test_reversed_arc_projection_unchanged(self):
+        cw = Arc(p0=Vector3(0, 1), p1=Vector3(1, 0), centre=Vector3(0, 0))
+        q = cw.project(np.array([2.0, 2.0]))
+        np.testing.assert_allclose(q, [np.sqrt(0.5), np.sqrt(0.5)])
+        # Below the angular range: clamps to the t=0 end of the interval.
+        q = cw.project(np.array([0.0, -1.0]))
+        np.testing.assert_allclose(q, [1.0, 0.0], atol=1e-14)
+
+    def test_polyline_traverses_clockwise_arcs(self):
+        """A wall polyline whose arcs sweep clockwise stays in order."""
+        centre = Vector3(1.0, 0.0)
+        a, b = Vector3(0.0, 0.0), Vector3(1.0, 1.0)
+        c = Vector3(2.0, 1.0)
+        wire = Edge(Polyline([Arc(a, b, centre), Line(b, c)]),
+                    arc_length=True)
+        np.testing.assert_allclose(tuple(wire.point_at(0.0))[:2], (0.0, 0.0),
+                                   atol=1e-12)
+        np.testing.assert_allclose(tuple(wire.point_at(1.0))[:2], (2.0, 1.0),
+                                   atol=1e-12)
+        # Arc quarter = pi/2, line = 1: midpoint of total length sits on
+        # the arc near its far end, monotonically ordered.
+        pts = np.array([tuple(wire.point_at(t))[:2]
+                        for t in np.linspace(0, 1, 41)])
+        steps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        assert np.all(steps < 0.12)  # no jumps: continuous forward walk
+
+    def test_reversed_arc_soa_interval_sorted(self):
+        from egg.geometry.entity_soa import encode_entity_soa
+
+        cw = Arc(p0=Vector3(0, 1), p1=Vector3(1, 0), centre=Vector3(0, 0))
+        _tag, _k, row, _seg = encode_entity_soa(cw)
+        assert row[3] <= row[4]
+        assert row[3] == pytest.approx(0.0) and row[4] == pytest.approx(np.pi / 2)
+
 
 class TestEdge:
     def test_point_on_line(self):

@@ -71,12 +71,16 @@ class _TrimmedCurve(GeometryEntity):
         return 1
 
     def invert(self, q: np.ndarray) -> float:
-        return _newton_foot(self, np.asarray(q, dtype=float), self.t0, self.t1)
+        lo, hi = sorted((self.t0, self.t1))
+        return _newton_foot(self, np.asarray(q, dtype=float), lo, hi)
 
     def _clamp(self, t: float) -> float:
+        # t1 < t0 encodes a direction-reversed traversal (see the frontend
+        # Arc); the point set is the same, so clamp to the sorted interval.
+        lo, hi = sorted((self.t0, self.t1))
         if self.closed:
-            return _wrap(t, self.t0, self.t1)
-        return float(np.clip(t, self.t0, self.t1))
+            return _wrap(t, lo, hi)
+        return float(np.clip(t, lo, hi))
 
     def project(self, p: np.ndarray) -> np.ndarray:
         return self.eval(self._clamp(self.invert(np.asarray(p, dtype=float))))
@@ -95,7 +99,12 @@ class _TrimmedCurve(GeometryEntity):
 
 
 class CircleArc(_TrimmedCurve):
-    """A circular arc ``C + r(cos t, sin t)``, t in [t0, t1] (radians)."""
+    """A circular arc ``C + r(cos t, sin t)``, t from t0 to t1 (radians).
+
+    ``t1 < t0`` is allowed and traverses the arc clockwise (the parameter
+    still varies linearly from ``t0`` to ``t1``); encoders normalise the
+    interval before it reaches the C++ projection kernels.
+    """
 
     def __init__(self, center, radius: float, t0: float, t1: float,
                  closed: bool = False):

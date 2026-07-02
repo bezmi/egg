@@ -157,11 +157,13 @@ class Arc:
     """A circular arc from ``p0`` to ``p1`` about ``centre``.
 
     Keyword names match the gdtk/Eilmer ``Arc:new{p0=, p1=, centre=}`` form.
-    Returns a :class:`~egg.geometry.curves2d.CircleArc`. The signed sweep from
-    ``p0`` to ``p1`` (about ``centre``) picks the arc direction. As with the
-    former gdtk adapter, the C++ inverse returns angles in ``(-pi, pi]``, so
-    the angular range is rejected if it cannot be represented in that branch
-    (after a possible antipodal flip of the start angle).
+    Returns a :class:`~egg.geometry.curves2d.CircleArc` whose parameter runs
+    from the angle of ``p0`` to the angle of ``p1`` (``t1 < t0`` for a
+    clockwise sweep), so ``eval(t0) == p0`` and composites traverse the arc
+    in the authored direction. As with the former gdtk adapter, the C++
+    inverse returns angles in ``(-pi, pi]``, so the angular range is rejected
+    if it cannot be represented in that branch (after a possible antipodal
+    flip of the start angle).
     """
 
     def __new__(cls, p0, p1, centre) -> CircleArc:
@@ -175,11 +177,11 @@ class Arc:
         ta = float(np.arctan2(pa[1] - center[1], pa[0] - center[0]))
         da, db = pa - center, pb - center
         sweep = float(np.arctan2(da[0] * db[1] - da[1] * db[0], da @ db))
-        t0, t1 = (ta, ta + sweep) if sweep >= 0.0 else (ta + sweep, ta)
-        if t1 > np.pi or t0 <= -np.pi:
+        t0, t1 = ta, ta + sweep
+        if max(t0, t1) > np.pi or min(t0, t1) <= -np.pi:
             ta2 = float(ta - 2.0 * np.pi * np.sign(ta))
-            t0, t1 = (ta2, ta2 + sweep) if sweep >= 0.0 else (ta2 + sweep, ta2)
-            if t1 > np.pi or t0 <= -np.pi:
+            t0, t1 = ta2, ta2 + sweep
+            if max(t0, t1) > np.pi or min(t0, t1) <= -np.pi:
                 raise ValueError(
                     "Arc angular range wraps past the +/-pi branch cut; split it")
         return CircleArc(center, ra, float(t0), float(t1))
@@ -385,9 +387,12 @@ class Edge:
 
     def _frac(self, tau: float) -> float:
         """Fractional parameter in [0, 1] for native parameter tau."""
-        tau = float(np.clip(tau, self.entity.t0, self.entity.t1))
+        lo, hi = sorted((self.entity.t0, self.entity.t1))
+        tau = float(np.clip(tau, lo, hi))
         if self._table is not None:
             frac, ts = self._table
+            if ts[0] > ts[-1]:  # reversed traversal: np.interp needs xp ascending
+                return float(np.interp(tau, ts[::-1], frac[::-1]))
             return float(np.interp(tau, ts, frac))
         return (tau - self.entity.t0) / (self.entity.t1 - self.entity.t0)
 

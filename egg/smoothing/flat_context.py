@@ -125,6 +125,20 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
     dd = d * d
     N = free_mask.shape[0]
 
+    w_inv = np.asarray(w_inv, dtype=np.float64)
+    uniform_w = w_inv.shape == (d, d)
+    # The C++ interior-patch synthesis hard-codes an identity W_inv, so the
+    # fast path is only valid when the target is a scalar multiple of the
+    # identity everywhere (the shape metric is scale-invariant). For any
+    # spatially-varying or anisotropic target (e.g. BoundaryLayerTarget),
+    # interior DOFs must ship their real per-sample stencils — synthesizing
+    # them would relax the interior towards isotropy while the reported
+    # energy (true W) climbs.
+    w0 = w_inv if uniform_w else (w_inv[0] if len(w_inv) else np.eye(d))
+    synth_interior = bool(
+        np.allclose(w0, w0[0, 0] * np.eye(d))
+        and (uniform_w or np.allclose(w_inv, w0)))
+
     # Interior-eligible nodes: strictly inside a block (logical in [1, n-2] on every
     # axis), so the node AND its whole 2^d-cell patch sit inside that block. The C++
     # core synthesizes their patch off the block layout (identity target), so they
@@ -132,14 +146,16 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
     # other moving DOF (block faces, entity boundaries) keeps its stored patch.
     node_block = np.full(N, -1, dtype=np.int32)
     node_logical = np.zeros((N, d), dtype=np.int32)
-    for b, ids in enumerate(blocks):
-        sh = np.asarray(ids).shape
-        if any(s < 3 for s in sh):
-            continue  # no strictly-interior node on a < 3-wide axis
-        inner = np.asarray(ids)[tuple(slice(1, s - 1) for s in sh)].reshape(-1)
-        axes = np.meshgrid(*[np.arange(1, s - 1, dtype=np.int32) for s in sh], indexing="ij")
-        node_block[inner] = b
-        node_logical[inner] = np.stack([a.reshape(-1) for a in axes], axis=1)
+    if synth_interior:
+        for b, ids in enumerate(blocks):
+            sh = np.asarray(ids).shape
+            if any(s < 3 for s in sh):
+                continue  # no strictly-interior node on a < 3-wide axis
+            inner = np.asarray(ids)[tuple(slice(1, s - 1) for s in sh)].reshape(-1)
+            axes = np.meshgrid(*[np.arange(1, s - 1, dtype=np.int32) for s in sh],
+                               indexing="ij")
+            node_block[inner] = b
+            node_logical[inner] = np.stack([a.reshape(-1) for a in axes], axis=1)
     node_interior = node_block >= 0
 
     m_node_full = st["m_node"]
@@ -151,9 +167,6 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
     m_node = m_node_full[keep]
     m_sid = st["m_sid"][keep]
     m_role = st["m_role"][keep]
-
-    w_inv = np.asarray(w_inv, dtype=np.float64)
-    uniform_w = w_inv.shape == (d, d)
 
     def sample_fields(sid, *, uniform_out=False):
         gc = st["gc"][sid].astype(np.int32)

@@ -507,3 +507,29 @@ class TestMultiBlock:
 
         np.testing.assert_allclose(g_batch, g_ref, atol=1e-10)
         np.testing.assert_allclose(H_batch, H_ref, atol=1e-10)
+
+
+class TestInteriorSynthesisGate:
+    """The C++ interior-patch synthesis assumes an identity W_inv, so the
+    wire may only classify interior DOFs when the target is (a scalar
+    multiple of) the identity everywhere."""
+
+    def test_identity_target_synthesizes_interior(self):
+        grid = _make_test_grid_2d()
+        ctx = build_sweep_context(grid, IdentityTarget(2))
+        g = ctx.wire["groups"][0]
+        assert np.any(np.asarray(g["interior_block"]) >= 0)
+
+    def test_varying_target_ships_stored_stencils(self):
+        grid = _make_test_grid_2d()
+
+        def varying(bi, block, cell_base, corner_offset):
+            s = 0.1 + 0.05 * cell_base[0]
+            return np.diag([s, 3.0 * s])
+
+        ctx = build_sweep_context(grid, varying)
+        g = ctx.wire["groups"][0]
+        assert np.all(np.asarray(g["interior_block"]) == -1)
+        # Interior DOFs must own stored samples again (P_of > 0 for all
+        # moving DOFs on a single fully-free block interior).
+        assert np.all(np.asarray(g["P_of"]) > 0)

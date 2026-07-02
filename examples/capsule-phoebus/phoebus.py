@@ -8,12 +8,13 @@ flank, shoulder arc, aft wall) and the inflow boundary is a cubic
 parametrically along the bounding edges (TFI for the interior ones);
 block-to-block connectivity is inferred from the shared corner objects.
 
-The Lua wall clustering (GeometricFunction, h_wall=1e-4, r=1.2) is applied
-directly: every wall-normal grid line is resampled with the same geometric
-distribution at initialization, the TMOP pass smooths against a matching
-boundary-layer target, and a final resample restores the exact wall
-spacing. Where the Lua example massages the interior with manual control
-points, the TMOP smoothing pass does that job.
+The Lua wall clustering (GeometricFunction, h_wall=1e-4, r=1.2) is realised
+with egg's boundary-layer machinery: ``set_boundary_layer`` records the spec,
+the TMOP pass smooths against :func:`egg.smoothing.build_boundary_layer_target`,
+and :func:`egg.smoothing.enforce_boundary_layer_spacing` enforces the exact
+wall spacing at initialization and as a post-pass. Where the Lua example
+massages the interior with manual control points, the TMOP smoothing pass
+does that job.
 
 Reference: D. Bianchi et al., Int. J. Heat Mass Transfer 177 (2021) 121430.
 
@@ -26,11 +27,12 @@ Usage::
 import argparse
 import math
 
-import numpy as np
-
 from egg.geometry import Arc, Bezier, Edge, Line, Polyline, Vector3
 from egg.pipeline import drain, generate_steps
-from egg.smoothing.targets import build_boundary_layer_target
+from egg.smoothing import (
+    build_boundary_layer_target,
+    enforce_boundary_layer_spacing,
+)
 from egg.topology.builder import TopologyBuilder
 
 H_WALL = 1.0e-4  # first cell height at the wall [m] (h_wall in the Lua)
@@ -71,68 +73,6 @@ def _tfi(u, v, south, north, west, east, p00, p10, p01, p11) -> Vector3:
         )
     )
     return Vector3(x, y)
-
-
-def _geometric_fractions(n_nodes: int, a: float, r: float,
-                         reverse: bool = False) -> np.ndarray:
-    """Node fractions of Eilmer's GeometricFunction cluster.
-
-    Spacings grow geometrically from ``a`` (a fraction of the edge) by ratio
-    ``r`` until they reach the uniform spacing of the remaining interval,
-    then stay uniform. ``reverse=True`` clusters at t=1 instead of t=0.
-    """
-    spacings = []
-    total = 0.0
-    n_cells = n_nodes - 1
-    for k in range(n_cells):
-        d = a * r ** k
-        rest = (1.0 - total) / (n_cells - k)
-        if d >= rest:
-            spacings.extend([rest] * (n_cells - k))
-            break
-        spacings.append(d)
-        total += d
-    t = np.concatenate([[0.0], np.cumsum(spacings)])
-    t /= t[-1]
-    if reverse:
-        t = 1.0 - t[::-1]
-    return t
-
-
-def _cluster_wall_normal(grid, topo, h_wall: float, r: float) -> None:
-    """Redistribute nodes along each inflow->wall grid line.
-
-    Applies the Lua GeometricFunction clustering at initialization: every
-    wall-normal line is resampled by arc length with first spacing ``h_wall``
-    at the wall growing by ``r``. Works on the ``b{i}{j}`` block-array
-    layout (axis0 = wall-normal).
-    """
-    names = list(topo.block_specs.keys())
-    idx = {n: k for k, n in enumerate(names)}
-    nib = 1 + max(int(n[1]) for n in names)
-    njb = 1 + max(int(n[2]) for n in names)
-    for jb in range(njb):
-        stack = [grid.blocks[idx[f"b{ib}{jb}"]].nodes for ib in range(nib)]
-        for j in range(stack[0].shape[1]):
-            line = np.vstack([stack[0][:, j]] + [s[1:, j] for s in stack[1:]])
-            seg = np.linalg.norm(np.diff(line, axis=0), axis=1)
-            s = np.concatenate([[0.0], np.cumsum(seg)])
-            if s[-1] <= 0.0:
-                continue
-            t = _geometric_fractions(line.shape[0], h_wall / s[-1], r,
-                                     reverse=True) * s[-1]
-            new = np.stack([np.interp(t, s, line[:, 0]),
-                            np.interp(t, s, line[:, 1])], axis=1)
-            ofs = 0
-            for blk in stack:
-                blk[:, j] = new[ofs:ofs + blk.shape[0]]
-                ofs += blk.shape[0] - 1
-    # Sync the redistributed nodes into the global DOF array.
-    for bi in range(len(names)):
-        dof = grid.block_dof_maps[bi]
-        nodes = grid.blocks[bi].nodes
-        for lidx in np.ndindex(nodes.shape[:-1]):
-            grid.global_nodes[dof[lidx]] = nodes[lidx]
 
 
 def build_phoebus(grid_level: int = 1):
@@ -202,6 +142,10 @@ def build_phoebus(grid_level: int = 1):
                 corner[i, j] = _tfi(u, v, symm, outflow, inflow, wall, G, A, F, E)
 
     bld = TopologyBuilder(d=2)
+    # Name every corner c{i}{j} (i: 0=inflow .. nib=wall, j: 0=symm ..
+    # njb=outflow) so --plot-topology labels are readable.
+    for (i, j), obj in sorted(corner.items()):
+        bld.add_corner(f"c{i}{j}", obj, fixed=obj.fixed)
     for i in range(nib):
         for j in range(njb):
             bld.add_block(
@@ -266,8 +210,8 @@ def main():
         return
 
     grid = topo.initialize_grid()
-    _cluster_wall_normal(grid, topo, h_wall=H_WALL, r=BL_GROWTH)
-    target = build_boundary_layer_target(topo, interior_spacing=2.0e-4)
+    enforce_boundary_layer_spacing(grid, topo)
+    target = build_boundary_layer_target(topo)
     print(f"Boundary layer: first_height={H_WALL} growth={BL_GROWTH} on wall")
 
     steps = generate_steps(
@@ -281,7 +225,7 @@ def main():
     drain(steps, mindet_history=mindet_history, energy_history=energy_history)
     # TMOP trades some wall spacing for interior quality; restore the exact
     # geometric wall distribution as a post-pass (stays valid).
-    _cluster_wall_normal(grid, topo, h_wall=H_WALL, r=BL_GROWTH)
+    enforce_boundary_layer_spacing(grid, topo)
     print(f"\nFinal min det A: {mindet_history[-1]:.4e}")
 
     if a.plot_grid:

@@ -40,21 +40,17 @@ def IdentityTarget(d: int) -> Callable[..., np.ndarray]:
     return target
 
 
-def _smoothstep(t: float) -> float:
-    """Hermite smoothstep on ``[0, 1]`` (0 at 0, 1 at 1, zero end-slopes)."""
-    t = min(max(t, 0.0), 1.0)
-    return t * t * (3.0 - 2.0 * t)
-
-
 class BoundaryLayerTarget:
     """Oriented, layer-indexed wall-clustering target ``W`` for one ring block.
 
     Realises boundary-layer clustering purely through the TMOP target: the
     wall-normal target spacing grows geometrically away from the wall
-    (``s_n(k) = first_height · growth**k``), is clamped to ``max_height`` and
-    blended toward the isotropic interior spacing over the remaining layers, and
-    is oriented from the geometry **entity** (stable even while the working mesh
-    is folded during untangling).
+    (``s_n(k) = first_height · growth**k``) until it reaches the wall-tangential
+    spacing ``s_t``, where it is capped — so far-from-wall cells ask for an
+    isotropic ``W ∝ I`` that matches the default :func:`IdentityTarget` of
+    neighbouring blocks (the shape metric is scale-invariant, so only the
+    ``s_n/s_t`` ratio acts). Orientation comes from the geometry **entity**
+    (stable even while the working mesh is folded during untangling).
 
     Called as ``target(bi, block, cell_base, corner_offset) -> (d, d)`` with
     ``det W = s_t · s_n > 0``.
@@ -64,7 +60,9 @@ class BoundaryLayerTarget:
     entity : GeometryEntity
         The wall the block face lies on (provides ``normal`` / ``tangent_space``).
     first_height : float
-        Wall-normal height of the first off-wall layer (k=0).
+        Wall-normal height of the first off-wall layer (k=0). Under a
+        scale-invariant shape metric only the ``first_height/tangential_spacing``
+        ratio is meaningful.
     growth : float
         Geometric growth ratio between successive near-wall layers.
     wall_axis : int
@@ -72,48 +70,54 @@ class BoundaryLayerTarget:
     wall_side : int
         0 = low face, 1 = high face of ``wall_axis``.
     n_layers : int
-        Number of geometrically-clustered near-wall layers before blending to
-        the isotropic interior spacing.
+        Unused; retained for backwards compatibility (the geometric growth now
+        runs until it is capped by ``interior_spacing``).
     interior_spacing : float
-        Target isotropic spacing the outer layers blend toward.
+        Cap on the wall-normal spacing; defaults to ``tangential_spacing`` so
+        the far field is isotropic.
     max_height : float, optional
         Clamp on ``s_n``.
     tangential_spacing : float, optional
         Wall-tangential target spacing ``s_t`` (defaults to ``interior_spacing``).
+    k_offset : int
+        Added to the layer index; lets a neighbouring block continue the
+        clustering profile of a wall block across their shared interface
+        (set it to the wall block's cell count along ``wall_axis``).
     """
 
     def __init__(self, entity, *, first_height, growth, wall_axis, wall_side,
-                 n_layers=8, interior_spacing=1.0, max_height=None,
-                 tangential_spacing=None):
+                 n_layers=8, interior_spacing=None, max_height=None,
+                 tangential_spacing=None, k_offset=0):
+        if interior_spacing is None and tangential_spacing is None:
+            raise ValueError(
+                "give at least one of interior_spacing / tangential_spacing")
         self.entity = entity
         self.first_height = float(first_height)
         self.growth = float(growth)
         self.wall_axis = int(wall_axis)
         self.wall_side = int(wall_side)
         self.n_layers = int(n_layers)
-        self.interior_spacing = float(interior_spacing)
+        self.tangential_spacing = float(
+            tangential_spacing if tangential_spacing is not None
+            else interior_spacing)
+        self.interior_spacing = float(
+            interior_spacing if interior_spacing is not None
+            else self.tangential_spacing)
         self.max_height = None if max_height is None else float(max_height)
-        self.tangential_spacing = (
-            float(tangential_spacing) if tangential_spacing is not None
-            else float(interior_spacing))
+        self.k_offset = int(k_offset)
 
     def normal_spacing(self, k: int) -> float:
-        """Wall-normal target spacing at layer index ``k`` (clamp + blend)."""
+        """Wall-normal target spacing at layer index ``k`` (capped growth)."""
         s_geo = self.first_height * self.growth ** k
         if self.max_height is not None:
             s_geo = min(s_geo, self.max_height)
-        if k <= self.n_layers:
-            return s_geo
-        # Blend geometrically-grown spacing toward the isotropic interior.
-        # (k just past n_layers starts the blend; far layers are isotropic.)
-        span = max(self.n_layers, 1)
-        w = _smoothstep((k - self.n_layers) / span)
-        return (1.0 - w) * s_geo + w * self.interior_spacing
+        return min(s_geo, self.interior_spacing)
 
     def _layer_index(self, block, cell_base) -> int:
         n_cells = block.logical_shape[self.wall_axis] - 1
         c = int(cell_base[self.wall_axis])
-        return c if self.wall_side == 0 else (n_cells - 1 - c)
+        k = c if self.wall_side == 0 else (n_cells - 1 - c)
+        return k + self.k_offset
 
     def _wall_anchor(self, block, cell_base):
         """Physical position of the cell corner that sits on the wall face."""
@@ -167,8 +171,34 @@ class MultiBlockTarget:
         return fn(bi, block, cell_base, corner_offset)
 
 
+def _face_tangential_spacing(topology, block_name: str, axis: int,
+                             side: int) -> float:
+    """Average corner-to-corner spacing along a block face (2D).
+
+    Distance between the face's two corner positions divided by the cell
+    count along the face — the block's natural tangential spacing.
+    """
+    spec = topology.block_specs[block_name]
+    names = spec.face_corner_names(axis, side, topology.d)
+    p0 = topology.corners[names[0]].position
+    p1 = topology.corners[names[1]].position
+    return float(np.linalg.norm(p1 - p0)) / spec.resolutions[1 - axis]
+
+
+def _neighbour_across(topology, block_name: str, axis: int, side: int):
+    """The (block_name, axis, side) face glued to the given face, or None."""
+    for conn in topology.interface_connections:
+        a, b = conn.face_a, conn.face_b
+        if (a.block_name, a.axis, a.side) == (block_name, axis, side):
+            return b.block_name, b.axis, b.side
+        if (b.block_name, b.axis, b.side) == (block_name, axis, side):
+            return a.block_name, a.axis, a.side
+    return None
+
+
 def build_boundary_layer_target(topology, grid=None, default=None,
-                                interior_spacing: float = 1.0):
+                                interior_spacing: float | None = None,
+                                blend_neighbours: bool = True):
     """Build a :class:`MultiBlockTarget` from a topology's boundary-layer specs.
 
     For every association whose entity carries a spec recorded via
@@ -177,8 +207,20 @@ def build_boundary_layer_target(topology, grid=None, default=None,
     ``first_height``/``growth``. Blocks without a spec fall back to ``default``
     (an :class:`IdentityTarget` of the topology's dimension if not given).
 
-    Returns the assembled ``target_fn``; if the topology has no specs it returns
-    ``default`` (so callers can use it unconditionally).
+    Unless the spec pins ``tangential_spacing``, each wall block uses its own
+    natural face spacing (face corner separation / cell count), so blocks of
+    different sizes along the wall keep their node distribution instead of
+    fighting over a global value. The wall-normal growth is capped at that
+    spacing, making far-from-wall cells isotropic like the default target.
+
+    With ``blend_neighbours`` (default on), a block sitting behind a wall
+    block continues the clustering profile across their shared interface
+    (via ``k_offset``) instead of jumping straight to the default target —
+    this removes the cell-size discontinuity at that interface when the
+    clustering has not decayed to isotropic within the wall block.
+
+    Returns the assembled ``target_fn``; if the topology has no specs it
+    returns ``default`` (so callers can use it unconditionally).
     """
     d = topology.d
     if default is None:
@@ -193,18 +235,52 @@ def build_boundary_layer_target(topology, grid=None, default=None,
         spec = specs.get(id(assoc.entity))
         if spec is None:
             continue
-        bi = block_names.index(assoc.face.block_name)
+        face = assoc.face
+        bi = block_names.index(face.block_name)
+        s_t = spec["tangential_spacing"]
+        if s_t is None:
+            s_t = _face_tangential_spacing(
+                topology, face.block_name, face.axis, face.side)
         per_block[bi] = BoundaryLayerTarget(
             assoc.entity,
             first_height=spec["first_height"],
             growth=spec["growth"],
-            wall_axis=assoc.face.axis,
-            wall_side=assoc.face.side,
+            wall_axis=face.axis,
+            wall_side=face.side,
             n_layers=spec["n_layers"],
             interior_spacing=interior_spacing,
             max_height=spec["max_height"],
-            tangential_spacing=spec["tangential_spacing"],
+            tangential_spacing=s_t,
         )
+
+    if blend_neighbours:
+        for bi, blt in list(per_block.items()):
+            bname = block_names[bi]
+            nb = _neighbour_across(
+                topology, bname, blt.wall_axis, 1 - blt.wall_side)
+            if nb is None:
+                continue
+            nbi = block_names.index(nb[0])
+            if nbi in per_block:
+                continue
+            wall_cells = topology.block_specs[bname].resolutions[blt.wall_axis]
+            # The profile is already isotropic at the interface — the
+            # neighbour can keep its default target.
+            if blt.normal_spacing(wall_cells) >= blt.interior_spacing:
+                continue
+            per_block[nbi] = BoundaryLayerTarget(
+                blt.entity,
+                first_height=blt.first_height,
+                growth=blt.growth,
+                wall_axis=nb[1],
+                wall_side=nb[2],
+                n_layers=blt.n_layers,
+                interior_spacing=interior_spacing,
+                max_height=blt.max_height,
+                tangential_spacing=_face_tangential_spacing(
+                    topology, nb[0], nb[1], nb[2]),
+                k_offset=wall_cells,
+            )
     return MultiBlockTarget(default, per_block)
 
 

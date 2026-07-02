@@ -159,9 +159,12 @@ def _encode_ellipse(entity) -> np.ndarray:
 
 
 def _encode_circlearc(entity) -> np.ndarray:
+    # t1 < t0 encodes a reversed traversal in Python; the C++ projection
+    # clamps to the interval, so normalise it (same point set either way).
     return np.array([
         entity.center[0], entity.center[1], entity.radius,
-        entity.t0, entity.t1, float(entity.closed),
+        min(entity.t0, entity.t1), max(entity.t0, entity.t1),
+        float(entity.closed),
     ], dtype=np.float64)
 
 
@@ -169,7 +172,8 @@ def _encode_ellipsearc(entity) -> np.ndarray:
     return np.array([
         entity.center[0], entity.center[1],
         entity.a, entity.b, entity.phi,
-        entity.t0, entity.t1, float(entity.closed),
+        min(entity.t0, entity.t1), max(entity.t0, entity.t1),
+        float(entity.closed),
     ], dtype=np.float64)
 
 
