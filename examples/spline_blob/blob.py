@@ -13,7 +13,8 @@ Pipeline: TFI init → boundary snap → TMOP quality optimisation.
 Usage::
 
     uv run blob.py [--plot-live] [--plot-energy] [--plot-grid]
-        [--plot-topology] [--device cpu|gpu|auto] [--tmop-sweeps N] [--chunk N]
+        [--plot-topology] [--export mesh.su2] [--device cpu|gpu|auto]
+        [--tmop-sweeps N] [--chunk N]
 """
 
 import argparse
@@ -81,6 +82,13 @@ def build_blob_in_rectangle():
     # two walls) stay explicit.
     for blk in ("o_s", "o_e", "o_n", "o_w"):
         b.associate(blk, 1, 1, blob)
+        b.tag_boundary("blob", blk, 1, 1)
+    # Wall associations of the e_* blocks are inferred (place_node corners);
+    # markers for SU2 export stay explicit.
+    wall_names = {id(bottom): "bottom", id(right): "right",
+                  id(top): "top", id(left): "left"}
+    for blk, ent in [("e_s", bottom), ("e_e", right), ("e_n", top), ("e_w", left)]:
+        b.tag_boundary(wall_names[id(ent)], blk, 1, 0)
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_se", bottom, right),
@@ -89,6 +97,8 @@ def build_blob_in_rectangle():
     ]:
         b.associate(blk, 0, 0, a0)
         b.associate(blk, 1, 0, a1)
+        b.tag_boundary(wall_names[id(a0)], blk, 0, 0)
+        b.tag_boundary(wall_names[id(a1)], blk, 1, 0)
 
     topology = b.build()
     entities = {
@@ -113,6 +123,9 @@ def main():
                    help="Plot the declared topology only — no pipeline run")
     p.add_argument("--colour-edge-verts", action="store_true",
                    help="Toggle blue/red edge-vertex spheres in live plot")
+    p.add_argument("--export", metavar="FILE",
+                   help="write the final grid as an SU2 mesh (markers: blob, "
+                        "bottom, right, top, left)")
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
     p.add_argument("--tmop-sweeps", type=int, default=40)
     p.add_argument("--sweeps-per-delta", type=int, default=20)
@@ -177,6 +190,12 @@ def main():
             ax[1].set(title="min det A (TMOP only)", xlabel="chunk")
             plt.tight_layout()
             plt.show()
+
+    if a.export:
+        from egg.io import export_su2
+
+        export_su2(grid, a.export)
+        print(f"Exported SU2 mesh to {a.export}")
 
     print("Done.")
 

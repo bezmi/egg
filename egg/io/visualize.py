@@ -215,6 +215,15 @@ def plot_topology(
 
     import pyvista as pv
 
+    # Marker sizes scale with the topology extent so mm-scale and m-scale
+    # geometries render alike.
+    positions = np.array([c.position for c in topology.corners.values()])
+    span = float(np.linalg.norm(positions.max(axis=0) - positions.min(axis=0)))
+    if span <= 0.0:
+        span = 1.0
+    corner_radius = 0.015 * span
+    singularity_size = 0.03 * span
+
     for name, spec in topology.block_specs.items():
         corner_positions = []
         for cname in spec.corner_names:
@@ -247,7 +256,7 @@ def plot_topology(
     for name, corner in topology.corners.items():
         pos = np.append(corner.position, 0.0) if len(corner.position) == 2 else corner.position
         color = "blue" if corner.fixed else "green"
-        sphere = pv.Sphere(radius=0.08, center=pos)
+        sphere = pv.Sphere(radius=corner_radius, center=pos)
         plotter.add_mesh(sphere, color=color)
         plotter.add_point_labels(
             np.array([pos]), [name], font_size=12, point_size=0,
@@ -274,10 +283,11 @@ def plot_topology(
                     break
             if pos is None:
                 pos = np.zeros(3)
-            box = pv.Cube(center=pos, x_length=0.16, y_length=0.16, z_length=0.16)
+            box = pv.Cube(center=pos, x_length=singularity_size,
+                          y_length=singularity_size, z_length=singularity_size)
             plotter.add_mesh(box, color="red", style="wireframe", line_width=2)
             plotter.add_point_labels(
-                np.array([pos + np.array([0.15, 0.1, 0.0])]),
+                np.array([pos + np.array([singularity_size, 0.6 * singularity_size, 0.0])]),
                 [f"v={s.valence}"],
                 font_size=10, point_size=0, always_visible=True,
             )
