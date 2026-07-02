@@ -27,6 +27,9 @@ inline constexpr Tag TAG_QUADBEZIER = 8;
 inline constexpr Tag TAG_CUBICBEZIER = 9;
 inline constexpr Tag TAG_BSPLINE = 10;
 inline constexpr Tag TAG_COMPOSITE = 11;
+inline constexpr Tag TAG_CYLINDER = 12;     // 3D surface
+inline constexpr Tag TAG_LINE3 = 13;        // 3D edge curve
+inline constexpr Tag TAG_BSPLINESURF = 14;  // 3D tensor-product B-spline/NURBS surface
 
 inline constexpr int kParamPad = 12;
 /// @brief Arena record size of one composite-path segment: `[tag, params(kParamPad)]`.
@@ -146,15 +149,53 @@ template <> struct Trim<1> {
 };
 
 /// @brief Surface trim: a UV polygon (outer loop minus holes), arena-backed.
-/// @note Method bodies are defined alongside the 3D surface parametrizations that use them;
-///       no 2D entity feeds `Trim<2>`.
+///        Empty spans mean "untrimmed" (the surface's full natural range).
 template <> struct Trim<2> {
     std::span<const PtN<2>> verts;  ///< All loop vertices, concatenated.
     std::span<const int> loops;     ///< Offset table: [outer | hole0 | ... | end].
-    /// @brief Even–odd inside test against the outer loop minus holes.
-    [[nodiscard]] bool contains(Param<2> uv) const;
-    /// @brief Nearest point on the loop polylines.
-    [[nodiscard]] Param<2> clamp(Param<2> uv) const;
+    /// @brief Even–odd inside test over all loops (outer minus holes).
+    ///        Untrimmed (no loops) always contains.
+    [[nodiscard]] bool contains(Param<2> uv) const
+    {
+        if (loops.size() < 2) { return true; }
+        bool inside = false;
+        for (std::size_t l = 0; l + 1 < loops.size(); ++l) {
+            const int lo = loops[l], hi = loops[l + 1];
+            for (int i = lo, j = hi - 1; i < hi; j = i++) {
+                const PtN<2>&a = verts[i], &b = verts[j];
+                // Even–odd ray cast in +u from uv.
+                if ((a[1] > uv[1]) != (b[1] > uv[1]) &&
+                    uv[0] < ((b[0] - a[0]) * (uv[1] - a[1]) / (b[1] - a[1])) + a[0]) {
+                    inside = !inside;
+                }
+            }
+        }
+        return inside;
+    }
+    /// @brief Nearest point on the loop polylines (closed loops).
+    [[nodiscard]] Param<2> clamp(Param<2> uv) const
+    {
+        Param<2> best = uv;
+        double best_d = std::numeric_limits<double>::infinity();
+        for (std::size_t l = 0; l + 1 < loops.size(); ++l) {
+            const int lo = loops[l], hi = loops[l + 1];
+            for (int i = lo, j = hi - 1; i < hi; j = i++) {
+                const PtN<2>&a = verts[j], &b = verts[i];
+                const VecN<2> ab = b - a;
+                const double ab_sq = dot(ab, ab);
+                double t = ab_sq > 1e-30 ? dot(PtN<2> {uv[0], uv[1]} - a, ab) / ab_sq : 0.0;
+                t = std::clamp(t, 0.0, 1.0);
+                const PtN<2> q = a + t * ab;
+                const VecN<2> dq = q - PtN<2> {uv[0], uv[1]};
+                const double dd = dot(dq, dq);
+                if (dd < best_d) {
+                    best_d = dd;
+                    best = {q[0], q[1]};
+                }
+            }
+        }
+        return best;
+    }
 };
 
 /// @brief The generic trimmed entity: any @ref Parametrization restricted to its k-region trim.
@@ -500,112 +541,146 @@ inline constexpr int kMaxBSplineDegree = 7;
 /// @brief Leading dimension of the de Boor basis/derivative work arrays.
 inline constexpr int kBSplineCap = kMaxBSplineDegree + 1;
 
-/// @brief A non-rational B-spline curve over a knot vector and a flat control net.
+/// @brief Index of the knot span containing @p u (clamped to the live domain).
+/// @param degree Basis degree @f$ p @f$.
+/// @param n_ctrl Number of control points along this direction.
+/// @param knots Knot vector, length @c n_ctrl+degree+1, non-decreasing.
+/// @param u Parameter.
+/// @return The span index @f$ i @f$ with @f$ knots[i] \le u < knots[i+1] @f$.
+inline int bspline_find_span(int degree, int n_ctrl, std::span<const double> knots, double u)
+{
+    const int p = degree;
+    const int n = n_ctrl - 1;
+    if (u >= knots[n + 1]) { return n; }
+    if (u <= knots[p]) { return p; }
+    int lo = p, hi = n + 1, mid = (lo + hi) / 2;
+    while (u < knots[mid] || u >= knots[mid + 1]) {
+        if (u < knots[mid]) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+        mid = (lo + hi) / 2;
+    }
+    return mid;
+}
+
+/// @brief Nonzero basis functions and their derivatives at @p u (NURBS book A2.3).
 ///
-/// The control points and knots live in spans over a device arena (never owned),
-/// so the type stays trivially copyable. Evaluation and derivatives use the
-/// de Boor basis-function recurrence (the basis derivatives are also reused by the
-/// tensor-product surface evaluation). Weights/NURBS are a future extension — the
-/// control span is interleaved @f$ (x, y) @f$ pairs, with no weight column yet.
+/// Written once at "one parametric direction" arity: the curve uses it directly
+/// and the tensor-product surface calls it per direction.
+/// @param degree Basis degree @f$ p @f$.
+/// @param knots Knot vector.
+/// @param span Knot span containing @p u (from @ref bspline_find_span).
+/// @param u Parameter.
+/// @param nd Highest derivative order to compute.
+/// @param ders Output: `ders[k][j]` is the k-th derivative of the j-th nonzero
+///             basis function, @f$ k = 0..nd @f$, @f$ j = 0..degree @f$.
+inline void bspline_basis_ders(
+  int degree, std::span<const double> knots, int span, double u, int nd, double ders[][kBSplineCap])
+{
+    const int p = degree;
+    double ndu[kBSplineCap][kBSplineCap];
+    double a[2][kBSplineCap];
+    double left[kBSplineCap], right[kBSplineCap];
+    ndu[0][0] = 1.0;
+    for (int j = 1; j <= p; ++j) {
+        left[j] = u - knots[span + 1 - j];
+        right[j] = knots[span + j] - u;
+        double saved = 0.0;
+        for (int r = 0; r < j; ++r) {
+            ndu[j][r] = right[r + 1] + left[j - r];
+            const double temp = ndu[r][j - 1] / ndu[j][r];
+            ndu[r][j] = saved + (right[r + 1] * temp);
+            saved = left[j - r] * temp;
+        }
+        ndu[j][j] = saved;
+    }
+    for (int j = 0; j <= p; ++j) { ders[0][j] = ndu[j][p]; }
+    for (int r = 0; r <= p; ++r) {
+        int s1 = 0, s2 = 1;
+        a[0][0] = 1.0;
+        for (int k = 1; k <= nd; ++k) {
+            double d = 0.0;
+            const int rk = r - k, pk = p - k;
+            if (r >= k) {
+                a[s2][0] = a[s1][0] / ndu[pk + 1][rk];
+                d = a[s2][0] * ndu[rk][pk];
+            }
+            const int j1 = (rk >= -1) ? 1 : -rk;
+            const int j2 = (r - 1 <= pk) ? k - 1 : p - r;
+            for (int j = j1; j <= j2; ++j) {
+                a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[pk + 1][rk + j];
+                d += a[s2][j] * ndu[rk + j][pk];
+            }
+            if (r <= pk) {
+                a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r];
+                d += a[s2][k] * ndu[r][pk];
+            }
+            ders[k][r] = d;
+            const int tmp = s1;
+            s1 = s2;
+            s2 = tmp;
+        }
+    }
+    int fac = p;
+    for (int k = 1; k <= nd; ++k) {
+        for (int j = 0; j <= p; ++j) { ders[k][j] *= fac; }
+        fac *= (p - k);
+    }
+}
+
+/// @brief A B-spline / NURBS curve over a knot vector and a flat control net.
+///
+/// The control points, knots, and (optional) weights live in spans over a
+/// device arena (never owned), so the type stays trivially copyable. Evaluation
+/// and derivatives use the de Boor basis-function recurrence. An empty
+/// @c weights span selects the polynomial path; a non-empty one (length
+/// @c n_ctrl) evaluates the rational form via homogeneous sums
+/// @f$ A(u) = \sum N_i w_i P_i @f$, @f$ w(u) = \sum N_i w_i @f$ and the
+/// quotient rule for @f$ C = A/w @f$ and its first two derivatives.
 struct BSplineCurveParam {
     static constexpr int edim = 2, idim = 1;
-    int degree;                     ///< Polynomial degree @f$ p @f$.
-    int n_ctrl;                     ///< Number of control points @f$ n+1 @f$.
-    std::span<const double> knots;  ///< Knot vector, length @c n_ctrl+degree+1, non-decreasing.
-    std::span<const double> ctrl;   ///< Control points, length @c 2*n_ctrl (x,y interleaved).
+    int degree;                       ///< Basis degree @f$ p @f$.
+    int n_ctrl;                       ///< Number of control points @f$ n+1 @f$.
+    std::span<const double> knots;    ///< Knot vector, length @c n_ctrl+degree+1.
+    std::span<const double> ctrl;     ///< Control points, length @c 2*n_ctrl (x,y interleaved).
+    std::span<const double> weights;  ///< NURBS weights, length @c n_ctrl, or empty (polynomial).
 
     /// @brief Control point @p i as a 2D point.
     [[nodiscard]] PtN<2> cp(int i) const { return {ctrl[2 * i], ctrl[(2 * i) + 1]}; }
 
-    /// @brief Index of the knot span containing @p u (clamped to the live domain).
-    /// @param u Curve parameter.
-    /// @return The span index @f$ i @f$ with @f$ knots[i] \le u < knots[i+1] @f$.
-    [[nodiscard]] int find_span(double u) const
-    {
-        const int p = degree;
-        const int n = n_ctrl - 1;
-        if (u >= knots[n + 1]) { return n; }
-        if (u <= knots[p]) { return p; }
-        int lo = p, hi = n + 1, mid = (lo + hi) / 2;
-        while (u < knots[mid] || u >= knots[mid + 1]) {
-            if (u < knots[mid]) {
-                hi = mid;
-            } else {
-                lo = mid;
-            }
-            mid = (lo + hi) / 2;
-        }
-        return mid;
-    }
-
-    /// @brief Nonzero basis functions and their derivatives at @p u (NURBS book A2.3).
-    /// @param span Knot span containing @p u (from @ref find_span).
-    /// @param u Curve parameter.
-    /// @param nd Highest derivative order to compute.
-    /// @param ders Output: `ders[k][j]` is the k-th derivative of the j-th nonzero
-    ///             basis function, @f$ k = 0..nd @f$, @f$ j = 0..degree @f$.
-    void basis_ders(int span, double u, int nd, double ders[][kBSplineCap]) const
-    {
-        const int p = degree;
-        double ndu[kBSplineCap][kBSplineCap];
-        double a[2][kBSplineCap];
-        double left[kBSplineCap], right[kBSplineCap];
-        ndu[0][0] = 1.0;
-        for (int j = 1; j <= p; ++j) {
-            left[j] = u - knots[span + 1 - j];
-            right[j] = knots[span + j] - u;
-            double saved = 0.0;
-            for (int r = 0; r < j; ++r) {
-                ndu[j][r] = right[r + 1] + left[j - r];
-                const double temp = ndu[r][j - 1] / ndu[j][r];
-                ndu[r][j] = saved + (right[r + 1] * temp);
-                saved = left[j - r] * temp;
-            }
-            ndu[j][j] = saved;
-        }
-        for (int j = 0; j <= p; ++j) { ders[0][j] = ndu[j][p]; }
-        for (int r = 0; r <= p; ++r) {
-            int s1 = 0, s2 = 1;
-            a[0][0] = 1.0;
-            for (int k = 1; k <= nd; ++k) {
-                double d = 0.0;
-                const int rk = r - k, pk = p - k;
-                if (r >= k) {
-                    a[s2][0] = a[s1][0] / ndu[pk + 1][rk];
-                    d = a[s2][0] * ndu[rk][pk];
-                }
-                const int j1 = (rk >= -1) ? 1 : -rk;
-                const int j2 = (r - 1 <= pk) ? k - 1 : p - r;
-                for (int j = j1; j <= j2; ++j) {
-                    a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[pk + 1][rk + j];
-                    d += a[s2][j] * ndu[rk + j][pk];
-                }
-                if (r <= pk) {
-                    a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r];
-                    d += a[s2][k] * ndu[r][pk];
-                }
-                ders[k][r] = d;
-                const int tmp = s1;
-                s1 = s2;
-                s2 = tmp;
-            }
-        }
-        int fac = p;
-        for (int k = 1; k <= nd; ++k) {
-            for (int j = 0; j <= p; ++j) { ders[k][j] *= fac; }
-            fac *= (p - k);
-        }
-    }
-
     /// @brief The @p order-th derivative point at @p u (order 0 = the curve point).
     [[nodiscard]] PtN<2> point_at(double u, int order) const
     {
-        const int span = find_span(u);
+        const int span = bspline_find_span(degree, n_ctrl, knots, u);
         double ders[3][kBSplineCap];
-        basis_ders(span, u, order, ders);
-        PtN<2> acc {0.0, 0.0};
-        for (int j = 0; j <= degree; ++j) { acc = acc + (ders[order][j] * cp(span - degree + j)); }
-        return acc;
+        bspline_basis_ders(degree, knots, span, u, order, ders);
+        if (weights.empty()) {
+            PtN<2> acc {0.0, 0.0};
+            for (int j = 0; j <= degree; ++j) {
+                acc = acc + (ders[order][j] * cp(span - degree + j));
+            }
+            return acc;
+        }
+        // Rational: homogeneous derivatives A^(k) = Σ N^(k) w P, w^(k) = Σ N^(k) w,
+        // then the quotient rule (orders 0..2):
+        //   C = A/w; C' = (A' − w'C)/w; C'' = (A'' − 2w'C' − w''C)/w.
+        PtN<2> A[3] {};
+        double w[3] {};
+        for (int k = 0; k <= order; ++k) {
+            for (int j = 0; j <= degree; ++j) {
+                const int i = span - degree + j;
+                const double nw = ders[k][j] * weights[i];
+                A[k] = A[k] + (nw * cp(i));
+                w[k] += nw;
+            }
+        }
+        PtN<2> C[3];
+        C[0] = (1.0 / w[0]) * A[0];
+        if (order >= 1) { C[1] = (1.0 / w[0]) * (A[1] - w[1] * C[0]); }
+        if (order >= 2) { C[2] = (1.0 / w[0]) * (A[2] - 2.0 * w[1] * C[1] - w[2] * C[0]); }
+        return C[order];
     }
 
     /// @brief Evaluate the curve point @f$ C(u) @f$.
@@ -651,6 +726,259 @@ struct CompositePath {
     [[nodiscard]] std::array<Vec, 1> tangent_basis(const Pt& p) const
     { return project_frame(p).basis; }
 };
+
+// ---------------------------------------------------------------------------
+// 3D surface / edge-curve parametrizations. Each is a Parametrization at
+// edim=3: surfaces have idim=2 (tdim==2 in TrimmedEntity, exercising the K=2
+// Gram–Schmidt branch of orthonormalize and the 2×2 reduced newton_delta);
+// edge curves have idim=1. Axis frames (ax, ay[, az]) are orthonormal; az is
+// derived as ax × ay at the make_entity boundary so the upload blob stays
+// within kParamPad.
+// ---------------------------------------------------------------------------
+
+/// @brief Cross product of two 3-vectors.
+inline VecN<3> cross3(const VecN<3>& a, const VecN<3>& b)
+{
+    return {(a[1] * b[2]) - (a[2] * b[1]),
+            (a[2] * b[0]) - (a[0] * b[2]),
+            (a[0] * b[1]) - (a[1] * b[0])};
+}
+
+/// @brief A plane through @c o spanned by the orthonormal axes @c ax, @c ay.
+struct PlaneParam {
+    static constexpr int edim = 3, idim = 2;
+    PtN<3> o;        ///< Origin.
+    VecN<3> ax, ay;  ///< Orthonormal in-plane axes.
+    /// @brief Inverse: the in-plane coordinates of @p p.
+    [[nodiscard]] Param<2> invert(const PtN<3>& p) const
+    {
+        const VecN<3> d = p - o;
+        return {dot(d, ax), dot(d, ay)};
+    }
+    /// @brief Evaluate @f$ O + u\,a_x + v\,a_y @f$.
+    [[nodiscard]] PtN<3> eval(const Param<2>& q) const { return o + q[0] * ax + q[1] * ay; }
+    /// @brief The constant tangent columns @f$ \{a_x, a_y\} @f$.
+    [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>&) const { return {ax, ay}; }
+};
+
+/// @brief A sphere of radius @c r centred at @c c with orthonormal frame
+///        @c (ax, ay, az); chart @f$ (u, v) @f$ = (azimuth, latitude).
+struct SphereParam {
+    static constexpr int edim = 3, idim = 2;
+    PtN<3> c;            ///< Centre.
+    VecN<3> ax, ay, az;  ///< Orthonormal frame.
+    double r;            ///< Radius.
+    /// @brief Inverse: azimuth/latitude of the radial direction of @p p.
+    [[nodiscard]] Param<2> invert(const PtN<3>& p) const
+    {
+        const VecN<3> m = normalize(p - c);
+        return {std::atan2(dot(m, ay), dot(m, ax)), std::asin(std::clamp(dot(m, az), -1.0, 1.0))};
+    }
+    /// @brief Evaluate @f$ C + r(\cos v\cos u\,a_x + \cos v\sin u\,a_y + \sin v\,a_z) @f$.
+    [[nodiscard]] PtN<3> eval(const Param<2>& q) const
+    {
+        const double cu = std::cos(q[0]), su = std::sin(q[0]);
+        const double cv = std::cos(q[1]), sv = std::sin(q[1]);
+        return c + r * (cv * cu * ax + cv * su * ay + sv * az);
+    }
+    /// @brief The raw tangent columns @f$ \partial S/\partial u, \partial S/\partial v @f$.
+    [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
+    {
+        const double cu = std::cos(q[0]), su = std::sin(q[0]);
+        const double cv = std::cos(q[1]), sv = std::sin(q[1]);
+        return {r * (cv * -su * ax + cv * cu * ay), r * (-sv * cu * ax - sv * su * ay + cv * az)};
+    }
+};
+
+/// @brief A right circular cylinder: axis @c az through @c o, radius @c r;
+///        chart @f$ (u, v) @f$ = (angle about the axis, height along it).
+struct CylinderParam {
+    static constexpr int edim = 3, idim = 2;
+    PtN<3> o;            ///< A point on the axis.
+    VecN<3> ax, ay, az;  ///< Orthonormal frame; @c az is the axis.
+    double r;            ///< Radius.
+    /// @brief Inverse: angle about the axis and height along it.
+    [[nodiscard]] Param<2> invert(const PtN<3>& p) const
+    {
+        const VecN<3> d = p - o;
+        return {std::atan2(dot(d, ay), dot(d, ax)), dot(d, az)};
+    }
+    /// @brief Evaluate @f$ O + r(\cos u\,a_x + \sin u\,a_y) + v\,a_z @f$.
+    [[nodiscard]] PtN<3> eval(const Param<2>& q) const
+    { return o + r * (std::cos(q[0]) * ax + std::sin(q[0]) * ay) + q[1] * az; }
+    /// @brief The raw tangent columns.
+    [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
+    { return {r * (-std::sin(q[0]) * ax + std::cos(q[0]) * ay), az}; }
+};
+
+/// @brief A 3D line through @c p0 and @c p1 (an edge curve, tdim==1).
+struct Line3Param {
+    static constexpr int edim = 3, idim = 1;
+    PtN<3> p0, p1;  ///< Endpoints.
+    /// @brief Foot-of-projection parameter (unclamped; `Trim<1>` clamps).
+    [[nodiscard]] Param<1> invert(const PtN<3>& q) const
+    {
+        const VecN<3> ab = p1 - p0;
+        return {dot(q - p0, ab) / std::fmax(dot(ab, ab), 1e-30)};
+    }
+    /// @brief Evaluate @f$ P_0 + t(P_1 - P_0) @f$.
+    [[nodiscard]] PtN<3> eval(const Param<1>& t) const { return p0 + t[0] * (p1 - p0); }
+    /// @brief The (constant) raw tangent column.
+    [[nodiscard]] std::array<VecN<3>, 1> frame(const Param<1>&) const { return {p1 - p0}; }
+};
+
+/// @brief A tensor-product B-spline / NURBS surface @f$ S(u,v) @f$ embedded in 3D.
+///
+/// Knots, the control net, and (optional) weights live in spans over a device
+/// arena (never owned). The control net is row-major over @f$ (i_u, i_v) @f$
+/// with xyz interleaved. An empty @c weights span selects the polynomial path;
+/// a non-empty one (length @c nu*nv) evaluates the rational form via the
+/// homogeneous sums @f$ A(u,v) = \sum N_i N_j w_{ij} P_{ij} @f$,
+/// @f$ w(u,v) = \sum N_i N_j w_{ij} @f$ and the bivariate quotient rule.
+/// The inverse is a coarse-grid-seeded Newton iteration on the nearest-foot
+/// stationarity @f$ (S-p)\cdot S_u = (S-p)\cdot S_v = 0 @f$ (the surface-arity
+/// instantiation of the curve projector).
+struct BSplineSurfaceParam {
+    static constexpr int edim = 3, idim = 2;
+    int pu, pv;                       ///< Basis degrees in u and v.
+    int nu, nv;                       ///< Control-net extents in u and v.
+    std::span<const double> knots_u;  ///< Knot vector in u, length @c nu+pu+1.
+    std::span<const double> knots_v;  ///< Knot vector in v, length @c nv+pv+1.
+    std::span<const double> ctrl;     ///< Control net, length @c 3*nu*nv (xyz interleaved).
+    std::span<const double> weights;  ///< NURBS weights, length @c nu*nv, or empty.
+
+    /// @brief Control point @f$ P_{i_u, i_v} @f$.
+    [[nodiscard]] PtN<3> cp(int iu, int iv) const
+    {
+        const int b = 3 * ((iu * nv) + iv);
+        return {ctrl[b], ctrl[b + 1], ctrl[b + 2]};
+    }
+
+    /// @brief All partial derivatives @f$ S^{(a,b)} = \partial^{a+b}S/\partial u^a \partial v^b @f$
+    ///        for @f$ a, b \le nd @f$ (the fused evaluation all callers share).
+    /// @param q Surface parameters @f$ (u, v) @f$.
+    /// @param nd Highest per-direction derivative order (0, 1, or 2).
+    /// @param S Output: `S[a][b]` is @f$ S^{(a,b)} @f$; entries with
+    ///          @f$ a + b > nd \cdot 2 @f$ beyond what the quotient rule below
+    ///          fills are untouched.
+    void ders(const Param<2>& q, int nd, PtN<3> S[3][3]) const
+    {
+        const int su = bspline_find_span(pu, nu, knots_u, q[0]);
+        const int sv = bspline_find_span(pv, nv, knots_v, q[1]);
+        double du[3][kBSplineCap], dv[3][kBSplineCap];
+        bspline_basis_ders(pu, knots_u, su, q[0], nd, du);
+        bspline_basis_ders(pv, knots_v, sv, q[1], nd, dv);
+
+        // Homogeneous tensor-product sums A^(a,b) (and w^(a,b) when rational).
+        PtN<3> A[3][3] {};
+        double w[3][3] {};
+        for (int a = 0; a <= nd; ++a) {
+            for (int b = 0; b <= nd; ++b) {
+                PtN<3> acc {};
+                double wacc = 0.0;
+                for (int i = 0; i <= pu; ++i) {
+                    const int iu = su - pu + i;
+                    for (int j = 0; j <= pv; ++j) {
+                        const int iv = sv - pv + j;
+                        const double nij = du[a][i] * dv[b][j];
+                        if (weights.empty()) {
+                            acc = acc + (nij * cp(iu, iv));
+                        } else {
+                            const double nw = nij * weights[(iu * nv) + iv];
+                            acc = acc + (nw * cp(iu, iv));
+                            wacc += nw;
+                        }
+                    }
+                }
+                A[a][b] = acc;
+                w[a][b] = wacc;
+            }
+        }
+        if (weights.empty()) {
+            for (int a = 0; a <= nd; ++a) {
+                for (int b = 0; b <= nd; ++b) { S[a][b] = A[a][b]; }
+            }
+            return;
+        }
+        // Bivariate quotient rule for S = A/w, up to second order per direction.
+        const double iw = 1.0 / w[0][0];
+        S[0][0] = iw * A[0][0];
+        if (nd >= 1) {
+            S[1][0] = iw * (A[1][0] - w[1][0] * S[0][0]);
+            S[0][1] = iw * (A[0][1] - w[0][1] * S[0][0]);
+            S[1][1] = iw * (A[1][1] - w[1][0] * S[0][1] - w[0][1] * S[1][0] - w[1][1] * S[0][0]);
+        }
+        if (nd >= 2) {
+            S[2][0] = iw * (A[2][0] - 2.0 * w[1][0] * S[1][0] - w[2][0] * S[0][0]);
+            S[0][2] = iw * (A[0][2] - 2.0 * w[0][1] * S[0][1] - w[0][2] * S[0][0]);
+        }
+    }
+
+    /// @brief Evaluate the surface point @f$ S(u, v) @f$.
+    [[nodiscard]] PtN<3> eval(const Param<2>& q) const
+    {
+        PtN<3> S[3][3];
+        ders(q, 0, S);
+        return S[0][0];
+    }
+
+    /// @brief The raw tangent columns @f$ \{S_u, S_v\} @f$.
+    [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
+    {
+        PtN<3> S[3][3];
+        ders(q, 1, S);
+        return {S[1][0], S[0][1]};
+    }
+
+    /// @brief Inverse: coarse-grid-seeded Newton on the nearest-foot stationarity.
+    ///
+    /// Seeds from an 8×8 sample of the live domain, then iterates Newton on
+    /// @f$ F = ((S-p)\cdot S_u, (S-p)\cdot S_v) @f$ with the exact Jacobian
+    /// (needs the second partials), clamping each iterate to the domain. A
+    /// near-singular Jacobian (e.g. at a degenerate corner) stops early.
+    [[nodiscard]] Param<2> invert(const PtN<3>& p) const
+    {
+        const double u0 = knots_u[pu], u1 = knots_u[nu];
+        const double v0 = knots_v[pv], v1 = knots_v[nv];
+        constexpr int kSeed = 8;
+        Param<2> q {u0, v0};
+        double best = std::numeric_limits<double>::infinity();
+        for (int i = 0; i <= kSeed; ++i) {
+            for (int j = 0; j <= kSeed; ++j) {
+                const Param<2> t {u0 + (((u1 - u0) * i) / kSeed), v0 + (((v1 - v0) * j) / kSeed)};
+                const VecN<3> d = eval(t) - p;
+                const double dd = dot(d, d);
+                if (dd < best) {
+                    best = dd;
+                    q = t;
+                }
+            }
+        }
+        for (int it = 0; it < 12; ++it) {
+            PtN<3> S[3][3];
+            ders(q, 2, S);
+            const VecN<3> d = S[0][0] - p;
+            const double f1 = dot(d, S[1][0]), f2 = dot(d, S[0][1]);
+            const double j11 = dot(S[1][0], S[1][0]) + dot(d, S[2][0]);
+            const double j12 = dot(S[1][0], S[0][1]) + dot(d, S[1][1]);
+            const double j22 = dot(S[0][1], S[0][1]) + dot(d, S[0][2]);
+            const double det = (j11 * j22) - (j12 * j12);
+            if (std::fabs(det) < 1e-30) { break; }
+            q[0] = std::clamp(q[0] - (((j22 * f1) - (j12 * f2)) / det), u0, u1);
+            q[1] = std::clamp(q[1] - (((-j12 * f1) + (j11 * f2)) / det), v0, v1);
+        }
+        return q;
+    }
+};
+
+static_assert(Parametrization<PlaneParam> && Parametrization<SphereParam> &&
+              Parametrization<CylinderParam> && Parametrization<Line3Param> &&
+              Parametrization<BSplineSurfaceParam>);
+static_assert(GeometryEntity<Free<3>> && GeometryEntity<TrimmedEntity<PlaneParam>> &&
+              GeometryEntity<TrimmedEntity<SphereParam>> &&
+              GeometryEntity<TrimmedEntity<CylinderParam>> &&
+              GeometryEntity<TrimmedEntity<Line3Param>> &&
+              GeometryEntity<TrimmedEntity<BSplineSurfaceParam>>);
 
 static_assert(Parametrization<LineParam> && Parametrization<CircleArcParam> &&
               Parametrization<EllipseArcParam> && Parametrization<QuadBezierParam> &&
@@ -741,8 +1069,9 @@ template <> struct decode_entity_fn<TrimmedEntity<CubicBezierParam>> {
 template <> struct decode_entity_fn<TrimmedEntity<BSplineCurveParam>> {
     [[nodiscard]] static TrimmedEntity<BSplineCurveParam> apply(const double* p, const double* arena)
     {
-        // Blob: [degree, n_ctrl, knot_off, ctrl_off, t0, t1]; knots/control points
-        // live in the arena. Counts derive from degree and n_ctrl.
+        // Blob: [degree, n_ctrl, knot_off, ctrl_off, t0, t1, w_off, has_w];
+        // knots/control points/weights live in the arena. Counts derive from
+        // degree and n_ctrl; has_w == 0 selects the polynomial path.
         const int degree = static_cast<int>(p[0]);
         const int n_ctrl = static_cast<int>(p[1]);
         const auto knot_off = static_cast<std::size_t>(p[2]);
@@ -750,11 +1079,16 @@ template <> struct decode_entity_fn<TrimmedEntity<BSplineCurveParam>> {
         const auto n_knots =
           static_cast<std::size_t>(n_ctrl) + static_cast<std::size_t>(degree) + 1;
         const auto n_ctrl_d = 2 * static_cast<std::size_t>(n_ctrl);
+        const bool has_w = p[7] != 0.0;
+        const auto w_off = static_cast<std::size_t>(p[6]);
         return TrimmedEntity<BSplineCurveParam> {
           .param = {.degree = degree,
                     .n_ctrl = n_ctrl,
                     .knots = {arena + knot_off, n_knots},
-                    .ctrl = {arena + ctrl_off, n_ctrl_d}},
+                    .ctrl = {arena + ctrl_off, n_ctrl_d},
+                    .weights = has_w ? std::span<const double> {arena + w_off,
+                                                                static_cast<std::size_t>(n_ctrl)}
+                                     : std::span<const double> {}},
           .trim = {.t0 = p[4], .t1 = p[5], .closed = false}};
     }
 };
@@ -768,6 +1102,84 @@ template <> struct decode_entity_fn<CompositePath> {
           .n_segs = n_segs,
           .recs = {arena + rec_off, static_cast<std::size_t>(n_segs) * kCompositeRecSize},
           .arena = arena};
+    }
+};
+
+// 3D entity decoders — the per-type builders for the D==3 entity set. Surface
+// blobs carry the axis frame as (o/c, ax, ay[, r]); az is derived as ax × ay
+// here. Surfaces are untrimmed (empty `Trim<2>`) until the CAD importer bakes
+// UV trim polygons into the arena. The blob layouts match the Python
+// `entity_encoding` encoder and the `EntitySoA<E>` specializations below.
+template <> struct decode_entity_fn<Free<3>> {
+    [[nodiscard]] static Free<3> apply(const double*, const double*) { return Free<3> {}; }
+};
+template <> struct decode_entity_fn<TrimmedEntity<PlaneParam>> {
+    [[nodiscard]] static TrimmedEntity<PlaneParam> apply(const double* p, const double*)
+    {
+        // Blob: [o(3), ax(3), ay(3)].
+        const auto pt = [&](int i) { return PtN<3> {p[i], p[i + 1], p[i + 2]}; };
+        return TrimmedEntity<PlaneParam> {.param = {.o = pt(0), .ax = pt(3), .ay = pt(6)},
+                                          .trim = {}};
+    }
+};
+template <> struct decode_entity_fn<TrimmedEntity<SphereParam>> {
+    [[nodiscard]] static TrimmedEntity<SphereParam> apply(const double* p, const double*)
+    {
+        // Blob: [c(3), r, ax(3), ay(3)].
+        const auto pt = [&](int i) { return PtN<3> {p[i], p[i + 1], p[i + 2]}; };
+        const VecN<3> ax = pt(4), ay = pt(7);
+        return TrimmedEntity<SphereParam> {
+          .param = {.c = pt(0), .ax = ax, .ay = ay, .az = cross3(ax, ay), .r = p[3]},
+          .trim = {}};
+    }
+};
+template <> struct decode_entity_fn<TrimmedEntity<CylinderParam>> {
+    [[nodiscard]] static TrimmedEntity<CylinderParam> apply(const double* p, const double*)
+    {
+        // Blob: [o(3), ax(3), ay(3), r].
+        const auto pt = [&](int i) { return PtN<3> {p[i], p[i + 1], p[i + 2]}; };
+        const VecN<3> ax = pt(3), ay = pt(6);
+        return TrimmedEntity<CylinderParam> {
+          .param = {.o = pt(0), .ax = ax, .ay = ay, .az = cross3(ax, ay), .r = p[9]},
+          .trim = {}};
+    }
+};
+template <> struct decode_entity_fn<TrimmedEntity<Line3Param>> {
+    [[nodiscard]] static TrimmedEntity<Line3Param> apply(const double* p, const double*)
+    {
+        // Blob: [p0(3), p1(3), t0, t1].
+        const auto pt = [&](int i) { return PtN<3> {p[i], p[i + 1], p[i + 2]}; };
+        return TrimmedEntity<Line3Param> {
+          .param = {.p0 = pt(0), .p1 = pt(3)},
+          .trim = {.t0 = p[6], .t1 = p[7], .closed = false}};
+    }
+};
+template <> struct decode_entity_fn<TrimmedEntity<BSplineSurfaceParam>> {
+    [[nodiscard]] static TrimmedEntity<BSplineSurfaceParam> apply(const double* p, const double* arena)
+    {
+        // Blob: [pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w];
+        // knots/control net/weights live in the arena.
+        const int pu = static_cast<int>(p[0]);
+        const int pv = static_cast<int>(p[1]);
+        const int nu = static_cast<int>(p[2]);
+        const int nv = static_cast<int>(p[3]);
+        const auto ku_off = static_cast<std::size_t>(p[4]);
+        const auto kv_off = static_cast<std::size_t>(p[5]);
+        const auto ctrl_off = static_cast<std::size_t>(p[6]);
+        const auto w_off = static_cast<std::size_t>(p[7]);
+        const bool has_w = p[8] != 0.0;
+        const auto n_net = static_cast<std::size_t>(nu) * static_cast<std::size_t>(nv);
+        return TrimmedEntity<BSplineSurfaceParam> {
+          .param = {.pu = pu,
+                    .pv = pv,
+                    .nu = nu,
+                    .nv = nv,
+                    .knots_u = {arena + ku_off, static_cast<std::size_t>(nu + pu) + 1},
+                    .knots_v = {arena + kv_off, static_cast<std::size_t>(nv + pv) + 1},
+                    .ctrl = {arena + ctrl_off, 3 * n_net},
+                    .weights = has_w ? std::span<const double> {arena + w_off, n_net}
+                                     : std::span<const double> {}},
+          .trim = {}};
     }
 };
 
@@ -822,6 +1234,9 @@ static_assert(to_int(EntityTag::QuadBezier) == TAG_QUADBEZIER);
 static_assert(to_int(EntityTag::CubicBezier) == TAG_CUBICBEZIER);
 static_assert(to_int(EntityTag::BSpline) == TAG_BSPLINE);
 static_assert(to_int(EntityTag::Composite) == TAG_COMPOSITE);
+static_assert(to_int(EntityTag::Cylinder) == TAG_CYLINDER);
+static_assert(to_int(EntityTag::Line3) == TAG_LINE3);
+static_assert(to_int(EntityTag::BSplineSurface) == TAG_BSPLINESURF);
 
 /// @brief SoA schema for the interior (free) DOF: no per-entity fields.
 ///
@@ -1128,14 +1543,15 @@ static_assert(HasEntitySoA<TrimmedEntity<CubicBezierParam>>);
 // ---------------------------------------------------------------------------
 
 /// @brief SoA schema for `TrimmedEntity<BSplineCurveParam>`:
-///        packed `(degree, n_ctrl, t0, t1, closed)` records + 2 segmented CSR
-///        fields (knots, ctrl).
+///        packed `(degree, n_ctrl, t0, t1, closed, has_w)` records + up to 3
+///        segmented CSR fields (knots, ctrl, weights). The `has_w` flag selects
+///        the rational form; `weights` is present only when `has_w != 0`.
 template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
     static constexpr EntityTag tag = EntityTag::BSpline;
-    static constexpr int kFields = 5;
-    static constexpr int kSeg = 2;  ///< knots (slot 0), ctrl (slot 1).
-    static constexpr int DEGREE = 0, N_CTRL = 1, T0 = 2, T1 = 3, CLOSED = 4;
-    static constexpr int KNOTS = 0, CTRL = 1;  ///< Segmented slot indices.
+    static constexpr int kFields = 6;
+    static constexpr int kSeg = 3;  ///< knots (0), ctrl (1), weights (2, optional).
+    static constexpr int DEGREE = 0, N_CTRL = 1, T0 = 2, T1 = 3, CLOSED = 4, HAS_W = 5;
+    static constexpr int KNOTS = 0, CTRL = 1, WEIGHTS = 2;  ///< Segmented slot indices.
 
     struct Host {
         std::vector<double> records;
@@ -1149,11 +1565,14 @@ template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
 
     [[nodiscard]] static TrimmedEntity<BSplineCurveParam> load(const View& v, std::size_t i)
     {
+        const bool has_w = v.records[i, HAS_W] != 0.0;
         return TrimmedEntity<BSplineCurveParam> {
           .param = {.degree = static_cast<int>(v.records[i, DEGREE]),
                     .n_ctrl = static_cast<int>(v.records[i, N_CTRL]),
                     .knots = v.seg[KNOTS][i],
-                    .ctrl = v.seg[CTRL][i]},
+                    .ctrl = v.seg[CTRL][i],
+                    .weights = has_w ? std::span<const double> {v.seg[WEIGHTS][i]}
+                                     : std::span<const double> {}},
           .trim = {.t0 = v.records[i, T0], .t1 = v.records[i, T1],
                    .closed = v.records[i, CLOSED] != 0.0}};
     }
@@ -1166,8 +1585,11 @@ template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
         r[T0] = e.trim.t0;
         r[T1] = e.trim.t1;
         r[CLOSED] = e.trim.closed ? 1.0 : 0.0;
+        const bool has_w = !e.param.weights.empty();
+        r[HAS_W] = has_w ? 1.0 : 0.0;
         h.seg[KNOTS].push_back(e.param.knots);
         h.seg[CTRL].push_back(e.param.ctrl);
+        h.seg[WEIGHTS].push_back(has_w ? e.param.weights : std::span<const double> {});
     }
 
     [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>* seg)
@@ -1176,6 +1598,7 @@ template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
         if (seg != nullptr) {
             v.seg[KNOTS] = seg[KNOTS];
             v.seg[CTRL] = seg[CTRL];
+            v.seg[WEIGHTS] = seg[WEIGHTS];
         }
         return v;
     }
@@ -1259,49 +1682,321 @@ template <> struct EntitySoA<CompositePath> {
 
 static_assert(HasEntitySoA<CompositePath>);
 
+// ---------------------------------------------------------------------------
+// 3D entity SoA specializations.
+//
+// These mirror the 2D specializations in shape: fixed-size surfaces/edges
+// (Plane, Sphere, Cylinder, Line3) pack their blob into `records` (kSeg == 0),
+// matching the `decode_entity_fn<E>` blob layout exactly; the B-spline surface
+// stores scalars in `records` and knots/ctrl/weights in segmented CSR slots.
+// `Free<3>` is already covered by the `EntitySoA<Free<D>>` template above.
+//
+// The sweep's `sweep_partition_kernel` calls `EntitySoA<E>::load` /
+// `tie_view` unconditionally for every dispatched `E`, so every 3D entity type
+// the D==3 dispatch arm can select must have a specialization here.
+// ---------------------------------------------------------------------------
+
+/// @brief SoA schema for `TrimmedEntity<PlaneParam>`: packed
+///        `(o(3), ax(3), ay(3))` records (9 doubles). kSeg == 0.
+template <> struct EntitySoA<TrimmedEntity<PlaneParam>> {
+    static constexpr EntityTag tag = EntityTag::Plane;
+    static constexpr int kFields = 9;
+    static constexpr int kSeg = 0;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static TrimmedEntity<PlaneParam> load(const View& v, std::size_t i)
+    {
+        const auto pt = [&](int j) {
+            return PtN<3> {v.records[i, j], v.records[i, j + 1], v.records[i, j + 2]};
+        };
+        return TrimmedEntity<PlaneParam> {.param = {.o = pt(0), .ax = pt(3), .ay = pt(6)},
+                                          .trim = {}};
+    }
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<PlaneParam>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        for (int k = 0; k < 3; ++k) { r[k] = e.param.o[k]; }
+        for (int k = 0; k < 3; ++k) { r[3 + k] = e.param.ax[k]; }
+        for (int k = 0; k < 3; ++k) { r[6 + k] = e.param.ay[k]; }
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for `TrimmedEntity<SphereParam>`: packed
+///        `(c(3), r, ax(3), ay(3))` records (10 doubles); `az` is derived at
+///        load as `ax × ay`. kSeg == 0.
+template <> struct EntitySoA<TrimmedEntity<SphereParam>> {
+    static constexpr EntityTag tag = EntityTag::Sphere;
+    static constexpr int kFields = 10;
+    static constexpr int kSeg = 0;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static TrimmedEntity<SphereParam> load(const View& v, std::size_t i)
+    {
+        const auto pt = [&](int j) {
+            return PtN<3> {v.records[i, j], v.records[i, j + 1], v.records[i, j + 2]};
+        };
+        const VecN<3> ax = pt(4), ay = pt(7);
+        return TrimmedEntity<SphereParam> {
+          .param = {.c = pt(0), .ax = ax, .ay = ay, .az = cross3(ax, ay), .r = v.records[i, 3]},
+          .trim = {}};
+    }
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<SphereParam>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        for (int k = 0; k < 3; ++k) { r[k] = e.param.c[k]; }
+        r[3] = e.param.r;
+        for (int k = 0; k < 3; ++k) { r[4 + k] = e.param.ax[k]; }
+        for (int k = 0; k < 3; ++k) { r[7 + k] = e.param.ay[k]; }
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for `TrimmedEntity<CylinderParam>`: packed
+///        `(o(3), ax(3), ay(3), r)` records (10 doubles); `az` is derived at
+///        load as `ax × ay`. kSeg == 0.
+template <> struct EntitySoA<TrimmedEntity<CylinderParam>> {
+    static constexpr EntityTag tag = EntityTag::Cylinder;
+    static constexpr int kFields = 10;
+    static constexpr int kSeg = 0;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static TrimmedEntity<CylinderParam> load(const View& v, std::size_t i)
+    {
+        const auto pt = [&](int j) {
+            return PtN<3> {v.records[i, j], v.records[i, j + 1], v.records[i, j + 2]};
+        };
+        const VecN<3> ax = pt(3), ay = pt(6);
+        return TrimmedEntity<CylinderParam> {
+          .param = {.o = pt(0), .ax = ax, .ay = ay, .az = cross3(ax, ay), .r = v.records[i, 9]},
+          .trim = {}};
+    }
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<CylinderParam>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        for (int k = 0; k < 3; ++k) { r[k] = e.param.o[k]; }
+        for (int k = 0; k < 3; ++k) { r[3 + k] = e.param.ax[k]; }
+        for (int k = 0; k < 3; ++k) { r[6 + k] = e.param.ay[k]; }
+        r[9] = e.param.r;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for `TrimmedEntity<Line3Param>`: packed
+///        `(p0(3), p1(3), t0, t1)` records (8 doubles). kSeg == 0.
+template <> struct EntitySoA<TrimmedEntity<Line3Param>> {
+    static constexpr EntityTag tag = EntityTag::Line3;
+    static constexpr int kFields = 8;
+    static constexpr int kSeg = 0;
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+    [[nodiscard]] static TrimmedEntity<Line3Param> load(const View& v, std::size_t i)
+    {
+        const auto pt = [&](int j) {
+            return PtN<3> {v.records[i, j], v.records[i, j + 1], v.records[i, j + 2]};
+        };
+        return TrimmedEntity<Line3Param> {
+          .param = {.p0 = pt(0), .p1 = pt(3)},
+          .trim = {.t0 = v.records[i, 6], .t1 = v.records[i, 7], .closed = false}};
+    }
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<Line3Param>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        for (int k = 0; k < 3; ++k) { r[k] = e.param.p0[k]; }
+        for (int k = 0; k < 3; ++k) { r[3 + k] = e.param.p1[k]; }
+        r[6] = e.trim.t0;
+        r[7] = e.trim.t1;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>*)
+    { return View{.records = soa}; }
+};
+
+/// @brief SoA schema for `TrimmedEntity<BSplineSurfaceParam>`: packed
+///        `(pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w)` records +
+///        up to 4 segmented CSR fields (knots_u, knots_v, ctrl, weights). The
+///        `has_w` flag selects the rational form; `weights` is present only
+///        when `has_w != 0`. Offsets in the record are relative to the CSR slot
+///        bases (not a global arena), so `load` slices each span directly.
+template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
+    static constexpr EntityTag tag = EntityTag::BSplineSurface;
+    static constexpr int kFields = 9;
+    static constexpr int kSeg = 4;  ///< knots_u (0), knots_v (1), ctrl (2), weights (3, optional).
+    static constexpr int PU = 0, PV = 1, NU = 2, NV = 3,
+                          KU_OFF = 4, KV_OFF = 5, CTRL_OFF = 6, W_OFF = 7, HAS_W = 8;
+    static constexpr int KNOTS_U = 0, KNOTS_V = 1, CTRL = 2, WEIGHTS = 3;
+
+    struct Host {
+        std::vector<double> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<double>> seg;
+    };
+    struct View {
+        SoAView<const double> records{nullptr, 0, kFields};
+        SegmentedView<double> seg[kMaxSoASeg]{};
+    };
+
+    [[nodiscard]] static TrimmedEntity<BSplineSurfaceParam> load(const View& v, std::size_t i)
+    {
+        const int pu = static_cast<int>(v.records[i, PU]);
+        const int pv = static_cast<int>(v.records[i, PV]);
+        const int nu = static_cast<int>(v.records[i, NU]);
+        const int nv = static_cast<int>(v.records[i, NV]);
+        const auto n_net = static_cast<std::size_t>(nu) * static_cast<std::size_t>(nv);
+        const bool has_w = v.records[i, HAS_W] != 0.0;
+        return TrimmedEntity<BSplineSurfaceParam> {
+          .param = {.pu = pu,
+                    .pv = pv,
+                    .nu = nu,
+                    .nv = nv,
+                    .knots_u = v.seg[KNOTS_U][i],
+                    .knots_v = v.seg[KNOTS_V][i],
+                    .ctrl = v.seg[CTRL][i],
+                    .weights = has_w ? v.seg[WEIGHTS][i] : std::span<const double> {}},
+          .trim = {}};
+    }
+
+    static void load_into(Host& h, std::size_t i, const TrimmedEntity<BSplineSurfaceParam>& e)
+    {
+        double* r = h.records.data() + i * kFields;
+        r[PU] = static_cast<double>(e.param.pu);
+        r[PV] = static_cast<double>(e.param.pv);
+        r[NU] = static_cast<double>(e.param.nu);
+        r[NV] = static_cast<double>(e.param.nv);
+        // Per-entity offsets are implicit in the CSR layout (slot i owns
+        // data[off[i]..off[i+1])), so the record offsets are unused on load;
+        // they're stored as 0 for layout symmetry with the blob decoder.
+        r[KU_OFF] = 0.0;
+        r[KV_OFF] = 0.0;
+        r[CTRL_OFF] = 0.0;
+        r[W_OFF] = 0.0;
+        const bool has_w = !e.param.weights.empty();
+        r[HAS_W] = has_w ? 1.0 : 0.0;
+        h.seg[KNOTS_U].push_back(e.param.knots_u);
+        h.seg[KNOTS_V].push_back(e.param.knots_v);
+        h.seg[CTRL].push_back(e.param.ctrl);
+        h.seg[WEIGHTS].push_back(has_w ? e.param.weights : std::span<const double> {});
+    }
+
+    [[nodiscard]] static View tie_view(SoAView<const double> soa, const SegmentedView<double>* seg)
+    {
+        View v{.records = soa};
+        if (seg != nullptr) {
+            v.seg[KNOTS_U] = seg[KNOTS_U];
+            v.seg[KNOTS_V] = seg[KNOTS_V];
+            v.seg[CTRL] = seg[CTRL];
+            v.seg[WEIGHTS] = seg[WEIGHTS];
+        }
+        return v;
+    }
+};
+
+static_assert(HasEntitySoA<TrimmedEntity<PlaneParam>>);
+static_assert(HasEntitySoA<TrimmedEntity<SphereParam>>);
+static_assert(HasEntitySoA<TrimmedEntity<CylinderParam>>);
+static_assert(HasEntitySoA<TrimmedEntity<Line3Param>>);
+static_assert(HasEntitySoA<TrimmedEntity<BSplineSurfaceParam>>);
+
 /// @brief Host-side tag -> concrete entity TYPE dispatch for the 2D entity set.
 ///
 /// Invokes `f.template operator()<E>()` with the entity type `E` that
 /// @ref make_entity produces for @p tag. This is the launch-granularity
 /// counterpart to the per-element `std::visit`: it lets the sweep instantiate a
 /// kernel for ONE entity type per launch (no all-alternatives inlining, no
-/// per-lane dispatch). The type list mirrors @ref EntityKind and @ref make_entity
-/// exactly; `Sphere`/`Plane` have no 2D entity and map to `Free`, matching
-/// make_entity's fall-through. `F` is constrained by @ref EntityDispatchFn per
-/// dispatched type, so a malformed callable fails at the concept rather than
-/// deep in instantiation.
-/// @tparam D Embedding dimension (only 2 is currently supported; the 3D case
-///           arrives as an additive `if constexpr (D == 3)` arm at the
-///           `feat_3d_math` merge — the 3D tags/case are deferred to that merge).
+/// per-lane dispatch). The type list mirrors the per-dimension entity set
+/// exactly; in 2D `Sphere`/`Plane` have no entity and map to `Free`, matching
+/// the fall-through. `F` is constrained by @ref EntityDispatchFn per dispatched
+/// type, so a malformed callable fails at the concept rather than deep in
+/// instantiation.
+/// @tparam D Embedding dimension (2 or 3).
 /// @tparam F Callable with a templated `operator()<E>()` for each entity type.
 /// @param tag Entity kind tag.
 /// @param f The type-consuming callable.
 template <int D = kDefaultDim, class F>
-    requires EntityDispatchFn<F, Free<D>> && EntityDispatchFn<F, LineSeg> &&
-             EntityDispatchFn<F, Circle> && EntityDispatchFn<F, Ellipse> &&
-             EntityDispatchFn<F, TrimmedEntity<CircleArcParam>> &&
-             EntityDispatchFn<F, TrimmedEntity<EllipseArcParam>> &&
-             EntityDispatchFn<F, TrimmedEntity<QuadBezierParam>> &&
-             EntityDispatchFn<F, TrimmedEntity<CubicBezierParam>> &&
-             EntityDispatchFn<F, TrimmedEntity<BSplineCurveParam>> &&
-             EntityDispatchFn<F, CompositePath>
+    requires ((D == 2) &&
+              EntityDispatchFn<F, Free<2>> && EntityDispatchFn<F, LineSeg> &&
+              EntityDispatchFn<F, Circle> && EntityDispatchFn<F, Ellipse> &&
+              EntityDispatchFn<F, TrimmedEntity<CircleArcParam>> &&
+              EntityDispatchFn<F, TrimmedEntity<EllipseArcParam>> &&
+              EntityDispatchFn<F, TrimmedEntity<QuadBezierParam>> &&
+              EntityDispatchFn<F, TrimmedEntity<CubicBezierParam>> &&
+              EntityDispatchFn<F, TrimmedEntity<BSplineCurveParam>> &&
+              EntityDispatchFn<F, CompositePath>) ||
+             ((D == 3) &&
+              EntityDispatchFn<F, Free<3>> &&
+              EntityDispatchFn<F, TrimmedEntity<PlaneParam>> &&
+              EntityDispatchFn<F, TrimmedEntity<SphereParam>> &&
+              EntityDispatchFn<F, TrimmedEntity<CylinderParam>> &&
+              EntityDispatchFn<F, TrimmedEntity<Line3Param>> &&
+              EntityDispatchFn<F, TrimmedEntity<BSplineSurfaceParam>>)
 inline void dispatch_entity_type(EntityTag tag, F f)
 {
-    static_assert(D == 2, "dispatch_entity_type: only the 2D entity set is implemented");
-    switch (tag) {
-    case EntityTag::LineSeg: f.template operator()<LineSeg>(); break;
-    case EntityTag::Circle: f.template operator()<Circle>(); break;
-    case EntityTag::Ellipse: f.template operator()<Ellipse>(); break;
-    case EntityTag::CircleArc: f.template operator()<TrimmedEntity<CircleArcParam>>(); break;
-    case EntityTag::EllipseArc: f.template operator()<TrimmedEntity<EllipseArcParam>>(); break;
-    case EntityTag::QuadBezier: f.template operator()<TrimmedEntity<QuadBezierParam>>(); break;
-    case EntityTag::CubicBezier: f.template operator()<TrimmedEntity<CubicBezierParam>>(); break;
-    case EntityTag::BSpline: f.template operator()<TrimmedEntity<BSplineCurveParam>>(); break;
-    case EntityTag::Composite: f.template operator()<CompositePath>(); break;
-    case EntityTag::Free:
-    case EntityTag::Sphere:  // 3D surfaces: no 2D entity, fall through to Free.
-    case EntityTag::Plane:
-    default: f.template operator()<Free<D>>(); break;
+    if constexpr (D == 2) {
+        switch (tag) {
+        case EntityTag::LineSeg: f.template operator()<LineSeg>(); break;
+        case EntityTag::Circle: f.template operator()<Circle>(); break;
+        case EntityTag::Ellipse: f.template operator()<Ellipse>(); break;
+        case EntityTag::CircleArc: f.template operator()<TrimmedEntity<CircleArcParam>>(); break;
+        case EntityTag::EllipseArc: f.template operator()<TrimmedEntity<EllipseArcParam>>(); break;
+        case EntityTag::QuadBezier: f.template operator()<TrimmedEntity<QuadBezierParam>>(); break;
+        case EntityTag::CubicBezier: f.template operator()<TrimmedEntity<CubicBezierParam>>(); break;
+        case EntityTag::BSpline: f.template operator()<TrimmedEntity<BSplineCurveParam>>(); break;
+        case EntityTag::Composite: f.template operator()<CompositePath>(); break;
+        case EntityTag::Free:
+        case EntityTag::Sphere:  // 3D surfaces: no 2D entity, fall through to Free.
+        case EntityTag::Plane:
+        case EntityTag::Cylinder:
+        case EntityTag::Line3:
+        case EntityTag::BSplineSurface:
+        default: f.template operator()<Free<2>>(); break;
+        }
+    } else if constexpr (D == 3) {
+        switch (tag) {
+        case EntityTag::Plane:
+            f.template operator()<TrimmedEntity<PlaneParam>>(); break;
+        case EntityTag::Sphere:
+            f.template operator()<TrimmedEntity<SphereParam>>(); break;
+        case EntityTag::Cylinder:
+            f.template operator()<TrimmedEntity<CylinderParam>>(); break;
+        case EntityTag::Line3:
+            f.template operator()<TrimmedEntity<Line3Param>>(); break;
+        case EntityTag::BSplineSurface:
+            f.template operator()<TrimmedEntity<BSplineSurfaceParam>>(); break;
+        case EntityTag::Free:
+        default: f.template operator()<Free<3>>(); break;
+        }
+    } else {
+        static_assert(D == 2 || D == 3, "dispatch_entity_type: unsupported dimension");
     }
 }
 

@@ -160,7 +160,7 @@ def flatten_context(ctx: SweepContext) -> dict:
                 "has no positional-blob fallback since Phase 4); build the context "
                 "via build_sweep_context"
             )
-        typed = group_entities_by_type(group_dof_indices, entities, d=2)
+        typed = group_entities_by_type(group_dof_indices, entities, d=ctx.d)
         if "__blob__" in typed:
             # Every 2D entity now has an SoA encoder (composites carry any curve
             # type, incl. B-splines, via a self-contained per-composite arena), so

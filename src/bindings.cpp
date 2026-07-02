@@ -18,6 +18,7 @@ namespace py = pybind11;
 #ifndef NDEBUG
     #include <unordered_set>
 #endif
+#include <variant>
 
 namespace
 {
@@ -351,31 +352,20 @@ egg::SweepContextHostT<D>
     return host;
 }
 
-// Runtime dispatch on the input's actual dimension d. Phase 1 instantiates only
-// the D=2 body; d=3 is the scaffold (a clean "not yet implemented" error), so the
-// 2D-only static_asserts in the core never fire and the binary does not grow.
-[[noreturn]] void throw_unsupported_dim(int d)
-{
-    if (d == 3) {
-        throw std::runtime_error(
-          "egg C++ core: 3D (d=3) sweep not yet implemented; only d=2 is built.");
-    }
-    throw std::invalid_argument("egg C++ core: dimension must be 2 or 3, got " + std::to_string(d));
-}
-
-// Persistent device-resident session: the context is uploaded once and X is
-// kept resident across .run() calls
-// Thin RAII wrapper over Executor, which already owns the in-order queue and
-// keeps X device-resident.
-// Validate the dimension before the (D=2) Executor is built; d != 2 throws the
-// clean scaffold error. Returns d so it can sequence ahead of exec_ in the
-// initializer list. Phase 2 replaces this with a real <D> dispatch.
+// Runtime dispatch on the input's actual dimension d: 2 and 3 are built.
 int require_supported_dim(int d)
 {
-    if (d != 2) { throw_unsupported_dim(d); }
+    if (d != 2 && d != 3) {
+        throw std::invalid_argument("egg C++ core: dimension must be 2 or 3, got " +
+                                    std::to_string(d));
+    }
     return d;
 }
 
+// Persistent device-resident session: the context is uploaded once and X is
+// kept resident across .run() calls. Thin RAII wrapper over ExecutorT<D>,
+// which already owns the in-order queue and keeps X device-resident; the
+// runtime dimension picks the variant alternative at construction.
 class CppSweepSession
 {
   public:
@@ -384,7 +374,12 @@ class CppSweepSession
                     const std::string& device,
                     int dim) :
         dim_(require_supported_dim(dim)), num_nodes_(checked_num_nodes(X0, dim_)),
-        exec_(select_queue(device), unpack_context<2>(ctx_arrays, X0.data(), num_nodes_))
+        exec_(dim_ == 2 ? ExecVariant {std::in_place_type<egg::ExecutorT<2>>,
+                                       select_queue(device),
+                                       unpack_context<2>(ctx_arrays, X0.data(), num_nodes_)}
+                        : ExecVariant {std::in_place_type<egg::ExecutorT<3>>,
+                                       select_queue(device),
+                                       unpack_context<3>(ctx_arrays, X0.data(), num_nodes_)})
     {
     }
 
@@ -392,8 +387,12 @@ class CppSweepSession
     std::tuple<py::array_t<double>, py::array_t<double>>
       run(int n_sweeps, const std::string& phase, double delta)
     {
-        const egg::ObjectiveKind objective = egg::make_objective(phase, delta);
-        auto [energies, mindets] = exec_.run_sweeps(n_sweeps, objective);
+        auto [energies, mindets] = std::visit(
+          [&]<int D>(egg::ExecutorT<D>& exec) {
+              const egg::ObjectiveKindT<D> objective = egg::make_objective<D>(phase, delta);
+              return exec.run_sweeps(n_sweeps, objective);
+          },
+          exec_);
         py::array_t<double> e_ret(static_cast<py::ssize_t>(n_sweeps), energies.data());
         py::array_t<double> m_ret(static_cast<py::ssize_t>(n_sweeps), mindets.data());
         return std::make_tuple(e_ret, m_ret);
@@ -402,26 +401,27 @@ class CppSweepSession
     // Download a host copy of the resident X.
     py::array_t<double> get_X()
     {
-        std::vector<double> X_out(num_nodes_ * egg::kDim);
-        exec_.ctx().download_X(X_out.data());
-        return py::array_t<double>(static_cast<py::ssize_t>(num_nodes_ * egg::kDim), X_out.data());
+        std::vector<double> X_out(num_nodes_ * dim_);
+        std::visit([&](auto& exec) { exec.ctx().download_X(X_out.data()); }, exec_);
+        return py::array_t<double>(static_cast<py::ssize_t>(num_nodes_ * dim_), X_out.data());
     }
 
     // Re-upload X to the device.
     void set_X(const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr)
     {
         auto buf = X_arr.request();
-        if (static_cast<std::size_t>(buf.shape[0]) != num_nodes_ * egg::kDim) {
+        if (static_cast<std::size_t>(buf.shape[0]) != num_nodes_ * dim_) {
             throw std::invalid_argument("set_X: shape mismatch with session num_nodes");
         }
-        std::vector<double> host(X_arr.data(), X_arr.data() + (num_nodes_ * egg::kDim));
-        exec_.ctx().upload_X(host);
+        std::vector<double> host(X_arr.data(), X_arr.data() + num_nodes_ * dim_);
+        std::visit([&](auto& exec) { exec.ctx().upload_X(host); }, exec_);
     }
 
   private:
+    using ExecVariant = std::variant<egg::ExecutorT<2>, egg::ExecutorT<3>>;
     int dim_;
     std::size_t num_nodes_;
-    egg::Executor exec_;
+    ExecVariant exec_;
 };
 
 }  // namespace
@@ -471,39 +471,40 @@ PYBIND11_MODULE(cpp_core, m)
          const std::string& phase,
          double delta,
          int dim) -> std::tuple<py::array_t<double>, py::array_t<double>, py::array_t<double>> {
-          // Runtime dispatch on the requested dimension. Phase 1 builds only d=2;
-          // d=3 raises the clean scaffold error (Phase 2 flips this on).
+          // Runtime dispatch on the requested dimension (2 or 3).
           require_supported_dim(dim);
 
-          // Select queue
-          sycl::queue q = select_queue(device);
+          const auto run = [&]<int D>() {
+              // Select queue
+              sycl::queue q = select_queue(device);
 
-          // Unpack context (X shape is checked here; the context is validated
-          // inside unpack_context before any device work).
-          const std::size_t num_nodes = checked_num_nodes(X_arr, dim);
-          auto host_ctx = unpack_context<2>(ctx_arrays, X_arr.data(), num_nodes);
+              // Unpack context (X shape is checked here; the context is validated
+              // inside unpack_context before any device work).
+              const std::size_t num_nodes = checked_num_nodes(X_arr, dim);
+              auto host_ctx = unpack_context<D>(ctx_arrays, X_arr.data(), num_nodes);
 
-          // Build device context + executor
-          egg::Executor exec(q, host_ctx);
+              // Build device context + executor
+              egg::ExecutorT<D> exec(q, host_ctx);
 
-          // Dispatch the objective kind (barrier / δ-untangle) once via the variant.
-          const egg::ObjectiveKind objective = egg::make_objective(phase, delta);
+              // Dispatch the objective kind (barrier / δ-untangle) once via the variant.
+              const egg::ObjectiveKindT<D> objective = egg::make_objective<D>(phase, delta);
 
-          // Run sweeps
-          auto [energies, mindets] = exec.run_sweeps(n_sweeps, objective);
+              // Run sweeps
+              auto [energies, mindets] = exec.run_sweeps(n_sweeps, objective);
 
-          // Copy X back
-          std::vector<double> X_out(num_nodes * egg::kDim);
-          exec.ctx().download_X(X_out.data());
+              // Copy X back
+              std::vector<double> X_out(num_nodes * D);
+              exec.ctx().download_X(X_out.data());
 
-          // Return (X_out, energies, mindets) as numpy arrays
-          py::array_t<double> X_ret(static_cast<py::ssize_t>(num_nodes * egg::kDim), X_out.data());
-          py::array_t<double> e_ret(static_cast<py::ssize_t>(n_sweeps), energies.data());
-          py::array_t<double> m_ret(static_cast<py::ssize_t>(n_sweeps), mindets.data());
-
-          // pybind11 copies by default when returning from raw pointers — that is
-          // the correct behaviour here (the vectors go out of scope).
-          return std::make_tuple(X_ret, e_ret, m_ret);
+              // Return (X_out, energies, mindets) as numpy arrays. pybind11 copies
+              // by default when returning from raw pointers — correct here (the
+              // vectors go out of scope).
+              py::array_t<double> X_ret(static_cast<py::ssize_t>(num_nodes * D), X_out.data());
+              py::array_t<double> e_ret(static_cast<py::ssize_t>(n_sweeps), energies.data());
+              py::array_t<double> m_ret(static_cast<py::ssize_t>(n_sweeps), mindets.data());
+              return std::make_tuple(X_ret, e_ret, m_ret);
+          };
+          return dim == 2 ? run.template operator()<2>() : run.template operator()<3>();
       },
       py::arg("ctx_arrays"),
       py::arg("X"),

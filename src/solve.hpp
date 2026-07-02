@@ -43,6 +43,37 @@ template <> inline VecN<2> solveNxN<2>(const MatN<2>& H, const VecN<2>& g)
     return x;
 }
 
+inline bool finite3(const VecN<3>& v)
+{ return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]); }
+
+// D=3: 3×3 closed form via the adjugate, same fallback structure as D=2.
+template <> inline VecN<3> solveNxN<3>(const MatN<3>& H, const VecN<3>& g)
+{
+    const double gnorm = std::sqrt((g[0] * g[0]) + (g[1] * g[1]) + (g[2] * g[2]));
+    if (gnorm < 1e-15) { return VecN<3> {0.0, 0.0, 0.0}; }
+
+    // Cofactors c_ij of H (adj(H) = cof(H)^T); x = -(1/det) adj(H) g.
+    const double c00 = (H[4] * H[8]) - (H[5] * H[7]);
+    const double c01 = -((H[3] * H[8]) - (H[5] * H[6]));
+    const double c02 = (H[3] * H[7]) - (H[4] * H[6]);
+    const double det = (H[0] * c00) + (H[1] * c01) + (H[2] * c02);
+    const double inv = 1.0 / det;
+    const double c10 = -((H[1] * H[8]) - (H[2] * H[7]));
+    const double c11 = (H[0] * H[8]) - (H[2] * H[6]);
+    const double c12 = -((H[0] * H[7]) - (H[1] * H[6]));
+    const double c20 = (H[1] * H[5]) - (H[2] * H[4]);
+    const double c21 = -((H[0] * H[5]) - (H[2] * H[3]));
+    const double c22 = (H[0] * H[4]) - (H[1] * H[3]);
+    const VecN<3> x {-inv * ((c00 * g[0]) + (c10 * g[1]) + (c20 * g[2])),
+                     -inv * ((c01 * g[0]) + (c11 * g[1]) + (c21 * g[2])),
+                     -inv * ((c02 * g[0]) + (c12 * g[1]) + (c22 * g[2]))};
+    if (!finite3(x)) {
+        const double c = -0.1 / gnorm;
+        return VecN<3> {c * g[0], c * g[1], c * g[2]};
+    }
+    return x;
+}
+
 // Legacy name kept for the 2D call sites.
 inline Vec2 solve2x2(const Mat2& H, const Vec2& g) { return solveNxN<2>(H, g); }
 

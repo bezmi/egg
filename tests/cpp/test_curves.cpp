@@ -384,3 +384,111 @@ static const suite<"composite_soa"> composite_soa_suite = [] {
         expect(b[1] > 0.1_d) << "B-spline arch projection should sit above the return line";
     };
 };
+
+static const suite<"nurbs"> nurbs_suite = [] {
+    // Rational quadratic Bézier quarter circle: ctrl (1,0),(1,1),(0,1),
+    // weights {1, 1/sqrt2, 1} on clamped knots — exact unit circle.
+    constexpr auto quarter = [] {
+        static const std::array<double, 6> knots {0, 0, 0, 1, 1, 1};
+        static const std::array<double, 6> ctrl {1, 0, 1, 1, 0, 1};
+        static const std::array<double, 3> w {1.0, 1.0 / std::numbers::sqrt2, 1.0};
+        return BSplineCurveParam {.degree = 2,
+                                  .n_ctrl = 3,
+                                  .knots = knots,
+                                  .ctrl = ctrl,
+                                  .weights = w};
+    };
+
+    "rational quarter circle lies exactly on the unit circle"_test = [quarter] {
+        const BSplineCurveParam c = quarter();
+        for (const double u : {0.0, 0.2, 0.5, 0.8, 1.0}) {
+            const PtN<2> p = c.eval({u});
+            expect(close(std::hypot(p[0], p[1]), 1.0, 1e-14))
+              << std::format("radius at u={}: {}", u, std::hypot(p[0], p[1]));
+        }
+        // Clamped ends interpolate.
+        const PtN<2> p0 = c.eval({0.0}), p1 = c.eval({1.0});
+        expect(close(p0[0], 1.0) && close(p0[1], 0.0));
+        expect(close(p1[0], 0.0) && close(p1[1], 1.0));
+    };
+
+    "rational derivatives match finite differences"_test = [quarter] {
+        const BSplineCurveParam c = quarter();
+        const double h = 1e-6;
+        for (const double u : {0.2, 0.5, 0.8}) {
+            const PtN<2> fp = c.eval({u + h}), fm = c.eval({u - h});
+            const VecN<2> fd {(fp[0] - fm[0]) / (2 * h), (fp[1] - fm[1]) / (2 * h)};
+            const VecN<2> an = c.deriv({u});
+            expect(close(an[0], fd[0], 1e-6) && close(an[1], fd[1], 1e-6))
+              << std::format("deriv FD u={}", u);
+            const VecN<2> d1p = c.deriv({u + h}), d1m = c.deriv({u - h});
+            const VecN<2> fd2 {(d1p[0] - d1m[0]) / (2 * h), (d1p[1] - d1m[1]) / (2 * h)};
+            const VecN<2> an2 = c.deriv2({u});
+            expect(close(an2[0], fd2[0], 1e-5) && close(an2[1], fd2[1], 1e-5))
+              << std::format("deriv2 FD u={}", u);
+        }
+    };
+
+    "rational tangent is perpendicular to the radius"_test = [quarter] {
+        const BSplineCurveParam c = quarter();
+        for (const double u : {0.1, 0.5, 0.9}) {
+            const PtN<2> p = c.eval({u});
+            const VecN<2> d = c.deriv({u});
+            expect(close(dot(p, d), 0.0, 1e-12)) << std::format("p·C' at u={}", u);
+        }
+    };
+
+    "projection onto the rational arc is radial"_test = [quarter] {
+        const TrimmedEntity<BSplineCurveParam> ent {.param = quarter(),
+                                                    .trim = {.t0 = 0.0, .t1 = 1.0}};
+        const PtN<2> q {1.4, 1.4};  // 45°: nearest point is (1,1)/sqrt2
+        const PtN<2> pr = ent.project(q);
+        expect(close(pr[0], 1.0 / std::numbers::sqrt2, 1e-9) &&
+               close(pr[1], 1.0 / std::numbers::sqrt2, 1e-9))
+          << std::format("({},{})", pr[0], pr[1]);
+    };
+
+    "all-ones weights reproduce the polynomial spline exactly"_test = [] {
+        const std::array<double, 8> knots {0, 0, 0, 1, 2, 3, 3, 3};
+        const std::array<double, 10> ctrl {0, 0, 1, 2, 3, -1, 4, 2, 6, 0};
+        const std::array<double, 5> ones {1, 1, 1, 1, 1};
+        const BSplineCurveParam poly {.degree = 2, .n_ctrl = 5, .knots = knots, .ctrl = ctrl};
+        const BSplineCurveParam rat {.degree = 2,
+                                     .n_ctrl = 5,
+                                     .knots = knots,
+                                     .ctrl = ctrl,
+                                     .weights = ones};
+        for (const double u : {0.3, 1.1, 2.6}) {
+            for (int order = 0; order <= 2; ++order) {
+                const PtN<2> a = poly.point_at(u, order), b = rat.point_at(u, order);
+                expect(close(a[0], b[0], 1e-13) && close(a[1], b[1], 1e-13))
+                  << std::format("order {} u={}", order, u);
+            }
+        }
+    };
+
+    "decode_entity slices the weighted B-spline from the arena"_test = [] {
+        std::vector<double> arena;
+        const auto knot_off = arena.size();
+        for (const double k : {0.0, 0.0, 0.0, 1.0, 1.0, 1.0}) { arena.push_back(k); }
+        const auto ctrl_off = arena.size();
+        for (const double c : {1.0, 0.0, 1.0, 1.0, 0.0, 1.0}) { arena.push_back(c); }
+        const auto w_off = arena.size();
+        for (const double w : {1.0, 1.0 / std::numbers::sqrt2, 1.0}) { arena.push_back(w); }
+
+        std::array<double, kParamPad> blob {};
+        blob[0] = 2;  // degree
+        blob[1] = 3;  // n_ctrl
+        blob[2] = static_cast<double>(knot_off);
+        blob[3] = static_cast<double>(ctrl_off);
+        blob[4] = 0.0;  // t0
+        blob[5] = 1.0;  // t1
+        blob[6] = static_cast<double>(w_off);
+        blob[7] = 1.0;  // has_w
+        const auto ent =
+          decode_entity<TrimmedEntity<BSplineCurveParam>>(blob.data(), arena.data());
+        const PtN<2> p = ent.project(PtN<2> {2.0, 2.0});
+        expect(close(std::hypot(p[0], p[1]), 1.0, 1e-9))
+          << std::format("on-circle radius {}", std::hypot(p[0], p[1]));
+    };
+};

@@ -86,6 +86,9 @@ class SweepContext:
     # Position-independent (indices/W_inv/J/role), so cached once and reused across
     # all sweeps. Populated on first sweep.
     jax_group_batches: dict | None = None
+    # Embedding dimension (2 or 3). Defaults to 2 for backward compatibility;
+    # set to 3 by the d=3 sweep context builders.
+    d: int = 2
 
     @property
     def num_colours(self) -> int:

@@ -42,8 +42,13 @@ The field layouts (offsets within each record) are frozen to match the C++
 | EllipseArc   | 7   | 8       | 0    | [cx, cy, a, b, phi, t0, t1, closed]             |
 | QuadBezier   | 8   | 8       | 0    | [P0x, P0y, P1x, P1y, P2x, P2y, t0, t1]          |
 | CubicBezier  | 9   | 10      | 0    | [P0x..P3y(8), t0, t1]                           |
-| BSpline      | 10  | 5       | 2    | [degree, n_ctrl, t0, t1, closed] + seg: knots, ctrl |
+| BSpline      | 10  | 6       | 3    | [degree, n_ctrl, t0, t1, closed, has_w] + seg: knots, ctrl, weights |
 | Composite    | 11  | 2       | 1    | [n_segs, rec_off] + seg: self-contained arena slice |
+| Sphere       | 4   | 10      | 0    | [c(3), r, ax(3), ay(3)]                         |
+| Plane        | 5   | 9       | 0    | [o(3), ax(3), ay(3)]                           |
+| Cylinder     | 12  | 10      | 0    | [o(3), ax(3), ay(3), r]                        |
+| Line3        | 13  | 8       | 0    | [p0(3), p1(3), t0, t1]                         |
+| BSplineSurf  | 14  | 9       | 4    | [pu,pv,nu,nv,ku_off,kv_off,ctrl_off,w_off,has_w] + seg: knots_u, knots_v, ctrl, weights |
 """
 
 from __future__ import annotations
@@ -64,6 +69,11 @@ __all__ = [
     "TAG_CUBICBEZIER",
     "TAG_BSPLINE",
     "TAG_COMPOSITE",
+    "TAG_SPHERE",
+    "TAG_PLANE",
+    "TAG_CYLINDER",
+    "TAG_LINE3",
+    "TAG_BSPLINESURF",
 ]
 
 # Frozen tag values (shared with entity_encoding.py / C++ EntityTag).
@@ -71,12 +81,17 @@ TAG_FREE = 0
 TAG_LINESEG = 1
 TAG_CIRCLE = 2
 TAG_ELLIPSE = 3
+TAG_SPHERE = 4
+TAG_PLANE = 5
 TAG_CIRCLEARC = 6
 TAG_ELLIPSEARC = 7
 TAG_QUADBEZIER = 8
 TAG_CUBICBEZIER = 9
 TAG_BSPLINE = 10
 TAG_COMPOSITE = 11
+TAG_CYLINDER = 12
+TAG_LINE3 = 13
+TAG_BSPLINESURF = 14
 
 # Per-type field counts (mirror C++ EntitySoA<E>::kFields).
 _KFIELDS = {
@@ -88,14 +103,20 @@ _KFIELDS = {
     TAG_ELLIPSEARC: 8,
     TAG_QUADBEZIER: 8,
     TAG_CUBICBEZIER: 10,
-    TAG_BSPLINE: 5,
-    TAG_COMPOSITE: 2,  # n_segs, rec_off
+    TAG_BSPLINE: 6,       # degree, n_ctrl, t0, t1, closed, has_w
+    TAG_COMPOSITE: 2,     # n_segs, rec_off
+    TAG_PLANE: 9,         # o(3), ax(3), ay(3)
+    TAG_SPHERE: 10,       # c(3), r, ax(3), ay(3)
+    TAG_CYLINDER: 10,     # o(3), ax(3), ay(3), r
+    TAG_LINE3: 8,         # p0(3), p1(3), t0, t1
+    TAG_BSPLINESURF: 9,   # pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w
 }
 
 # Per-type segmented field counts (mirror C++ EntitySoA<E>::kSeg).
 _KSEG = {
-    TAG_BSPLINE: 2,    # knots, ctrl
-    TAG_COMPOSITE: 1,  # segment records
+    TAG_BSPLINE: 3,        # knots, ctrl, weights
+    TAG_COMPOSITE: 1,      # segment records
+    TAG_BSPLINESURF: 4,    # knots_u, knots_v, ctrl, weights
 }
 
 # Tag -> wire-format name (used as dict key in the per-group `entities` sub-dict).
@@ -110,6 +131,11 @@ TAG_NAMES = {
     TAG_CUBICBEZIER: "cubicbezier",
     TAG_BSPLINE: "bspline",
     TAG_COMPOSITE: "composite",
+    TAG_SPHERE: "sphere",
+    TAG_PLANE: "plane",
+    TAG_CYLINDER: "cylinder",
+    TAG_LINE3: "line3",
+    TAG_BSPLINESURF: "bsplinesurf",
 }
 
 
@@ -167,19 +193,23 @@ def _encode_cubicbezier(entity) -> np.ndarray:
 def _encode_bspline(entity):
     """Encode a BSplineCurve into (scalars_row, segmented_data).
 
-    Returns (row, seg) where row is the 5-double scalar record
-    [degree, n_ctrl, t0, t1, closed] and seg is a list of two 1D arrays
-    [knots, ctrl_flat] (ctrl flattened x/y interleaved, matching the C++
-    BSplineCurveParam::ctrl span layout).
+    Returns (row, seg) where row is the 6-double scalar record
+    [degree, n_ctrl, t0, t1, closed, has_w] and seg is a list of three
+    1D arrays [knots, ctrl_flat, weights] (ctrl flattened x/y interleaved,
+    matching the C++ BSplineCurveParam::ctrl span layout; weights is empty
+    for the polynomial path). has_w == 0.0 selects the polynomial path.
     """
+    has_w = entity.weights is not None
     row = np.array([
         float(entity.degree),
         float(entity.ctrl.shape[0]),
-        entity.t0, entity.t1, float(entity.closed),
+        entity.t0, entity.t1, float(entity.closed), float(has_w),
     ], dtype=np.float64)
     seg = [
         np.asarray(entity.knots, dtype=np.float64).ravel(),
         np.asarray(entity.ctrl, dtype=np.float64).ravel(),
+        (np.asarray(entity.weights, dtype=np.float64).ravel()
+         if has_w else np.empty(0, dtype=np.float64)),
     ]
     return row, seg
 
@@ -214,6 +244,73 @@ def _encode_composite(entity):
     return row, [arena_slice]
 
 
+# --- 3D entity encoders ----------------------------------------------------
+
+def _encode_plane(entity) -> np.ndarray:
+    """Encode a Plane into a 9-double record [o(3), ax(3), ay(3)]."""
+    return np.concatenate([
+        np.asarray(entity.o, dtype=np.float64).ravel(),
+        np.asarray(entity.ax, dtype=np.float64).ravel(),
+        np.asarray(entity.ay, dtype=np.float64).ravel(),
+    ])
+
+
+def _encode_sphere(entity) -> np.ndarray:
+    """Encode a Sphere into a 10-double record [c(3), r, ax(3), ay(3)]."""
+    return np.concatenate([
+        np.asarray(entity.c, dtype=np.float64).ravel(),
+        np.array([entity.r], dtype=np.float64),
+        np.asarray(entity.ax, dtype=np.float64).ravel(),
+        np.asarray(entity.ay, dtype=np.float64).ravel(),
+    ])
+
+
+def _encode_cylinder(entity) -> np.ndarray:
+    """Encode a Cylinder into a 10-double record [o(3), ax(3), ay(3), r]."""
+    return np.concatenate([
+        np.asarray(entity.o, dtype=np.float64).ravel(),
+        np.asarray(entity.ax, dtype=np.float64).ravel(),
+        np.asarray(entity.ay, dtype=np.float64).ravel(),
+        np.array([entity.r], dtype=np.float64),
+    ])
+
+
+def _encode_line3(entity) -> np.ndarray:
+    """Encode a Line3 into an 8-double record [p0(3), p1(3), t0, t1]."""
+    return np.concatenate([
+        np.asarray(entity.p0, dtype=np.float64).ravel(),
+        np.asarray(entity.p1, dtype=np.float64).ravel(),
+        np.array([entity.t0, entity.t1], dtype=np.float64),
+    ])
+
+
+def _encode_bsplinesurface(entity):
+    """Encode a BSplineSurface into (scalars_row, segmented_data).
+
+    Returns (row, seg) where row is the 9-double scalar record
+    [pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w] and seg is a
+    list of four 1D arrays [knots_u, knots_v, ctrl_flat, weights] (ctrl
+    flattened xyz-interleaved, matching the C++ BSplineSurfaceParam::ctrl
+    span layout; weights is empty for the polynomial path). The offset
+    fields in the record are stored as 0 (unused — the CSR layout makes
+    per-entity offsets implicit). has_w == 0.0 selects the polynomial path.
+    """
+    has_w = entity.weights is not None
+    row = np.array([
+        float(entity.pu), float(entity.pv),
+        float(entity.nu), float(entity.nv),
+        0.0, 0.0, 0.0, 0.0, float(has_w),
+    ], dtype=np.float64)
+    seg = [
+        np.asarray(entity.knots_u, dtype=np.float64).ravel(),
+        np.asarray(entity.knots_v, dtype=np.float64).ravel(),
+        np.asarray(entity.ctrl, dtype=np.float64).ravel(),
+        (np.asarray(entity.weights, dtype=np.float64).ravel()
+         if has_w else np.empty(0, dtype=np.float64)),
+    ]
+    return row, seg
+
+
 # Tag -> (encoder function, kFields).  Tags not listed here (Composite has a
 # bespoke per-segment encoder below) use the simple fixed-size encoders.
 _ENCODERS = {
@@ -241,6 +338,7 @@ def encode_entity_soa(entity, d: int = 2):
         return TAG_FREE, 0, np.empty(0, dtype=np.float64), None
 
     from egg.geometry.analytic2d import Circle, Ellipse, LineSegment
+    from egg.geometry.analytic3d import Cylinder, Line3, Plane, Sphere
     from egg.geometry.curves2d import (
         BSplineCurve,
         CircleArc,
@@ -249,6 +347,7 @@ def encode_entity_soa(entity, d: int = 2):
         EllipseArc,
         QuadBezier,
     )
+    from egg.geometry.surfaces3d import BSplineSurface
 
     if isinstance(entity, LineSegment):
         return TAG_LINESEG, _KFIELDS[TAG_LINESEG], _encode_lineseg(entity), None
@@ -270,6 +369,17 @@ def encode_entity_soa(entity, d: int = 2):
     if isinstance(entity, CompositePath):
         row, seg = _encode_composite(entity)
         return TAG_COMPOSITE, _KFIELDS[TAG_COMPOSITE], row, seg
+    if isinstance(entity, Plane):
+        return TAG_PLANE, _KFIELDS[TAG_PLANE], _encode_plane(entity), None
+    if isinstance(entity, Sphere):
+        return TAG_SPHERE, _KFIELDS[TAG_SPHERE], _encode_sphere(entity), None
+    if isinstance(entity, Cylinder):
+        return TAG_CYLINDER, _KFIELDS[TAG_CYLINDER], _encode_cylinder(entity), None
+    if isinstance(entity, Line3):
+        return TAG_LINE3, _KFIELDS[TAG_LINE3], _encode_line3(entity), None
+    if isinstance(entity, BSplineSurface):
+        row, seg = _encode_bsplinesurface(entity)
+        return TAG_BSPLINESURF, _KFIELDS[TAG_BSPLINESURF], row, seg
     raise NotImplementedError(f"Entity type {type(entity)} not encodable yet")
 
 

@@ -21,8 +21,11 @@ Layouts (2D; ``d`` is the spatial dimension; angles/parameters in radians):
 | EllipseArc   | 7   | ``[center(2), a, b, phi, t0, t1, closed, ...pad]``    |
 | QuadBezier   | 8   | ``[P0(2), P1(2), P2(2), t0, t1, ...pad]``             |
 | CubicBezier  | 9   | ``[P0(2), P1(2), P2(2), P3(2), t0, t1]``              |
-| BSpline      | 10  | ``[degree, n_ctrl, knot_off, ctrl_off, t0, t1]``      |
+| BSpline      | 10  | ``[degree, n_ctrl, knot_off, ctrl_off, t0, t1, w_off, has_w]`` |
 | Composite    | 11  | ``[n_segs, rec_off]``                                 |
+
+A B-spline with ``has_w != 0`` is rational (NURBS): the ``n_ctrl`` weights live
+in the arena at ``w_off``.
 
 The B-spline and composite path are variable-length: their data lives in a
 shared ``arena`` (a flat float64 array uploaded alongside ``params``), and the
@@ -135,8 +138,13 @@ def encode_entity(entity, d: int = 2, arena: list | None = None):
         arena.extend(entity.knots.tolist())
         ctrl_off = len(arena)
         arena.extend(entity.ctrl.ravel().tolist())
-        params[:6] = (entity.degree, entity.ctrl.shape[0],
-                      knot_off, ctrl_off, entity.t0, entity.t1)
+        w_off = 0.0
+        if entity.weights is not None:
+            w_off = len(arena)
+            arena.extend(entity.weights.tolist())
+        params[:8] = (entity.degree, entity.ctrl.shape[0],
+                      knot_off, ctrl_off, entity.t0, entity.t1,
+                      w_off, float(entity.weights is not None))
         return TAG_BSPLINE, params
     if isinstance(entity, CompositePath):
         if arena is None:

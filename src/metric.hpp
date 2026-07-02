@@ -148,6 +148,65 @@ inline T mu_untangle(const T& a, const T& b, const T& c, const T& d, double delt
 }
 
 // ---------------------------------------------------------------------------
+// 3D condition-number barrier (generic over double / Dual<9> / Dual2<9>):
+//   μ_cond = |T|²·|T⁻¹|²/d² − 1 = (Σ tᵢ²)(Σ cof(T)ᵢ²) / (9 det²) − 1
+// Rational in the entries of T (no fractional powers), so closed form and
+// dual-AD are clean and device-friendly. vec(T) is row-major
+// [t00 t01 t02 t10 ... t22]. Sanity: at d=2 the cofactor norm equals |T|², so
+// the same formula collapses to s²/(4 det²) − 1 (the Python `_shape_value`).
+// ---------------------------------------------------------------------------
+template <typename T> constexpr T det3(const std::array<T, 9>& t)
+{
+    return (t[0] * ((t[4] * t[8]) - (t[5] * t[7]))) - (t[1] * ((t[3] * t[8]) - (t[5] * t[6]))) +
+           (t[2] * ((t[3] * t[7]) - (t[4] * t[6])));
+}
+
+// The 9 cofactors of the 3×3 (row-major; adj = cof^T).
+template <typename T> constexpr std::array<T, 9> cof3(const std::array<T, 9>& t)
+{
+    return {(t[4] * t[8]) - (t[5] * t[7]),
+            -((t[3] * t[8]) - (t[5] * t[6])),
+            (t[3] * t[7]) - (t[4] * t[6]),
+            -((t[1] * t[8]) - (t[2] * t[7])),
+            (t[0] * t[8]) - (t[2] * t[6]),
+            -((t[0] * t[7]) - (t[1] * t[6])),
+            (t[1] * t[5]) - (t[2] * t[4]),
+            -((t[0] * t[5]) - (t[2] * t[3])),
+            (t[0] * t[4]) - (t[1] * t[3])};
+}
+
+template <typename T> constexpr T mu_cond3(const std::array<T, 9>& t)
+{
+    const T D = det3(t);
+    const std::array<T, 9> cof = cof3(t);
+    T s = T(0.0);
+    T q = T(0.0);
+    for (int i = 0; i < 9; ++i) {
+        s = s + (t[i] * t[i]);
+        q = q + (cof[i] * cof[i]);
+    }
+    return (s * q) / (9.0 * D * D) - 1.0;
+}
+
+// δ-continuation untangle surrogate: det → Dh = ½(det + √(det² + 4δ²)) (> 0 on
+// folded cells), mirroring the 2D mu_untangle substitution.
+template <typename T> inline T mu_cond3_untangle(const std::array<T, 9>& t, double delta)
+{
+    using std::sqrt;  // egg::sqrt for Dual/Dual2 (ADL); std::sqrt for double
+    const T D = det3(t);
+    const T disc = (D * D) + T(4.0 * delta * delta);
+    const T Dh = 0.5 * (D + sqrt(disc));
+    const std::array<T, 9> cof = cof3(t);
+    T s = T(0.0);
+    T q = T(0.0);
+    for (int i = 0; i < 9; ++i) {
+        s = s + (t[i] * t[i]);
+        q = q + (cof[i] * cof[i]);
+    }
+    return (s * q) / (9.0 * Dh * Dh) - 1.0;
+}
+
+// ---------------------------------------------------------------------------
 // Objective concept + closed set of objective kinds (barrier / δ-untangle).
 //
 // An Objective supplies the per-cell μ value/grad/Hess w.r.t. vec(T) (μ is the
@@ -167,49 +226,113 @@ concept ObjectiveD = requires(const M& m, const VecTN<D>& t, double det) {
     { m.accept_mindet(det) } -> std::convertible_to<bool>;
 };
 
-// Barrier shape objective (minimises the shape-distortion metric μ). The closed
-// form is the 2D arithmetic; D!=2 is gated until Phase 2 supplies the 3D barrier.
+// Barrier shape objective (minimises the shape-distortion metric μ). D=2 keeps
+// the classic shape_2d closed forms (bit-identical production path); D=3 uses
+// the condition-number barrier μ_cond3 with dual-AD derivatives.
 template <int D> struct ShapeObjectiveT {
-    static_assert(D == 2, "ShapeObjectiveT: 3D shape barrier not yet implemented");
-    [[nodiscard]] double value(const VecTN<D>& t) const { return mu_value(t); }
-    [[nodiscard]] GradN<D> grad(const VecTN<D>& t) const { return mu_grad_closedform(t); }
-    [[nodiscard]] HessN<D> hess(const VecTN<D>& t) const { return mu_hess_closedform(t); }
+    static_assert(D == 2 || D == 3, "ShapeObjectiveT: unsupported dimension");
+    static constexpr int kN = dim::vecT(D);
+
+    [[nodiscard]] double value(const VecTN<D>& t) const
+    {
+        if constexpr (D == 2) {
+            return mu_value(t);
+        } else {
+            return mu_cond3(t);
+        }
+    }
+    [[nodiscard]] GradN<D> grad(const VecTN<D>& t) const
+    {
+        if constexpr (D == 2) {
+            return mu_grad_closedform(t);
+        } else {
+            std::array<Dual<kN>, kN> td;
+            for (int i = 0; i < kN; ++i) { td[i] = seed_dual<kN>(t[i], i); }
+            const Dual<kN> r = mu_cond3(td);
+            GradN<D> g;
+            for (int i = 0; i < kN; ++i) { g[i] = r.g[i]; }
+            return g;
+        }
+    }
+    [[nodiscard]] HessN<D> hess(const VecTN<D>& t) const
+    {
+        if constexpr (D == 2) {
+            return mu_hess_closedform(t);
+        } else {
+            std::array<Dual2<kN>, kN> td;
+            for (int i = 0; i < kN; ++i) { td[i] = seed_dual2<kN>(t[i], i); }
+            const Dual2<kN> r = mu_cond3(td);
+            HessN<D> H {};
+            for (int i = 0; i < kN; ++i) {
+                for (int j = 0; j < kN; ++j) { H[(i * kN) + j] = r.h[i][j]; }
+            }
+            return H;
+        }
+    }
     // Barrier: a step is only valid if every cell stays positively oriented.
     [[nodiscard]] bool accept_mindet(double mindet) const { return mindet > 0.0; }
 };
 
 // δ-continuation untangle objective: surrogate value + dual-AD grad/Hess, with the
 // relaxed accept rule (the surrogate is finite on folded cells, so min det A may
-// be ≤ 0 during continuation). 2D closed/AD form; gated for D!=2 until Phase 2.
+// be ≤ 0 during continuation). D=2 keeps the existing surrogate exactly; D=3
+// substitutes Dh into the condition-number barrier.
 template <int D> struct UntangleObjectiveT {
-    static_assert(D == 2, "UntangleObjectiveT: 3D untangle surrogate not yet implemented");
+    static_assert(D == 2 || D == 3, "UntangleObjectiveT: unsupported dimension");
+    static constexpr int kN = dim::vecT(D);
     double delta {0.0};
 
     [[nodiscard]] double value(const VecTN<D>& t) const
-    { return mu_untangle(t[0], t[1], t[2], t[3], delta); }
+    {
+        if constexpr (D == 2) {
+            return mu_untangle(t[0], t[1], t[2], t[3], delta);
+        } else {
+            return mu_cond3_untangle(t, delta);
+        }
+    }
     [[nodiscard]] GradN<D> grad(const VecTN<D>& t) const
     {
-        using Dv = Dual<kVecT>;
-        const Dv r = mu_untangle(seed_dual<kVecT>(t[0], 0),
-                                 seed_dual<kVecT>(t[1], 1),
-                                 seed_dual<kVecT>(t[2], 2),
-                                 seed_dual<kVecT>(t[3], 3),
-                                 delta);
-        return GradN<D> {r.g[0], r.g[1], r.g[2], r.g[3]};
+        if constexpr (D == 2) {
+            using Dv = Dual<kVecT>;
+            const Dv r = mu_untangle(seed_dual<kVecT>(t[0], 0),
+                                     seed_dual<kVecT>(t[1], 1),
+                                     seed_dual<kVecT>(t[2], 2),
+                                     seed_dual<kVecT>(t[3], 3),
+                                     delta);
+            return GradN<D> {r.g[0], r.g[1], r.g[2], r.g[3]};
+        } else {
+            std::array<Dual<kN>, kN> td;
+            for (int i = 0; i < kN; ++i) { td[i] = seed_dual<kN>(t[i], i); }
+            const Dual<kN> r = mu_cond3_untangle(td, delta);
+            GradN<D> g;
+            for (int i = 0; i < kN; ++i) { g[i] = r.g[i]; }
+            return g;
+        }
     }
     [[nodiscard]] HessN<D> hess(const VecTN<D>& t) const
     {
-        using Dv = Dual2<kVecT>;
-        const Dv r = mu_untangle(seed_dual2<kVecT>(t[0], 0),
-                                 seed_dual2<kVecT>(t[1], 1),
-                                 seed_dual2<kVecT>(t[2], 2),
-                                 seed_dual2<kVecT>(t[3], 3),
-                                 delta);
-        HessN<D> H {};
-        for (int i = 0; i < kVecT; ++i) {
-            for (int j = 0; j < kVecT; ++j) { H[(i * kVecT) + j] = r.h[i][j]; }
+        if constexpr (D == 2) {
+            using Dv = Dual2<kVecT>;
+            const Dv r = mu_untangle(seed_dual2<kVecT>(t[0], 0),
+                                     seed_dual2<kVecT>(t[1], 1),
+                                     seed_dual2<kVecT>(t[2], 2),
+                                     seed_dual2<kVecT>(t[3], 3),
+                                     delta);
+            HessN<D> H {};
+            for (int i = 0; i < kVecT; ++i) {
+                for (int j = 0; j < kVecT; ++j) { H[(i * kVecT) + j] = r.h[i][j]; }
+            }
+            return H;
+        } else {
+            std::array<Dual2<kN>, kN> td;
+            for (int i = 0; i < kN; ++i) { td[i] = seed_dual2<kN>(t[i], i); }
+            const Dual2<kN> r = mu_cond3_untangle(td, delta);
+            HessN<D> H {};
+            for (int i = 0; i < kN; ++i) {
+                for (int j = 0; j < kN; ++j) { H[(i * kN) + j] = r.h[i][j]; }
+            }
+            return H;
         }
-        return H;
     }
     [[nodiscard]] bool accept_mindet(double) const { return true; }
 };

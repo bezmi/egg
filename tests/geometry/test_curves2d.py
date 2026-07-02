@@ -325,3 +325,59 @@ def _bezier_eval(p: np.ndarray, t: float) -> np.ndarray:
     while p.shape[0] > 1:
         p = (1.0 - t) * p[:-1] + t * p[1:]
     return p[0]
+
+
+class TestNurbs:
+    @pytest.fixture
+    def quarter_circle(self):
+        # Rational quadratic Bézier quarter circle, exact on the unit circle.
+        return BSplineCurve(2, [0, 0, 0, 1, 1, 1],
+                            [[1, 0], [1, 1], [0, 1]],
+                            weights=[1.0, 1.0 / np.sqrt(2.0), 1.0])
+
+    def test_lies_exactly_on_unit_circle(self, quarter_circle):
+        for t in (0.0, 0.2, 0.5, 0.8, 1.0):
+            assert abs(np.linalg.norm(quarter_circle.eval(t)) - 1.0) < 1e-14
+
+    def test_deriv_matches_finite_differences(self, quarter_circle):
+        h = 1e-6
+        for t in (0.2, 0.5, 0.8):
+            fd = (quarter_circle.eval(t + h) - quarter_circle.eval(t - h)) / (2 * h)
+            np.testing.assert_allclose(quarter_circle.deriv(t), fd, atol=1e-6)
+            fd2 = (quarter_circle.deriv(t + h)
+                   - quarter_circle.deriv(t - h)) / (2 * h)
+            np.testing.assert_allclose(quarter_circle.deriv2(t), fd2, atol=1e-5)
+
+    def test_projection_is_radial(self, quarter_circle):
+        q = quarter_circle.project(np.array([1.4, 1.4]))
+        np.testing.assert_allclose(q, [1 / np.sqrt(2)] * 2, atol=1e-9)
+
+    def test_ones_weights_equal_polynomial(self):
+        knots = [0, 0, 0, 1, 2, 3, 3, 3]
+        ctrl = [[0, 0], [1, 2], [3, -1], [4, 2], [6, 0]]
+        poly = BSplineCurve(2, knots, ctrl)
+        rat = BSplineCurve(2, knots, ctrl, weights=np.ones(5))
+        for t in (0.3, 1.1, 2.6):
+            np.testing.assert_allclose(rat.eval(t), poly.eval(t), atol=1e-13)
+            np.testing.assert_allclose(rat.deriv(t), poly.deriv(t), atol=1e-12)
+
+    def test_weights_length_validated(self):
+        with pytest.raises(ValueError):
+            BSplineCurve(2, [0, 0, 0, 1, 1, 1], [[1, 0], [1, 1], [0, 1]],
+                         weights=[1.0, 2.0])
+
+    def test_encoding_appends_weights_to_arena(self, quarter_circle):
+        arena = []
+        tag, params = encode_entity(quarter_circle, arena=arena)
+        assert tag == TAG_BSPLINE
+        w_off, has_w = params[6], params[7]
+        assert has_w == 1.0
+        np.testing.assert_allclose(arena[int(w_off):int(w_off) + 3],
+                                   quarter_circle.weights)
+
+    def test_encoding_polynomial_has_no_weights(self):
+        bs = BSplineCurve(3, [0, 0, 0, 0, 1, 1, 1, 1],
+                          [[0, 0], [1, 1], [2, -1], [3, 0]])
+        arena = []
+        _tag, params = encode_entity(bs, arena=arena)
+        assert params[7] == 0.0

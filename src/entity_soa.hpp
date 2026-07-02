@@ -47,6 +47,9 @@ enum class EntityTag : int {
     CubicBezier = 9,
     BSpline = 10,
     Composite = 11,
+    Cylinder = 12,        ///< 3D surface.
+    Line3 = 13,           ///< 3D edge curve.
+    BSplineSurface = 14,  ///< 3D tensor-product B-spline/NURBS surface.
 };
 
 /// @brief Underlying-integer accessor, for the wire / Python / golden boundary.
