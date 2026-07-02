@@ -1,4 +1,4 @@
-"""Tests for the δ-continuation untangler (M5).
+"""Tests for the δ-continuation untangler.
 
 The untangle driver delegates to the C++ backend via
 :func:`egg.smoothing.cpp_backend.cpp_untangle`. These tests exercise the
@@ -16,7 +16,7 @@ from egg.smoothing.targets import IdentityTarget
 from egg.smoothing.untangle import untangle, grid_min_det
 from egg.topology.builder import TopologyBuilder
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "circles"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "2D", "circles"))
 from topologies import build_circle_in_rectangle  # noqa: E402
 
 

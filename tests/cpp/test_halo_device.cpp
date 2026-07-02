@@ -1,5 +1,5 @@
 // test_halo_device.cpp — SYCL device test of halo_exchange + BlockTopologyDevice
-// (src/structured_halo.hpp, Phase 1.2), on EVERY visible device (GPU + CPU).
+// (src/structured_halo.hpp), on EVERY visible device (GPU + CPU).
 //
 // Two conforming blocks share a face. Each block's interior is seeded with a
 // GLOBAL coordinate field that is continuous across the shared face: block 0

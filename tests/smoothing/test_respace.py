@@ -13,7 +13,7 @@ from egg.smoothing.respace import (
 )
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..",
-                                "examples", "circles"))
+                                "examples", "2D", "circles"))
 from topologies import build_circle_in_rectangle  # noqa: E402
 
 
@@ -166,7 +166,7 @@ def test_enforce_straightens_columns_onto_wall_normal():
             n_hat = np.asarray(circle.normal(circle.project(foot)))
             v = nodes[col, -4] - foot  # node at layer 3
             v = v / np.linalg.norm(v)
-            assert abs(np.cross(v, n_hat)) < 1e-9
+            assert abs(v[0] * n_hat[1] - v[1] * n_hat[0]) < 1e-9
 
 
 def test_straightening_keeps_far_boundary_row_on_geometry():

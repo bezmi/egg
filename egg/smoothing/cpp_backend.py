@@ -45,7 +45,7 @@ def _grid_mindet(X: np.ndarray, es: dict) -> float:
 
 @dataclass
 class BlockStructuredContext:
-    """Host-built tables for the Phase 1 halo-padded structured layout.
+    """Host-built tables for the halo-padded structured layout.
 
     These are the *only* things the C++ structured path uploads; all
     connectivity (shared-DOF identification, interface orientation, singularity
@@ -251,8 +251,8 @@ def build_block_structured_context(grid: MultiBlockGrid) -> BlockStructuredConte
                 raise NotImplementedError(
                     "build_block_structured_context: non-conforming interface "
                     f"between '{fa.block_name}' and '{fb.block_name}' (face node "
-                    f"{logical_a} has no shared-DOF twin). Phase 1 supports only "
-                    "conforming multiblock (see plan §1.7)."
+                    f"{logical_a} has no shared-DOF twin). The structured layout supports "
+                    "only conforming multiblock interfaces."
                 )
 
             # A's ghost (outside A's face) <- B's first interior layer inside the face.
@@ -336,7 +336,7 @@ class CppStructuredSweepSession:
         *,
         phase: str = "barrier",
         delta: float = 0.0,
-        omega: float = 1.0,
+        omega: float = 0.8,
         report_every: int = 0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Run ``n_sweeps`` of block-Jacobi on the resident packed X; returns
@@ -389,7 +389,7 @@ def cpp_structured_sweep(
     device: str = "auto",
     phase: str = "barrier",
     delta: float = 0.0,
-    omega: float = 1.0,
+    omega: float = 0.8,
     report_every: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run ``n_sweeps`` of block-Jacobi over the halo-padded structured store.

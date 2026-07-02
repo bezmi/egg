@@ -40,6 +40,12 @@ def IdentityTarget(d: int) -> Callable[..., np.ndarray]:
     return target
 
 
+def _smoothstep(t: float) -> float:
+    """Hermite smoothstep on ``[0, 1]`` (0 at 0, 1 at 1, zero end-slopes)."""
+    t = min(max(t, 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
 class BoundaryLayerTarget:
     """Oriented, layer-indexed wall-clustering target ``W`` for one ring block.
 
@@ -83,11 +89,21 @@ class BoundaryLayerTarget:
         Added to the layer index; lets a neighbouring block continue the
         clustering profile of a wall block across their shared interface
         (set it to the wall block's cell count along ``wall_axis``).
+    boundary_shear : dict, optional
+        Relax wall-normal orthogonality towards an oblique transverse
+        boundary: maps transverse side (0/1) -> ``(b_hat, taper)`` where
+        ``b_hat`` is the boundary's off-wall unit direction and ``taper``
+        the tangential fade width in cells. Within the taper the target's
+        wall-normal column is blended from the wall normal into ``b_hat``
+        (length rescaled so the perpendicular layer height stays exact), so
+        the metric prefers uniformly sheared parallelograms that follow the
+        boundary instead of trading layer heights for orthogonality to it.
+        Usually set via ``build_boundary_layer_target(relax_orthogonality=…)``.
     """
 
     def __init__(self, entity, *, first_height, growth, wall_axis, wall_side,
                  n_layers=8, interior_spacing=None, max_height=None,
-                 tangential_spacing=None, k_offset=0):
+                 tangential_spacing=None, k_offset=0, boundary_shear=None):
         if interior_spacing is None and tangential_spacing is None:
             raise ValueError(
                 "give at least one of interior_spacing / tangential_spacing")
@@ -105,6 +121,16 @@ class BoundaryLayerTarget:
             else self.tangential_spacing)
         self.max_height = None if max_height is None else float(max_height)
         self.k_offset = int(k_offset)
+        self.boundary_shear = dict(boundary_shear or {})
+        # Layer index where the geometric growth reaches the isotropic
+        # interior spacing — the extent of the anisotropic band. Boundary
+        # shear fades above it (see __call__).
+        if self.growth > 1.0 and self.first_height < self.interior_spacing:
+            self._k_iso = max(1, int(np.ceil(
+                np.log(self.interior_spacing / self.first_height)
+                / np.log(self.growth))))
+        else:
+            self._k_iso = max(1, self.n_layers)
 
     def normal_spacing(self, k: int) -> float:
         """Wall-normal target spacing at layer index ``k`` (capped growth)."""
@@ -143,10 +169,47 @@ class BoundaryLayerTarget:
         t_hat = np.asarray(self.entity.tangent_space(q), dtype=float)[:, 0]
 
         d = n_hat.shape[0]
+        # FIXME(3D): only ONE tangential column is filled below, so in 3D the
+        # third column of the np.empty W is uninitialized garbage. Fill every
+        # tangential column from the (d, d-1) ``tangent_space`` basis with its
+        # own spacing (t_hat_i * s_t_i) and keep the det-sign fixup.
         other = 1 - self.wall_axis if d == 2 else \
             [a for a in range(d) if a != self.wall_axis][0]
+
+        # Optional shear towards an oblique transverse boundary: within the
+        # taper the wall-normal column leans into the boundary's direction,
+        # rescaled so the perpendicular layer height stays exact.
+        # TODO(3D): the taper distance below is an index along the single 2D
+        # tangential axis; in 3D the oblique boundary is a face and the
+        # distance is to that face's edge in the wall face's 2D index space.
+        d_hat = n_hat
+        if self.boundary_shear:
+            n_t = block.logical_shape[other] - 1  # cells along the wall
+            j = int(cell_base[other])
+            lam, b_lam = 0.0, None
+            for side, (b_hat, taper) in self.boundary_shear.items():
+                dist = j if side == 0 else n_t - 1 - j
+                w = 1.0 - _smoothstep(dist / max(taper, 1))
+                if w > lam:
+                    lam, b_lam = w, b_hat
+            # Fade the shear with height: full strength through the
+            # anisotropic band, gone by three times its extent (a gentler
+            # turn keeps the band heights from being dragged by the
+            # orthogonal far field). Above that the profile is isotropic, so
+            # the lean stays with the smoother and the target matches
+            # neighbouring identity-target blocks at the shared interface
+            # (no cusp in the grid lines there).
+            lam *= 1.0 - _smoothstep((k - self._k_iso) / (2 * self._k_iso))
+            if lam > 0.0 and b_lam is not None:
+                b = np.asarray(b_lam, dtype=float)
+                if float(np.dot(b, n_hat)) < 0.0:
+                    b = -b
+                v = (1.0 - lam) * n_hat + lam * b
+                v /= np.linalg.norm(v)
+                d_hat = v / max(float(np.dot(v, n_hat)), 0.2)
+
         W = np.empty((d, d))
-        W[:, self.wall_axis] = n_hat * s_n
+        W[:, self.wall_axis] = d_hat * s_n
         W[:, other] = t_hat * s_t
         # Guarantee det W > 0 (flip the tangential column if needed).
         if np.linalg.det(W) < 0:
@@ -177,6 +240,10 @@ def _face_tangential_spacing(topology, block_name: str, axis: int,
 
     Distance between the face's two corner positions divided by the cell
     count along the face — the block's natural tangential spacing.
+
+    TODO(3D): a 3D face has two tangential axes; return both spacings
+    (from the face's four corners) so ``BoundaryLayerTarget`` can scale
+    each tangential column of W independently.
     """
     spec = topology.block_specs[block_name]
     names = spec.face_corner_names(axis, side, topology.d)
@@ -196,9 +263,30 @@ def _neighbour_across(topology, block_name: str, axis: int, side: int):
     return None
 
 
+def _boundary_direction(topology, entity, block_name: str, axis: int,
+                        side: int, wall_entity) -> np.ndarray | None:
+    """Off-wall unit direction of a transverse boundary face's entity.
+
+    Evaluated as the entity tangent at the face corner nearest the wall
+    (sign is resolved against the local wall normal at target-evaluation
+    time).
+    """
+    spec = topology.block_specs[block_name]
+    names = spec.face_corner_names(axis, side, topology.d)
+    pts = [np.asarray(topology.corners[n].position, dtype=float)
+           for n in names]
+    p = min(pts, key=lambda x: float(np.linalg.norm(
+        x - np.asarray(wall_entity.project(x)))))
+    q = np.asarray(entity.project(p), dtype=float)
+    t = np.asarray(entity.tangent_space(q), dtype=float)[:, 0]
+    norm = float(np.linalg.norm(t))
+    return t / norm if norm > 0 else None
+
+
 def build_boundary_layer_target(topology, grid=None, default=None,
                                 interior_spacing: float | None = None,
-                                blend_neighbours: bool = True):
+                                blend_neighbours: bool = True,
+                                relax_orthogonality=()):
     """Build a :class:`MultiBlockTarget` from a topology's boundary-layer specs.
 
     For every association whose entity carries a spec recorded via
@@ -218,6 +306,16 @@ def build_boundary_layer_target(topology, grid=None, default=None,
     (via ``k_offset``) instead of jumping straight to the default target —
     this removes the cell-size discontinuity at that interface when the
     clustering has not decayed to isotropic within the wall block.
+
+    ``relax_orthogonality`` names domain-boundary entities (or Edges) that
+    meet the wall obliquely: near each, the per-block targets shear the
+    wall-normal column into the boundary's own direction (see
+    ``BoundaryLayerTarget.boundary_shear``), so the optimiser follows the
+    boundary with uniformly sheared parallelograms instead of rotating the
+    near-wall cells orthogonal to it and losing the layer heights.
+    Boundaries not listed keep the plain orthogonal target. By default the
+    entities declared via ``builder.set_boundary_layer(relax_orthogonality=…)``
+    are used; passing the argument here overrides that declaration.
 
     Returns the assembled ``target_fn``; if the topology has no specs it
     returns ``default`` (so callers can use it unconditionally).
@@ -281,6 +379,39 @@ def build_boundary_layer_target(topology, grid=None, default=None,
                     topology, nb[0], nb[1], nb[2]),
                 k_offset=wall_cells,
             )
+
+    if relax_orthogonality:
+        relax_ids = {id(getattr(e, "entity", e)) for e in relax_orthogonality}
+    else:
+        relax_ids = {
+            id(getattr(e, "entity", e))
+            for spec in specs.values()
+            for e in spec.get("relax_orthogonality", ())
+        }
+    # TODO(3D): relax_orthogonality is 2D-only. In 3D the oblique boundary is
+    # a face: the taper becomes a distance-to-edge in the wall face's 2D index
+    # space, and b_hat varies along the wall-boundary edge — evaluate the
+    # boundary entity's tangent at each anchor's projection (per sample)
+    # instead of once per block in _boundary_direction.
+    if relax_ids and d == 2:
+        face_entities = {
+            (a.face.block_name, a.face.axis, a.face.side): a.entity
+            for a in topology.associations
+        }
+        for bi, blt in per_block.items():
+            bname = block_names[bi]
+            t_axis = 1 - blt.wall_axis
+            for side in (0, 1):
+                if _neighbour_across(topology, bname, t_axis, side) is not None:
+                    continue  # interior interface, not a domain boundary
+                ent = face_entities.get((bname, t_axis, side))
+                if ent is None or id(ent) not in relax_ids:
+                    continue
+                b_hat = _boundary_direction(
+                    topology, ent, bname, t_axis, side, blt.entity)
+                if b_hat is not None:
+                    blt.boundary_shear[side] = (b_hat, max(3, blt.n_layers))
+
     return MultiBlockTarget(default, per_block)
 
 

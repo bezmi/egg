@@ -1,5 +1,5 @@
-// test_field_device.cpp — SYCL device test of BlockField<D> (src/structured_field.hpp,
-// Phase 1.1b): the UsmBuffer-owning halo-padded coordinate store and its
+// test_field_device.cpp — SYCL device test of BlockField<D>
+// (src/structured_field.hpp): the UsmBuffer-owning halo-padded coordinate store and its
 // interior(b) / with_halo(b) mdspan views. Runs on EVERY visible device (the
 // AMD GPU and the OpenMP host/CPU device).
 //

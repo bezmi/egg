@@ -1,4 +1,4 @@
-// test_3d.cpp — milestone-B checks for the dimension-specific 3D math:
+// test_3d.cpp — checks for the dimension-specific 3D math:
 // det<3>, solveNxN<3>, the condition-number barrier mu_cond3 (+ untangle
 // surrogate) and its dual-AD derivatives, the 3D surface/edge parametrizations
 // (plane, sphere, cylinder, line), the K=2 Gram–Schmidt branch of

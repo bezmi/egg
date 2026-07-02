@@ -128,7 +128,7 @@ class MultiBlockGrid:
     def pack(self) -> np.ndarray:
         """Flatten free-DOF coordinates into a 1D optimization vector.
 
-        Delegates to :func:`egg.smoothing.objective.pack_x` (the real M2
+        Delegates to :func:`egg.smoothing.objective.pack_x` (the real
         implementation).
         """
         from egg.smoothing.objective import pack_x

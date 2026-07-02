@@ -16,7 +16,7 @@ import sys
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples", "circles"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples", "2D", "circles"))
 
 
 def _has_cpp() -> bool:

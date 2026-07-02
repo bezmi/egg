@@ -11,7 +11,18 @@ from .curves2d import (
     EllipseArc,
     QuadBezier,
 )
-from .frontend2d import Arc, Bezier, Edge, Line, Node, Polyline, Spline, Vector3
+from .frontend2d import (
+    Arc,
+    Bezier,
+    Edge,
+    Line,
+    Node,
+    Polyline,
+    Spline,
+    Vector3,
+    split_cells,
+    tfi_point,
+)
 from .surfaces3d import BSplineSurface
 
 __all__ = [
@@ -26,6 +37,8 @@ __all__ = [
     "Spline",
     "Edge",
     "Node",
+    "split_cells",
+    "tfi_point",
     # 2D analytic
     "Circle",
     "Ellipse",

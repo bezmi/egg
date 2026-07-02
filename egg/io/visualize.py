@@ -18,8 +18,26 @@ __all__ = [
     "plot_topology",
     "plot_grid",
     "plot_quality",
+    "plot_convergence",
     "LiveGridView",
 ]
+
+
+def plot_convergence(energy_history, mindet_history, *,
+                     mindet_title="min det A", xlabel="chunk", show=True):
+    """Two-pane matplotlib figure: TMOP energy and min det A per step."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+    ax[0].plot(energy_history, "-o", ms=3)
+    ax[0].set(title="TMOP energy", xlabel=xlabel, ylabel="F")
+    ax[1].axhline(0, color="r", lw=0.8)
+    ax[1].plot(mindet_history, "-o", ms=2)
+    ax[1].set(title=mindet_title, xlabel=xlabel)
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
 
 
 def _get_plotter(show: bool) -> "pv.Plotter | None":
@@ -477,8 +495,8 @@ def plot_energy_history(energy_history: list[float], *, show: bool = True) -> No
 
 
 def plot_quality(grid, *, show: bool = True):
-    """Plot quality metrics (deferred to M3)."""
-    raise NotImplementedError("Quality plotting deferred to M3 (metrics)")
+    """Plot quality metrics (not yet implemented)."""
+    raise NotImplementedError("Quality plotting is not implemented yet")
 
 
 def plot_grid_live(

@@ -16,9 +16,9 @@ from egg.topology.builder import TopologyBuilder
 from tests.real_tol import real_tol
 
 
-# --- demo grid (Phase-4 O-grid around a circle in a square) ---------------------
+# --- demo grid (O-grid around a circle in a square) ---------------------
 def build_demo_grid():
-    """The Phase-4 O-grid topology; returns (grid, topology, target, entities)."""
+    """The circle-in-square O-grid topology; returns (grid, topology, target, entities)."""
     circle = Circle(center=(2.0, 2.0), radius=0.8)
     bottom = LineSegment(start=(0.0, 0.0), end=(4.0, 0.0))
     right = LineSegment(start=(4.0, 0.0), end=(4.0, 4.0))

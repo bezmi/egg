@@ -13,7 +13,7 @@ for tests and demos.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 import numpy as np
@@ -23,7 +23,8 @@ from .core.types import MultiBlockGrid
 __all__ = [
     "generate",
     "generate_steps",
-    "drain",
+    "drain_steps",
+    "run_pipeline",
     "PipelineConfig",
     "PipelineReport",
 ]
@@ -31,29 +32,40 @@ __all__ = [
 
 @dataclass
 class PipelineConfig:
-    """Per-phase caps, schedule params, and backend options for :func:`generate`."""
+    """Pipeline options: per-phase caps, schedule params, and backend choices.
+
+    Consumed by :func:`generate_steps` / :func:`run_pipeline` (field names
+    match their keyword overrides) and by :func:`generate`.
+    """
 
     target_fn: Callable[..., np.ndarray] | None = None  # default: IdentityTarget(d)
     metric: str = "shape_2d"
 
     # Validity gate / untangle schedule.
     margin: float = 1e-9
-    untangle_sweeps_per_delta: int = 20
-    untangle_delta0_factor: float = 2.0
+    sweeps_per_delta: int = 20
+    delta0_factor: float = 2.0
     # Gentle δ shrink: block-Jacobi untangle smooths less per sweep than a
     # sequential relaxation, so it needs more δ levels to clear a fold.
     untangle_shrink: float = 0.8
-    untangle_max_outer: int = 60
+    max_outer: int = 60
+    # Direct = the whole δ-continuation in one C++ call; stepped (False)
+    # yields per δ so live views can animate the unfolding.
+    untangle_direct: bool = True
 
     # TMOP quality phase.
     tmop_sweeps: int = 40
     tmop_chunk: int = 10
-    omega: float = 1.0  # block-Jacobi SOR/damping weight for the TMOP phase
+    omega: float = 0.8  # block-Jacobi SOR/damping weight for the TMOP phase
     # report_every throttle for the resident session's energy/min-det reduction
     # (0 = chunk-end, 1 = per-sweep, k > 1 = every k-th plus final). 0 is the
     # lowest-launch default for the small-n GPU regime; set 1 for live plots
     # that animate per-sweep energy curves.
     report_every: int = 0
+
+    # Optional boundary-layer phases (see :func:`generate_steps`).
+    pin_sweeps: int = 0
+    respace: bool = False
 
     # Backend.
     device: str = "cpu"
@@ -96,27 +108,18 @@ def _sync(grid, X) -> None:
         blk.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]
 
 
-def generate_steps(
-    grid,
-    target=None,
-    *,
-    margin: float = 1e-9,
-    sweeps_per_delta: int = 20,
-    delta0_factor: float = 2.0,
-    untangle_shrink: float = 0.8,
-    max_outer: int = 60,
-    untangle_direct: bool = True,
-    tmop_sweeps: int = 40,
-    tmop_chunk: int = 10,
-    omega: float = 1.0,
-    report_every: int = 0,
-    device: str = "cpu",
-):
+def generate_steps(grid, target=None, config: PipelineConfig | None = None,
+                   **overrides):
     """Step-wise pipeline on the C++ backend; mutates ``grid`` in place.
+
+    All options come from ``config`` (a :class:`PipelineConfig`; defaults are
+    used when omitted); keyword ``overrides`` update a copy of it, so
+    ``generate_steps(grid, target, cfg, untangle_direct=False)`` reuses one
+    config across call sites. Unknown override names raise.
 
     Yields ``(phase, info)`` after each unit of work so callers can animate the
     folded → untangled → smoothed transition or collect per-step convergence
-    history. :func:`generate` drains this to do a batch run; the Phase-5 demos
+    history. :func:`generate` drains this to do a batch run; the live demos
     drive it from a PyVista timer (see :func:`egg.io.visualize.animate_pipeline`).
 
     The TMOP phase always steps per chunk (``tmop_chunk`` sweeps each); set
@@ -133,13 +136,27 @@ def generate_steps(
     target-independent and a strongly anisotropic target can stall the
     continuation).
 
+    With ``pin_sweeps > 0``, after the TMOP phase each boundary-layer spec's
+    first ``n_fixed`` layers are set to their exact geometric heights and
+    pinned (:func:`egg.smoothing.respace_first_layers`), the sweep context is
+    rebuilt so the pinned DOFs leave the update set, and ``pin_sweeps`` more
+    TMOP sweeps re-equilibrate the free grid. With ``respace`` the exact wall
+    respacing post-pass (:func:`egg.smoothing.enforce_boundary_layer_spacing`,
+    nodes sliding along their smoothed columns) runs at the end instead.
+
     Phases: ``init`` (once) → ``untangle`` (per δ, only if folded) → ``tmop``
-    (per chunk) → ``final`` (once, after the closing boundary snap).
+    (per chunk) → ``pin`` + ``tmop`` (with ``pin_sweeps``) → ``respace``
+    (with ``respace``) → ``final`` (once, after the closing boundary snap).
     """
     from .smoothing.solver import build_sweep_context
     from .smoothing.targets import IdentityTarget
     from .smoothing.untangle import grid_min_det
     from .projection.project import project_nodes
+
+    cfg = replace(config, **overrides) if config is not None \
+        else PipelineConfig(**overrides)
+    margin, device = cfg.margin, cfg.device
+    tmop_chunk, omega, report_every = cfg.tmop_chunk, cfg.omega, cfg.report_every
 
     d = grid.topology.d
     iso = IdentityTarget(d)
@@ -167,14 +184,14 @@ def generate_steps(
         # damped (omega < 1): an undamped simultaneous update overshoots the
         # barrier and can deepen a fold instead of clearing it.
         untangle_omega = 0.5
-        if untangle_direct:
+        if cfg.untangle_direct:
             from .smoothing.cpp_backend import cpp_untangle
             X_out, md, outer_iters, delta_final = cpp_untangle(
                 ctx_iso, grid, grid.global_nodes,
-                sweeps_per_delta=sweeps_per_delta,
-                delta0_factor=delta0_factor,
-                shrink=untangle_shrink,
-                max_outer=max_outer,
+                sweeps_per_delta=cfg.sweeps_per_delta,
+                delta0_factor=cfg.delta0_factor,
+                shrink=cfg.untangle_shrink,
+                max_outer=cfg.max_outer,
                 device=device,
                 margin=margin,
                 omega=untangle_omega)
@@ -188,10 +205,10 @@ def generate_steps(
             bsc = build_block_structured_context(grid)
             session = CppStructuredSweepSession(
                 ctx_iso, bsc, grid.global_nodes, device=device)
-            delta = delta0_factor * max(abs(md), 1e-12)
-            for it in range(max_outer):
+            delta = cfg.delta0_factor * max(abs(md), 1e-12)
+            for it in range(cfg.max_outer):
                 _e, mds = session.run(
-                    sweeps_per_delta, phase="untangle", delta=delta,
+                    cfg.sweeps_per_delta, phase="untangle", delta=delta,
                     omega=untangle_omega,
                     report_every=report_every,
                 )
@@ -202,13 +219,13 @@ def generate_steps(
                                     "outer_iter": it + 1, "converged": converged})
                 if converged:
                     break
-                delta *= untangle_shrink
+                delta *= cfg.untangle_shrink
         # Re-snap boundary DOFs after untangling moved them.
         project_nodes(grid, grid.dof_constraints)
 
     # --- Phase 2: TMOP quality optimisation (resident session, per-chunk loop) ---
     tmop_ctx = ctx_iso if target is None else build_sweep_context(grid, target)
-    tmop_sweeps = max((tmop_sweeps // tmop_chunk) * tmop_chunk, tmop_chunk)
+    tmop_sweeps = max((cfg.tmop_sweeps // tmop_chunk) * tmop_chunk, tmop_chunk)
     # Block-Jacobi over the halo-padded structured store, built from the grid's
     # BlockTopology; one merged double-buffered launch per sweep, SOR weight omega.
     from .smoothing.cpp_backend import (
@@ -227,13 +244,51 @@ def generate_steps(
                         "min_det": grid_min_det(grid.global_nodes, es),
                         "sweeps": done})
     project_nodes(grid, grid.dof_constraints)
+    score_es = tmop_ctx.energy_stencil
+
+    # --- Phase 3 (optional): pin the first n_fixed boundary layers exactly ---
+    if cfg.pin_sweeps > 0:
+        from .smoothing.respace import respace_first_layers
+
+        pinned = respace_first_layers(grid, grid.topology)
+        yield ("pin", {"n_dofs": int(pinned.size),
+                       "min_det": grid_min_det(grid.global_nodes, es)})
+        if pinned.size:
+            # Rebuild the context so the pinned DOFs are compiled out of the
+            # update set, then re-equilibrate the free grid (warm start).
+            pin_ctx = build_sweep_context(
+                grid, iso if target is None else target)
+            session = CppStructuredSweepSession(
+                pin_ctx, build_block_structured_context(grid),
+                grid.global_nodes, device=device)
+            total = max((cfg.pin_sweeps // tmop_chunk) * tmop_chunk, tmop_chunk)
+            done = 0
+            while done < total:
+                k = min(tmop_chunk, total - done)
+                energies, _mds = session.run(
+                    k, report_every=report_every, **run_kwargs)
+                done += k
+                _sync(grid, session.get_X())
+                yield ("tmop", {"energy": float(np.asarray(energies)[-1]),
+                                "min_det": grid_min_det(grid.global_nodes, es),
+                                "sweeps": done})
+            project_nodes(grid, grid.dof_constraints)
+            score_es = pin_ctx.energy_stencil
+
+    # --- Optional exact wall-respacing post-pass ---
+    if cfg.respace:
+        from .smoothing.respace import enforce_boundary_layer_spacing
+
+        enforce_boundary_layer_spacing(grid, grid.topology,
+                                       straighten_columns=False)
+        yield ("respace", {"min_det": grid_min_det(grid.global_nodes, es)})
 
     # Terminal summary AFTER the closing boundary snap, so the reported/plotted
     # final numbers reflect the snapped mesh. Energy is scored on the SAME
-    # context TMOP optimised (tmop_ctx) — for a BL/anisotropic target the
-    # isotropic stencil reports a different (higher) objective on the same mesh.
+    # context TMOP optimised — for a BL/anisotropic target the isotropic
+    # stencil reports a different (higher) objective on the same mesh.
     yield ("final", {"min_det": grid_min_det(grid.global_nodes, es),
-                     "energy": _energy(grid, tmop_ctx.energy_stencil)})
+                     "energy": _energy(grid, score_es)})
 
 
 def _fmt_info(info: dict) -> str:
@@ -242,7 +297,7 @@ def _fmt_info(info: dict) -> str:
     return " ".join(parts)
 
 
-def drain(steps, *, mindet_history=None, energy_history=None, verbose=True):
+def drain_steps(steps, *, mindet_history=None, energy_history=None, verbose=True):
     """Run a :func:`generate_steps` generator to completion (headless).
 
     Optionally collects per-step ``min_det`` / ``energy`` into the supplied lists
@@ -259,6 +314,26 @@ def drain(steps, *, mindet_history=None, energy_history=None, verbose=True):
             mindet_history.append(info["min_det"])
         if energy_history is not None and "energy" in info:
             energy_history.append(info["energy"])
+
+
+def run_pipeline(grid, target=None, config: PipelineConfig | None = None, *,
+                 mindet_history=None, energy_history=None, verbose=True,
+                 **overrides):
+    """Batch convenience: :func:`drain_steps` over :func:`generate_steps`.
+
+    Options come from ``config`` (a :class:`PipelineConfig`) with keyword
+    ``overrides`` applied on top, exactly as in :func:`generate_steps`
+    (which mutates ``grid`` in place); the history lists collect per-step
+    ``min_det`` / ``energy``. Use :func:`generate_steps` directly when you
+    need to drive the steps yourself
+    (e.g. :func:`egg.io.visualize.animate_pipeline`).
+    """
+    drain_steps(
+        generate_steps(grid, target, config, **overrides),
+        mindet_history=mindet_history,
+        energy_history=energy_history,
+        verbose=verbose,
+    )
 
 
 def generate(topology, config: PipelineConfig | None = None) -> MultiBlockGrid:
@@ -278,18 +353,7 @@ def generate(topology, config: PipelineConfig | None = None) -> MultiBlockGrid:
     tmop_sweeps_done = 0
     try:
         for phase, info in generate_steps(
-                grid, config.target_fn,
-                margin=config.margin,
-                sweeps_per_delta=config.untangle_sweeps_per_delta,
-                delta0_factor=config.untangle_delta0_factor,
-                untangle_shrink=config.untangle_shrink,
-                max_outer=config.untangle_max_outer,
-                untangle_direct=True,
-                tmop_sweeps=config.tmop_sweeps,
-                tmop_chunk=config.tmop_chunk,
-                omega=config.omega,
-                report_every=config.report_every,
-                device=config.device):
+                grid, config.target_fn, config, untangle_direct=True):
             if phase == "init":
                 report.add("init", min_det=info["min_det"])
             elif phase == "untangle":

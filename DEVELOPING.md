@@ -167,7 +167,7 @@ After any of (a)/(b)/(c), you have an editable install:
 - **Run things:**
 
   ```bash
-  uv run examples/circles/phase5_good-topo_demo.py --device cpu
+  uv run examples/2D/circles/good-topo.py --device cpu
   uv run pytest tests/
   ```
 

@@ -27,7 +27,7 @@ features it can't parse (counter collection, sys-trace, summaries, etc.).
 
 **Run every command in this skill from the project root**
 (`/home/simran/rep/egg-dod-3d`), e.g. start with `cd /home/simran/rep/egg-dod-3d`.
-All paths here — `examples/sphere3d/sphere_in_cube_nurbs.py`,
+All paths here — `examples/3D/sphere3d/sphere_in_cube_nurbs.py`,
 `scripts/parse_trace.py` — are **relative to the project root, NOT to this skill
 directory**. The app path inside the test command is hard-coded relative to the
 project root, so launching rocprofv3 from anywhere else will fail to find it.
@@ -53,7 +53,7 @@ change, add, or drop any of its flags. To look at different things, change only
 the **rocprofv3** flags that come *before* `--`.
 
 ```
-uv run python examples/sphere3d/sphere_in_cube_nurbs.py \
+uv run python examples/3D/sphere3d/sphere_in_cube_nurbs.py \
   --sweeps 1000 --chunk 1000 --structured \
   --smoother block-jacobi --omega 0.8 --device gpu
 ```
@@ -94,7 +94,7 @@ silently rebuild the double extension:
 
 ```
 rocprofv3 --kernel-trace --output-format csv -d "$OUT" -- \
-  uv run --no-sync python examples/sphere3d/sphere_in_cube_nurbs.py \
+  uv run --no-sync python examples/3D/sphere3d/sphere_in_cube_nurbs.py \
     --sweeps 1000 --chunk 1000 --structured \
     --smoother block-jacobi --omega 0.8 --device gpu
 ```
@@ -110,11 +110,10 @@ uv sync --force-reinstall
 
 ### fp32 caveats
 
-- The example script's final assertion (`assert sph_dev < 1e-9 and pl_dev < 1e-9`
-  at line 569 of `sphere_in_cube_nurbs.py`) will **fail** under fp32 because the
-  sphere/plane deviation floor is ~1e-7. The sweeps complete and converge; this
-  is only a Python-side assertion at the very end. rocprofv3 still captures every
-  kernel dispatch correctly.
+- The driver reports the final sphere/plane deviations (`sphere |x|-r0 max
+  dev` in `examples/3D/sphere3d/driver.py`); expect ~1e-7 under fp32 instead
+  of the fp64 ~1e-15 floor. Only `min det > 0` is asserted, so the run still
+  completes and rocprofv3 captures every kernel dispatch correctly.
 - For the closed-form math tests under clang codegen, use
   `-DEGG_TEST_ACPP_CLANG=ON` (see the CMakeLists.txt `EGG_TEST_ACPP_CLANG`
   option).
@@ -140,7 +139,7 @@ Start here for "profile the gpu" / "VGPR" / "spills" / "what's the hot kernel".
 
 ```
 rocprofv3 --kernel-trace --output-format csv -d "$OUT" -- \
-  uv run python examples/sphere3d/sphere_in_cube_nurbs.py \
+  uv run python examples/3D/sphere3d/sphere_in_cube_nurbs.py \
     --sweeps 1000 --chunk 1000 --structured \
     --smoother block-jacobi --omega 0.8 --device gpu
 ```
@@ -223,7 +222,7 @@ capture it). This is independent of rocprofv3 and combines with any recipe:
 
 ```
 rocprofv3 --kernel-trace --output-format csv -d "$OUT" -- \
-  env ACPP_DEBUG_LEVEL=3 uv run python examples/sphere3d/sphere_in_cube_nurbs.py \
+  env ACPP_DEBUG_LEVEL=3 uv run python examples/3D/sphere3d/sphere_in_cube_nurbs.py \
     --sweeps 1000 --chunk 1000 --structured \
     --smoother block-jacobi --omega 0.8 --device gpu \
   2> "$OUT/acpp.log"

@@ -1,5 +1,5 @@
 // test_structured.cpp — host-side unit tests for BlockLayout<D> (src/structured.hpp),
-// the padded-shape / offset / stride math of Phase 1.1a. No SYCL: this suite
+// the padded-shape / offset / stride math of the structured store. No SYCL: this suite
 // builds under the default compiler in the `cpp_tests` executable.
 //
 // The layout packs halo-padded structured blocks (one ghost node per face) into
@@ -167,7 +167,7 @@ static const suite<"structured"> structured_suite = [] {
     // from structured_patch.hpp) is bit-identical to patch_eval over a compact
     // global array. Proves the padded store is a drop-in for the global X and
     // that the structured gc/gn read the correct 3x3 (+/-1 per axis)
-    // neighbourhood (the Phase 1.3 structured patch-eval bridge). The two views
+    // neighbourhood (the structured patch-eval bridge). The two views
     // share the same W_inv/J/role/s; only the node ids differ (compact global vs
     // structured padded), so any divergence is an indexing bug.
     "structured patch_eval matches compact patch_eval"_test = [] {

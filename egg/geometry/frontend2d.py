@@ -56,7 +56,59 @@ __all__ = [
     "Spline",
     "Edge",
     "Node",
+    "split_cells",
+    "tfi_point",
 ]
+
+
+def split_cells(n: int, k: int) -> list[int]:
+    """Split ``n`` cells into ``k`` contiguous per-block counts.
+
+    As even as possible; the counts always sum to ``n``. Used to divide a
+    total resolution across a row of blocks (cf.
+    :meth:`egg.topology.builder.TopologyBuilder.add_block_array`).
+    """
+    return [round(n * (t + 1) / k) - round(n * t / k) for t in range(k)]
+
+
+def tfi_point(u: float, v: float, south: "Edge", north: "Edge",
+              west: "Edge", east: "Edge") -> "Vector3":
+    """Bilinear transfinite interpolation of four bounding edges at (u, v).
+
+    ``south``/``north`` are parameterised west -> east (by ``u``),
+    ``west``/``east`` south -> north (by ``v``); the patch corners are the
+    shared edge endpoints. Standard Coons-patch formula — used to place
+    interior block corners of a block array parametrically.
+    """
+    s, n = south.point_at(u), north.point_at(u)
+    w, e = west.point_at(v), east.point_at(v)
+    p00, p10 = south.point_at(0.0), south.point_at(1.0)
+    p01, p11 = north.point_at(0.0), north.point_at(1.0)
+    x = (
+        (1 - v) * s.x
+        + v * n.x
+        + (1 - u) * w.x
+        + u * e.x
+        - (
+            (1 - u) * (1 - v) * p00.x
+            + u * (1 - v) * p10.x
+            + (1 - u) * v * p01.x
+            + u * v * p11.x
+        )
+    )
+    y = (
+        (1 - v) * s.y
+        + v * n.y
+        + (1 - u) * w.y
+        + u * e.y
+        - (
+            (1 - u) * (1 - v) * p00.y
+            + u * (1 - v) * p10.y
+            + (1 - u) * v * p01.y
+            + u * v * p11.y
+        )
+    )
+    return Vector3(x, y)
 
 
 class Vector3:

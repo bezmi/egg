@@ -1,5 +1,5 @@
 // test_structured_field_device.cpp — SYCL device test of BlockFieldStructured<D>
-// (src/structured_smoother.hpp, Phase 1.3): the StructuredField adapter that
+// (src/structured_smoother.hpp): the StructuredField adapter that
 // composes the BlockField store with the BlockTopologyDevice halo tables and
 // exposes exchange_halos(). Runs on EVERY visible device (GPU + CPU).
 //

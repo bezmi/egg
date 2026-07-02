@@ -10,19 +10,15 @@ sampled from ``r(theta) = 0.8 + 0.12 sin(3 theta)`` (a wavy blob), produced as a
 
 Pipeline: TFI init → boundary snap → TMOP quality optimisation.
 
-Usage::
-
-    uv run blob.py [--plot-live] [--plot-energy] [--plot-grid]
-        [--plot-topology] [--export mesh.su2] [--device cpu|gpu|auto]
-        [--tmop-sweeps N] [--chunk N]
+The command-line surface lives in ``driver.py``; run
+``uv run blob.py --help`` for options.
 """
-
-import argparse
 
 import numpy as np
 
+from egg.pipeline import PipelineConfig, generate_steps
+
 from egg.geometry import Edge, Line, Spline, Vector3
-from egg.pipeline import generate_steps, drain
 from egg.topology.builder import TopologyBuilder
 
 
@@ -112,92 +108,28 @@ def build_blob_in_rectangle():
 
 
 def main():
-    p = argparse.ArgumentParser(description="spline blob → TMOP smoothed.")
-    p.add_argument("--plot-live", action="store_true",
-                   help="PyVista animated relaxation")
-    p.add_argument("--plot-energy", action="store_true",
-                   help="matplotlib energy + min-det convergence curves")
-    p.add_argument("--plot-grid", action="store_true",
-                   help="final wireframe grid")
-    p.add_argument("--plot-topology", action="store_true",
-                   help="Plot the declared topology only — no pipeline run")
-    p.add_argument("--colour-edge-verts", action="store_true",
-                   help="Toggle blue/red edge-vertex spheres in live plot")
-    p.add_argument("--export", metavar="FILE",
-                   help="write the final grid as an SU2 mesh (markers: blob, "
-                        "bottom, right, top, left)")
-    p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
-    p.add_argument("--tmop-sweeps", type=int, default=40)
-    p.add_argument("--sweeps-per-delta", type=int, default=20)
-    p.add_argument("--chunk", type=int, default=10)
-    p.add_argument("--omega", type=float, default=1.0,
-                   help="block-Jacobi SOR/damping weight (1.0 = undamped)")
-    a = p.parse_args()
+    import os
+    import sys
 
-    print("=" * 56)
-    print("spline blob in rectangle → TMOP smooth")
-    print("=" * 56)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from driver import finish, parse_args
+
+    a = parse_args()
 
     topo, ents = build_blob_in_rectangle()
 
-    if a.plot_topology:
-        from egg.io.visualize import plot_topology
-
-        plot_topology(topo, highlight_singularities=True, show=True)
-        return
-
     grid = topo.initialize_grid()
-
-    steps = generate_steps(
-        grid,
-        None,
+    cfg = PipelineConfig(
         sweeps_per_delta=a.sweeps_per_delta,
         tmop_sweeps=a.tmop_sweeps,
         tmop_chunk=a.chunk,
         omega=a.omega,
         device=a.device,
-        # Step the untangle per δ only when animating; otherwise run it direct.
-        untangle_direct=not a.plot_live,
     )
+    steps = generate_steps(grid, None, cfg, untangle_direct=not a.plot_live)
 
-    if a.plot_live:
-        from egg.io.visualize import animate_pipeline
-
-        animate_pipeline(
-            grid,
-            list(ents.values()),
-            steps,
-            show_edge_verts=a.colour_edge_verts,
-            title="spline blob",
-        )
-    else:
-        mindet_history, energy_history = [], []
-        drain(steps, mindet_history=mindet_history, energy_history=energy_history)
-        print(f"\nFinal min det A: {mindet_history[-1]:.4e}")
-
-        if a.plot_grid:
-            from egg.io.visualize import plot_grid
-
-            plot_grid(grid)
-        if a.plot_energy:
-            import matplotlib.pyplot as plt
-
-            fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-            ax[0].plot(energy_history, "-o", ms=3)
-            ax[0].set(title="TMOP energy", xlabel="chunk", ylabel="F")
-            ax[1].axhline(0, color="r", lw=0.8)
-            ax[1].plot(mindet_history, "-o", ms=2)
-            ax[1].set(title="min det A (TMOP only)", xlabel="chunk")
-            plt.tight_layout()
-            plt.show()
-
-    if a.export:
-        from egg.io import export_su2
-
-        export_su2(grid, a.export)
-        print(f"Exported SU2 mesh to {a.export}")
-
-    print("Done.")
+    finish(grid, topo, ents, steps, a, title="spline blob",
+           mindet_title="min det A (TMOP only)")
 
 
 if __name__ == "__main__":

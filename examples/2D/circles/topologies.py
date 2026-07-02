@@ -23,7 +23,14 @@ _INNER_PROPER = [(1.3, 1.3), (2.7, 1.3), (2.7, 2.7), (1.3, 2.7)]
 _INNER_ROUGH = [(2.5, 2.4), (1.6, 2.5), (1.5, 1.6), (2.4, 1.5)]
 
 
-def build_circle_in_rectangle(rough: bool = False, R: int = 1):
+def build_circle_in_rectangle(rough: bool = False, R: int = 1, bl=None):
+    """Circle-in-rectangle O-grid topology.
+
+    ``rough`` → folded TFI start (exercises the δ-continuation untangler).
+    ``bl`` (dict) → ``set_boundary_layer`` spec for the circle, e.g.
+    ``dict(first_height=0.01, growth=1.3)``.
+    ``R`` → resolution multiplier.
+    """
     circle = Circle(center=(2.0, 2.0), radius=0.8)
 
     sw = Vector3(x=0.0, y=0.0, fixed=True)
@@ -83,6 +90,9 @@ def build_circle_in_rectangle(rough: bool = False, R: int = 1):
         b.associate(blk, 0, 0, a0)
         b.associate(blk, 1, 0, a1)
 
+    if bl is not None:
+        b.set_boundary_layer(circle, **bl)
+
     topology = b.build()
     entities = {
         "circle": circle,
@@ -110,7 +120,7 @@ def build_twin_circle(rough: bool = False, bl=None, R: int = 1):
 
     ``rough`` → folded TFI start (exercises δ-continuation untangler).
     ``bl`` (dict) → set_boundary_layer on each circle via ``bl["circle"]`` and
-    ``bl["circle2"]`` dicts of ``{first_height, growth, n_layers}``.
+    ``bl["circle2"]`` dicts, e.g. ``dict(first_height=0.05, growth=1.5)``.
     ``R`` → corner-block resolution multiplier.
     """
     circle = Circle(center=(2.0, 2.0), radius=0.8)

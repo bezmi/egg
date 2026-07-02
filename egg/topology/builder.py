@@ -250,6 +250,88 @@ class TopologyBuilder:
         )
         return self
 
+    def add_block_array(
+        self,
+        *,
+        south: Edge,
+        north: Edge,
+        west: Edge,
+        east: Edge,
+        nib: int,
+        njb: int,
+        res: tuple[int, int],
+        fixed_corners: bool = True,
+        corner_prefix: str = "c",
+        block_prefix: str = "b",
+    ) -> tuple[dict, list[list[str]]]:
+        """Add an ``nib x njb`` array of blocks over a four-edge patch.
+
+        The Eilmer ``registerFluidGridArray`` analogue: sub-block corners
+        are placed parametrically on the bounding edges (sliding nodes) and
+        by bilinear TFI in the interior; blocks share the corner objects, so
+        block-to-block connectivity is inferred at :meth:`build`, and the
+        outer block faces are associated with their bounding edges.
+
+        ``south``/``north`` are parameterised west -> east, ``west``/``east``
+        south -> north; axis 0 of every block runs west -> east and axis 1
+        south -> north. ``res`` is the TOTAL cell count across the array
+        ``(n_axis0, n_axis1)``, split as evenly as possible into per-block
+        resolutions. With ``fixed_corners`` the four patch-corner nodes are
+        pinned. Corners are registered as ``c{i}_{j}`` (i: 0=west..nib=east,
+        j: 0=south..njb=north) and blocks as ``b{i}_{j}`` so
+        ``--plot-topology`` labels stay readable.
+
+        Returns ``(corner, block_names)``: the shared corner objects keyed
+        ``(i, j)`` and the block-name grid ``block_names[i][j]``, for
+        tagging boundaries or attaching further structure.
+
+        TODO(3D): the hexahedral analogue is a block array over a patch
+        bounded by six faces, with edge/face/interior corners placed by the
+        corresponding 1D/2D/3D transfinite interpolations.
+        """
+        from egg.geometry.frontend2d import split_cells, tfi_point
+
+        nx, ny = split_cells(res[0], nib), split_cells(res[1], njb)
+        corner: dict[tuple[int, int], Any] = {}
+        for i in range(nib + 1):
+            u = i / nib
+            for j in range(njb + 1):
+                v = j / njb
+                patch_corner = fixed_corners and i in (0, nib)
+                if j == 0:
+                    corner[i, j] = south.place_node(u, fixed=patch_corner)
+                elif j == njb:
+                    corner[i, j] = north.place_node(u, fixed=patch_corner)
+                elif i == 0:
+                    corner[i, j] = west.place_node(v)
+                elif i == nib:
+                    corner[i, j] = east.place_node(v)
+                else:
+                    corner[i, j] = tfi_point(u, v, south, north, west, east)
+        for (i, j), obj in sorted(corner.items()):
+            self.add_corner(f"{corner_prefix}{i}_{j}", obj,
+                            fixed=getattr(obj, "fixed", False))
+
+        names = [[f"{block_prefix}{i}_{j}" for j in range(njb)]
+                 for i in range(nib)]
+        for i in range(nib):
+            for j in range(njb):
+                self.add_block(
+                    names[i][j],
+                    sw=corner[i, j],
+                    se=corner[i + 1, j],
+                    nw=corner[i, j + 1],
+                    ne=corner[i + 1, j + 1],
+                    res=(nx[i], ny[j]),
+                )
+        for i in range(nib):
+            self.associate(names[i][0], 1, 0, south)
+            self.associate(names[i][njb - 1], 1, 1, north)
+        for j in range(njb):
+            self.associate(names[0][j], 0, 0, west)
+            self.associate(names[nib - 1][j], 0, 1, east)
+        return corner, names
+
     def set_boundary_layer(
         self,
         entity: Any,
@@ -259,6 +341,8 @@ class TopologyBuilder:
         n_layers: int = 8,
         max_height: float | None = None,
         tangential_spacing: float | None = None,
+        n_fixed: int = 1,
+        relax_orthogonality: tuple = (),
     ) -> "TopologyBuilder":
         """Request wall-normal clustering on every block face lying on ``entity``.
 
@@ -268,12 +352,31 @@ class TopologyBuilder:
         ``s_n(k) = first_height · growth**k``. An
         :class:`~egg.geometry.frontend2d.Edge` is unwrapped to its underlying
         entity (matching :meth:`associate`).
+
+        ``n_fixed`` is the number of near-wall layers to pin at their exact
+        geometric heights, consumed by
+        :func:`egg.smoothing.respace_first_layers`: after a TMOP pass, rows
+        ``1..n_fixed`` slide along their smoothed columns to the exact
+        cumulative heights and are removed from further optimisation, so a
+        follow-up TMOP pass smooths only the grid above them.
+
+        ``relax_orthogonality`` names domain-boundary entities (or Edges)
+        that meet this wall obliquely: near each, the clustering target
+        shears the wall-normal direction into the boundary's own direction
+        so the smoother follows it with sheared parallelograms instead of
+        rotating the near-wall cells orthogonal to it and trading away the
+        layer heights (see ``targets.build_boundary_layer_target``).
         """
         if isinstance(entity, Edge):
             entity = entity.entity
         self._boundary_layer_specs[id(entity)] = dict(
             first_height=first_height, growth=growth, n_layers=n_layers,
             max_height=max_height, tangential_spacing=tangential_spacing,
+            n_fixed=int(n_fixed),
+            relax_orthogonality=tuple(
+                e.entity if isinstance(e, Edge) else e
+                for e in relax_orthogonality
+            ),
         )
         self._bl_entities[id(entity)] = entity
         return self

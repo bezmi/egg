@@ -1,10 +1,10 @@
-"""End-to-end pipeline tests (M7)."""
+"""End-to-end pipeline tests."""
 
 import numpy as np
 import pytest
 
 from egg.geometry.analytic2d import Circle, LineSegment
-from egg.pipeline import generate, generate_steps, drain, PipelineConfig
+from egg.pipeline import generate, generate_steps, drain_steps, PipelineConfig
 from egg.smoothing.targets import build_boundary_layer_target
 from egg.topology.builder import TopologyBuilder
 
@@ -41,7 +41,7 @@ _INNER_ROUGH = [
 
 
 def _build_circle_in_rectangle(rough: bool = False, R: int = 1):
-    """Single-circle O-grid topology (Phase-4). ``rough`` → folded TFI start."""
+    """Single-circle O-grid topology. ``rough`` → folded TFI start."""
     circle = Circle(center=(2.0, 2.0), radius=0.8)
     bottom = LineSegment(start=(0.0, 0.0), end=(4.0, 0.0))
     right = LineSegment(start=(4.0, 0.0), end=(4.0, 4.0))
@@ -165,8 +165,8 @@ def test_folded_start_recovers():
     topo, _ = _build_circle_in_rectangle(rough=True)
     grid = generate(topo, PipelineConfig(
         tmop_sweeps=40,
-        untangle_sweeps_per_delta=40,
-        untangle_max_outer=100,
+        sweeps_per_delta=40,
+        max_outer=100,
     ))
     rep = grid.pipeline_report
     assert rep.untangled
@@ -183,14 +183,14 @@ def test_folded_with_boundary_layer():
     tgt = build_boundary_layer_target(topo, interior_spacing=0.2)
     grid = generate(topo, PipelineConfig(
         target_fn=tgt, tmop_sweeps=60, tmop_chunk=20,
-        untangle_sweeps_per_delta=40,
-        untangle_max_outer=100,
+        sweeps_per_delta=40,
+        max_outer=100,
     ))
     assert grid.pipeline_report.final_min_det > 0
 
 
 # ---------------------------------------------------------------------------
-# generate_steps / drain (step-wise pipeline; direct vs stepped untangle)
+# generate_steps / drain_steps (step-wise pipeline; direct vs stepped untangle)
 # ---------------------------------------------------------------------------
 
 def _phases(events):
@@ -281,7 +281,7 @@ def test_drain_collects_history():
     topo, _ = _build_circle_in_rectangle(rough=False)
     grid = topo.initialize_grid()
     md_hist, e_hist = [], []
-    drain(generate_steps(grid, tmop_sweeps=20, tmop_chunk=5),
+    drain_steps(generate_steps(grid, tmop_sweeps=20, tmop_chunk=5),
           mindet_history=md_hist, energy_history=e_hist, verbose=False)
     assert len(md_hist) >= 1
     assert len(e_hist) >= 1
@@ -293,7 +293,7 @@ def test_generate_drains_steps_consistently():
     a direct generate_steps run on the same folded topology."""
     topo, _ = _build_circle_in_rectangle(rough=True)
     grid = generate(topo, PipelineConfig(
-        tmop_sweeps=40, untangle_sweeps_per_delta=40, untangle_max_outer=100))
+        tmop_sweeps=40, sweeps_per_delta=40, max_outer=100))
     assert grid.pipeline_report.untangled
     assert grid.pipeline_report.untangle_converged
     assert grid.pipeline_report.final_min_det > 0

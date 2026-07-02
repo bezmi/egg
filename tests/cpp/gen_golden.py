@@ -196,7 +196,7 @@ def gen_geometry() -> str:
     circ = pad([0.5, -0.3, 2.0])             # center (0.5,-0.3), r=2
     elli = pad([0.0, 0.0, 3.0, 1.0])        # center (0,0), radii (3,1)
 
-    # The 2D entity set is curves only; Sphere/Plane are 3D surfaces (milestone B).
+    # The 2D entity set is curves only; Sphere/Plane are 3D surfaces (not part of the 2D golden set).
     cases = [
         ("free", TAG_FREE, np.zeros(PARAM_PAD_SIZE), [0.3, -0.7]),
         ("lineseg-mid", TAG_LINESEG, line, [1.0, 1.5]),

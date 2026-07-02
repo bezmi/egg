@@ -24,7 +24,11 @@ from egg.projection.associate import build_dof_constraints
 
 from .targets import _neighbour_across
 
-__all__ = ["enforce_boundary_layer_spacing"]
+__all__ = [
+    "enforce_boundary_layer_spacing",
+    "first_layer_heights",
+    "respace_first_layers",
+]
 
 
 def _solve_stretch_ratio(s0: float, n: int, length: float) -> float:
@@ -218,8 +222,9 @@ def _orthogonalise_columns(grid, entity, flat: np.ndarray,
 def _region_orientation(nodes: np.ndarray, k_max: int) -> int:
     """Sign of the cell orientation in rows 0..k_max (0 if mixed/degenerate)."""
     region = nodes[:k_max + 2]
-    det = np.cross(region[1:, :-1] - region[:-1, :-1],
-                   region[:-1, 1:] - region[:-1, :-1])
+    u = region[1:, :-1] - region[:-1, :-1]
+    v = region[:-1, 1:] - region[:-1, :-1]
+    det = u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
     if np.all(det > 0):
         return 1
     if np.all(det < 0):
@@ -236,9 +241,197 @@ def _oriented_dof_lines(grid, topology, block_name: str, axis: int,
     return dm[::-1] if side == 1 else dm
 
 
+def _wall_columns(grid, topology):
+    """Yield ``(assoc, spec, flat)`` per wall association with a recorded spec.
+
+    ``flat`` is the block's DOF map oriented wall-first and flattened to
+    ``(rows, columns)`` — column ``c``'s row 0 sits on the wall entity.
+    """
+    specs = getattr(topology, "boundary_layer_specs", {})
+    for assoc in topology.associations:
+        spec = specs.get(id(assoc.entity))
+        if spec is None:
+            continue
+        face = assoc.face
+        dm = _oriented_dof_lines(grid, topology, face.block_name,
+                                 face.axis, face.side)
+        yield assoc, spec, dm.reshape(dm.shape[0], -1)
+
+
+def first_layer_heights(grid, topology=None,
+                        relative: bool = False) -> np.ndarray:
+    """Perpendicular first-layer height of every wall column (diagnostic).
+
+    For each column of each block face recorded via
+    ``builder.set_boundary_layer``, the distance from the first off-wall
+    node to the wall entity. Compare against the spec's ``first_height`` to
+    see what the smoother (or a pinned re-run) actually delivered. With
+    ``relative`` each height is divided by its own spec's ``first_height``
+    (1.0 = exact), which keeps the numbers comparable when several walls
+    carry different specs.
+    """
+    topology = topology if topology is not None else grid.topology
+    heights = []
+    for assoc, spec, flat in _wall_columns(grid, topology):
+        scale = float(spec["first_height"]) if relative else 1.0
+        for dof in flat[1]:
+            p = grid.global_nodes[int(dof)]
+            heights.append(
+                float(np.linalg.norm(
+                    p - np.asarray(assoc.entity.project(p)))) / scale)
+    return np.asarray(heights)
+
+
+def _place_on_column(pts: np.ndarray, cum: np.ndarray, dist: np.ndarray,
+                     entity, height: float) -> np.ndarray:
+    """Point on the column polyline whose perpendicular wall distance is
+    ``height``: linear-interpolation guess, then secant-refined (the
+    distance is not exactly linear in arc length where the wall or the
+    column curves)."""
+    def _point_at(s: float) -> np.ndarray:
+        s = min(max(s, 0.0), float(cum[-1]))
+        return np.array([
+            float(np.interp(s, cum, pts[:, c]))
+            for c in range(pts.shape[1])
+        ])
+
+    arc = float(np.interp(height, dist, cum))
+    new = _point_at(arc)
+    arc_prev = d_prev = None
+    for _ in range(12):
+        d_cur = float(np.linalg.norm(
+            new - np.asarray(entity.project(new))))
+        err = height - d_cur
+        if abs(err) <= 1e-13 * max(height, 1.0):
+            break
+        if arc_prev is not None and abs(d_cur - d_prev) > 0.0:
+            step = err * (arc - arc_prev) / (d_cur - d_prev)
+        else:
+            step = err
+        arc_prev, d_prev = arc, d_cur
+        arc += step
+        new = _point_at(arc)
+    return new
+
+
+def respace_first_layers(grid, topology=None, n: int | None = None,
+                         pin: bool = True) -> np.ndarray:
+    """Set the first ``n`` off-wall layers to their exact geometric heights.
+
+    Each wall column's rows ``1..n`` slide along the existing (smoothed)
+    column polyline to the points whose perpendicular distance to the wall
+    entity equals the cumulative layer heights ``Σ first_height·growth**k``
+    (clamped by the spec's ``max_height``) — the column keeps its shape,
+    and no other node moves. ``n`` defaults to each spec's recorded
+    ``n_fixed`` (see ``builder.set_boundary_layer``; 1 if absent). With
+    ``pin`` (default) the moved DOFs are also cleared in ``grid.free_mask``,
+    removing them from subsequent optimisation: a follow-up TMOP pass
+    (which rebuilds its sweep context from the mask) re-equilibrates
+    everything above the pinned band while the fixed layers stay exact.
+
+    Free rows that end up below the pinned band (a requested band taller
+    than the smoothed equilibrium delivered) are re-placed just above it —
+    still free — so the pin cannot invert the cells above the band and the
+    follow-up pass starts valid.
+
+    Nodes carrying a sliding geometry constraint (columns on a domain
+    boundary) are projected back onto their entity after the move; already
+    non-free DOFs are left untouched. Returns the moved DOF indices.
+
+    TODO(3D): wall junctions. In 3D two walls with specs can meet along an
+    edge; a node near it belongs to columns of both walls and must satisfy
+    both height laws — place it on the intersection of the two offset
+    surfaces (cf. how ``build_dof_constraints`` fixes corners where two
+    entities meet). The ``moved``-set dedup below currently makes this
+    first-association-wins, which is only correct for a single wall entity.
+    """
+    topology = topology if topology is not None else grid.topology
+    moved: set[int] = set()
+    for assoc, spec, flat in _wall_columns(grid, topology):
+        n_pin = int(spec.get("n_fixed", 1)) if n is None else int(n)
+        if n_pin <= 0:
+            continue
+        spacings = float(spec["first_height"]) \
+            * float(spec["growth"]) ** np.arange(n_pin)
+        max_h = spec.get("max_height")
+        if max_h is not None:
+            spacings = np.minimum(spacings, float(max_h))
+        cum_h = np.cumsum(spacings)
+        for col in range(flat.shape[1]):
+            dofs = flat[:, col]
+            if int(dofs[1]) in moved:
+                continue  # shared interface column, already done
+            if n_pin > len(dofs) - 2:
+                raise ValueError(
+                    "respace_first_layers: cannot pin "
+                    f"{n_pin} layers in a column of {len(dofs) - 1} cells "
+                    "(at least one free row must remain)")
+            pts = grid.global_nodes[dofs]
+            seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+            cum = np.concatenate([[0.0], np.cumsum(seg)])
+            # Perpendicular wall distance along the column, regularised to
+            # strictly increasing so it is invertible (cf. _respace_line).
+            dist = np.array([
+                np.linalg.norm(p - np.asarray(assoc.entity.project(p)))
+                for p in pts
+            ])
+            dist[0] = 0.0
+            dist = np.maximum.accumulate(dist)
+            dist += np.arange(len(dist)) * 1e-15
+            if cum_h[-1] >= dist[-1]:
+                raise ValueError(
+                    "respace_first_layers: pinned band height "
+                    f"{cum_h[-1]:.3e} does not fit in a column of height "
+                    f"{dist[-1]:.3e}")
+            for k in range(1, n_pin + 1):
+                dof_k = int(dofs[k])
+                if not grid.free_mask[dof_k]:
+                    continue
+                new = _place_on_column(pts, cum, dist, assoc.entity,
+                                       float(cum_h[k - 1]))
+                ent = grid.dof_constraints.get(dof_k)
+                if ent is not None and ent is not assoc.entity:
+                    new = np.asarray(ent.project(new), dtype=float)
+                grid.global_nodes[dof_k] = new
+                moved.add(dof_k)
+
+            # When the requested band is taller than what the smoother
+            # delivered, pinning slides the band rows outward PAST free rows
+            # sitting below the band top, inverting the cells between them.
+            # Re-place those overtaken rows between the band top and the
+            # first row already beyond it (same along-column slide); they
+            # stay free, so the follow-up TMOP pass re-equilibrates them
+            # from a valid start.
+            band_top = float(cum_h[-1])
+            j = n_pin + 1
+            while j < len(dofs) - 1 and float(dist[j]) <= band_top:
+                j += 1
+            if j > n_pin + 1:
+                hi = float(dist[j])
+                for idx, k in enumerate(range(n_pin + 1, j), start=1):
+                    dof_k = int(dofs[k])
+                    if not grid.free_mask[dof_k]:
+                        continue
+                    height = band_top + (hi - band_top) * idx / (j - n_pin)
+                    new = _place_on_column(pts, cum, dist, assoc.entity,
+                                           height)
+                    ent = grid.dof_constraints.get(dof_k)
+                    if ent is not None and ent is not assoc.entity:
+                        new = np.asarray(ent.project(new), dtype=float)
+                    grid.global_nodes[dof_k] = new
+
+    idx = np.array(sorted(moved), dtype=np.intp)
+    if pin:
+        grid.free_mask[idx] = False
+    for bi, blk in enumerate(grid.blocks):
+        blk.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]
+    return idx
+
+
 def enforce_boundary_layer_spacing(grid, topology=None,
                                    extend_through_neighbours: bool = True,
-                                   relax_boundary_normals: bool = True) -> None:
+                                   relax_boundary_normals: bool = True,
+                                   straighten_columns: bool = True) -> None:
     """Exactly enforce recorded boundary-layer specs on ``grid`` (in place).
 
     @param grid      A (smoothed) MultiBlockGrid; ``grid.global_nodes`` is
@@ -258,6 +451,14 @@ def enforce_boundary_layer_spacing(grid, topology=None,
                      (heights stay exact). Off, columns stay wall-normal up
                      to the boundary, which can fan or invert cells against
                      an inward-leaning boundary.
+    @param straighten_columns
+                     Re-anchor the clustered rows onto straight wall-normal
+                     rays (see :func:`_orthogonalise_columns`). Off, nodes
+                     only slide *along* their smoothed column paths — layer
+                     heights are still exact (they are enforced in
+                     perpendicular wall distance), and the columns keep the
+                     smoother's lean, staying as close as possible to the
+                     TMOP equilibrium.
     """
     topology = topology if topology is not None else grid.topology
     specs = getattr(topology, "boundary_layer_specs", {})
@@ -305,7 +506,7 @@ def enforce_boundary_layer_spacing(grid, topology=None,
         # would invert a cell despite the taper, back off and finally give
         # up rather than break the grid.
         t_axis = 1 - face.axis if topology.d == 2 else None
-        if t_axis is not None:
+        if t_axis is not None and straighten_columns:
             pinned = [False] * flat.shape[1]
             if _neighbour_across(topology, face.block_name, t_axis, 0) is None:
                 pinned[0] = True

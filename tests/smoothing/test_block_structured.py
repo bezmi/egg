@@ -1,4 +1,4 @@
-"""Tests for build_block_structured_context (Phase 1.1c).
+"""Tests for build_block_structured_context.
 
 Validates the halo-padded structured tables against a known two-block grid:
 the interior scatter map reproduces the block DOF maps, and the ghost-fill

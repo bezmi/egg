@@ -23,7 +23,7 @@ from egg.topology.builder import TopologyBuilder
 from tests.real_tol import real_tol
 
 # The circle-in-rectangle O-grid builder lives with the examples.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "circles"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "2D", "circles"))
 
 
 def _has_cpp() -> bool:

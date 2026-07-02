@@ -75,7 +75,7 @@ SweepContextHost build_context_from_golden()
         std::exclusive_scan(sg.P_of.begin(), sg.P_of.end(), sg.sample_offset.begin(), 0);
 
         // Decode the golden positional blob (per-DOF tag + params + shared arena)
-        // into the typed SoA records the device ctx consumes (Phase 4).
+        // into the typed SoA records the device ctx consumes.
         const std::vector<int> tag(gg.tag.begin(), gg.tag.begin() + gg.D);
         const std::vector<double> params(gg.params.begin(), gg.params.begin() + gg.D * 12);
         const std::vector<double> arena(golden::kArena.begin(), golden::kArena.end());
