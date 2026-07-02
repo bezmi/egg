@@ -3,7 +3,7 @@
 Usage::
 
     uv run untangle_side-by-side.py [--plot-live] [--plot-grid]
-        [--plot-energy] [--plot-topology] [--colour-verts-by-graph]
+        [--plot-energy] [--plot-topology]
         [--colour-edge-verts] [--bl-first-height H] [--bl-growth G]
         [--device cpu|gpu|auto] [--tmop-sweeps N]
 """
@@ -17,8 +17,7 @@ from egg.pipeline import generate_steps, drain
 from egg.io.visualize import animate_pipeline
 
 from topologies import build_twin_circle
-from egg.smoothing.targets import build_boundary_layer_target, IdentityTarget
-from egg.smoothing.solver import build_sweep_context
+from egg.smoothing.targets import build_boundary_layer_target
 
 
 def main():
@@ -34,11 +33,6 @@ def main():
         "--plot-topology",
         action="store_true",
         help="Plot the declared (rough) topology only — no pipeline run",
-    )
-    p.add_argument(
-        "--colour-verts-by-graph",
-        action="store_true",
-        help="Colour each node by its graph-colouring colour in live plot",
     )
     p.add_argument(
         "--colour-edge-verts",
@@ -67,11 +61,6 @@ def main():
     p.add_argument("--tmop-sweeps", type=int, default=5000, help="total TMOP sweeps")
     p.add_argument("--sweeps-per-delta", type=int, default=200)
     p.add_argument("--chunk", type=int, default=500, help="TMOP sweeps per chunk")
-    p.add_argument("--smoother", choices=["colored-gs", "block-jacobi"],
-                   default="colored-gs",
-                   help="TMOP smoother: global colored-GS or the structured "
-                        "block-Jacobi (one merged launch per sweep; needs more "
-                        "sweeps — bump --tmop-sweeps)")
     p.add_argument("--omega", type=float, default=1.0,
                    help="block-Jacobi SOR/damping weight (1.0 = undamped)")
     p.add_argument(
@@ -111,7 +100,6 @@ def main():
         sweeps_per_delta=a.sweeps_per_delta,
         tmop_sweeps=a.tmop_sweeps,
         tmop_chunk=a.chunk,
-        smoother=a.smoother,
         omega=a.omega,
         device=a.device,
         # Step the untangle per δ only when animating; otherwise run it direct.
@@ -119,15 +107,10 @@ def main():
     )
 
     if a.plot_live:
-        graph_colours = None
-        if a.colour_verts_by_graph:
-            ctx = build_sweep_context(grid, IdentityTarget(d=topo.d))
-            graph_colours = ctx.dof_colours
         animate_pipeline(
             grid,
             list(ents.values()),
             steps,
-            graph_colours=graph_colours,
             show_edge_verts=a.colour_edge_verts,
             title="twin-circle",
         )

@@ -40,16 +40,15 @@ class PipelineConfig:
     margin: float = 1e-9
     untangle_sweeps_per_delta: int = 20
     untangle_delta0_factor: float = 2.0
-    untangle_shrink: float = 0.5
+    # Gentle δ shrink: block-Jacobi untangle smooths less per sweep than a
+    # sequential relaxation, so it needs more δ levels to clear a fold.
+    untangle_shrink: float = 0.8
     untangle_max_outer: int = 60
 
     # TMOP quality phase.
     tmop_sweeps: int = 40
     tmop_chunk: int = 10
-    # TMOP smoother: "colored-gs" (global in-place chain) or "block-jacobi" (the
-    # halo-padded structured store, one merged double-buffered launch per sweep).
-    smoother: str = "colored-gs"
-    omega: float = 1.0  # block-Jacobi SOR/damping weight (ignored by colored-gs)
+    omega: float = 1.0  # block-Jacobi SOR/damping weight for the TMOP phase
     # report_every throttle for the resident session's energy/min-det reduction
     # (0 = chunk-end, 1 = per-sweep, k > 1 = every k-th plus final). 0 is the
     # lowest-launch default for the small-n GPU regime; set 1 for live plots
@@ -57,7 +56,6 @@ class PipelineConfig:
     report_every: int = 0
 
     # Backend.
-    use_cpp: bool = True
     device: str = "cpu"
 
     verbose: bool = False
@@ -105,12 +103,11 @@ def generate_steps(
     margin: float = 1e-9,
     sweeps_per_delta: int = 20,
     delta0_factor: float = 2.0,
-    untangle_shrink: float = 0.5,
+    untangle_shrink: float = 0.8,
     max_outer: int = 60,
     untangle_direct: bool = True,
     tmop_sweeps: int = 40,
     tmop_chunk: int = 10,
-    smoother: str = "colored-gs",
     omega: float = 1.0,
     report_every: int = 0,
     device: str = "cpu",
@@ -123,14 +120,11 @@ def generate_steps(
     drive it from a PyVista timer (see :func:`egg.io.visualize.animate_pipeline`).
 
     The TMOP phase always steps per chunk (``tmop_chunk`` sweeps each); set
-    ``tmop_chunk == tmop_sweeps`` to run it in one direct call. ``smoother``
-    selects the TMOP relaxation: ``"colored-gs"`` (default, the global in-place
-    colour chain) or ``"block-jacobi"`` (the halo-padded structured store, one
-    merged double-buffered launch per sweep, SOR weight ``omega``) — block-Jacobi
-    converges to the same minimiser but needs more sweeps, so raise
-    ``tmop_sweeps``. Only the TMOP phase honours ``smoother``; the untangle phase
-    always runs the global colored-GS / ``cpp_untangle`` path. The untangle
-    phase mirrors this: by default it runs **direct** — the whole δ-continuation
+    ``tmop_chunk == tmop_sweeps`` to run it in one direct call. Both the TMOP
+    and untangle phases relax block-Jacobi over the halo-padded structured store
+    (one merged double-buffered launch per sweep; ``omega`` is the TMOP SOR
+    weight). The untangle
+    phase by default runs **direct** — the whole δ-continuation
     in one ``cpp_untangle`` call (the analogue of TMOP chunk == sweeps), yielding
     a single ``untangle`` event. Pass ``untangle_direct=False`` to step per δ
     instead, yielding each δ so a live view can animate the unfolding. Either way
@@ -144,7 +138,6 @@ def generate_steps(
     """
     from .smoothing.solver import build_sweep_context
     from .smoothing.targets import IdentityTarget
-    from .smoothing.cpp_backend import CppSweepSession
     from .smoothing.untangle import grid_min_det
     from .projection.project import project_nodes
 
@@ -170,26 +163,36 @@ def generate_steps(
     #     setting TMOP chunk == sweeps: production runs (generate) use it; only a
     #     single ``untangle`` event is yielded.
     if md <= margin:
+        # Untangling relaxes a δ-barrier over the folded grid. Block-Jacobi is
+        # damped (omega < 1): an undamped simultaneous update overshoots the
+        # barrier and can deepen a fold instead of clearing it.
+        untangle_omega = 0.5
         if untangle_direct:
             from .smoothing.cpp_backend import cpp_untangle
             X_out, md, outer_iters, delta_final = cpp_untangle(
-                ctx_iso, grid.global_nodes,
+                ctx_iso, grid, grid.global_nodes,
                 sweeps_per_delta=sweeps_per_delta,
                 delta0_factor=delta0_factor,
                 shrink=untangle_shrink,
                 max_outer=max_outer,
                 device=device,
-                margin=margin)
+                margin=margin,
+                omega=untangle_omega)
             _sync(grid, X_out)
             yield ("untangle", {"min_det": md, "converged": md > margin,
                                 "direct": True, "outer_iters": outer_iters,
                                 "delta": delta_final})
         else:
-            session = CppSweepSession(ctx_iso, grid.global_nodes, device=device)
+            from .smoothing.cpp_backend import (
+                CppStructuredSweepSession, build_block_structured_context)
+            bsc = build_block_structured_context(grid)
+            session = CppStructuredSweepSession(
+                ctx_iso, bsc, grid.global_nodes, device=device)
             delta = delta0_factor * max(abs(md), 1e-12)
             for it in range(max_outer):
                 _e, mds = session.run(
                     sweeps_per_delta, phase="untangle", delta=delta,
+                    omega=untangle_omega,
                     report_every=report_every,
                 )
                 md = float(np.asarray(mds)[-1])
@@ -206,23 +209,14 @@ def generate_steps(
     # --- Phase 2: TMOP quality optimisation (resident session, per-chunk loop) ---
     tmop_ctx = ctx_iso if target is None else build_sweep_context(grid, target)
     tmop_sweeps = max((tmop_sweeps // tmop_chunk) * tmop_chunk, tmop_chunk)
-    # The default colored-GS keeps the global in-place session (unchanged). The
-    # block-Jacobi smoother needs the halo-padded structured store, built from the
-    # grid's BlockTopology; it runs one merged double-buffered launch per sweep and
-    # converges to the same minimiser (more sweeps — bump tmop_sweeps accordingly).
-    if smoother == "block-jacobi":
-        from .smoothing.cpp_backend import (
-            CppStructuredSweepSession, build_block_structured_context)
-        bsc = build_block_structured_context(grid)
-        session = CppStructuredSweepSession(
-            tmop_ctx, bsc, grid.global_nodes, device=device)
-        run_kwargs = {"smoother": "block-jacobi", "omega": omega}
-    elif smoother == "colored-gs":
-        session = CppSweepSession(tmop_ctx, grid.global_nodes, device=device)
-        run_kwargs = {}
-    else:
-        raise ValueError(
-            f"smoother must be 'colored-gs' or 'block-jacobi', got {smoother!r}")
+    # Block-Jacobi over the halo-padded structured store, built from the grid's
+    # BlockTopology; one merged double-buffered launch per sweep, SOR weight omega.
+    from .smoothing.cpp_backend import (
+        CppStructuredSweepSession, build_block_structured_context)
+    bsc = build_block_structured_context(grid)
+    session = CppStructuredSweepSession(
+        tmop_ctx, bsc, grid.global_nodes, device=device)
+    run_kwargs = {"omega": omega}
     done = 0
     while done < tmop_sweeps:
         k = min(tmop_chunk, tmop_sweeps - done)
@@ -278,81 +272,42 @@ def generate(topology, config: PipelineConfig | None = None) -> MultiBlockGrid:
     # 1. TFI init.
     grid = topology.initialize_grid()
 
-    if config.use_cpp:
-        # Batch-drive the step-wise generator: untangle runs DIRECT (one
-        # cpp_untangle call — the analogue of TMOP chunk == sweeps), TMOP steps
-        # per chunk. generate_steps mutates the grid and does the boundary snaps.
-        tmop_sweeps_done = 0
-        try:
-            for phase, info in generate_steps(
-                    grid, config.target_fn,
-                    margin=config.margin,
-                    sweeps_per_delta=config.untangle_sweeps_per_delta,
-                    delta0_factor=config.untangle_delta0_factor,
-                    untangle_shrink=config.untangle_shrink,
-                    max_outer=config.untangle_max_outer,
-                    untangle_direct=True,
-                    tmop_sweeps=config.tmop_sweeps,
-                    tmop_chunk=config.tmop_chunk,
-                    smoother=config.smoother,
-                    omega=config.omega,
-                    report_every=config.report_every,
-                    device=config.device):
-                if phase == "init":
-                    report.add("init", min_det=info["min_det"])
-                elif phase == "untangle":
-                    report.untangled = True
-                    report.untangle_converged = bool(info["converged"])
-                    report.add("untangle", min_det=info["min_det"],
-                               converged=info["converged"])
-                elif phase == "tmop":
-                    tmop_sweeps_done = info["sweeps"]
-                elif phase == "final":
-                    report.final_min_det = info["min_det"]
-                    report.final_energy = info["energy"]
-                    report.add("tmop", min_det=info["min_det"],
-                               energy=info["energy"], sweeps=tmop_sweeps_done)
-        except KeyboardInterrupt:
-            # Grid is synced after each step; report what we have.
-            print(f"\n[interrupted after {tmop_sweeps_done} TMOP sweeps; "
-                  "progress preserved]")
-    else:
-        # NumPy reference TMOP (untangle still runs on the C++ backend). Kept as a
-        # separate path since generate_steps is C++-only.
-        from .smoothing.solver import build_sweep_context, local_relaxation_sweep
-        from .smoothing.targets import IdentityTarget
-        from .smoothing.untangle import untangle
-        from .projection.project import project_nodes
-
-        d = topology.d
-        target = config.target_fn or IdentityTarget(d)
-        project_nodes(grid, grid.dof_constraints)
-        ctx = build_sweep_context(grid, target)
-        es = ctx.energy_stencil
-        report.add("init", min_det=_min_det(grid, es), energy=_energy(grid, es))
-
-        if _min_det(grid, es) <= config.margin:
-            untangle_ctx = (ctx if config.target_fn is None
-                            else build_sweep_context(grid, IdentityTarget(d)))
-            res = untangle(
-                grid, untangle_ctx, shrink=config.untangle_shrink,
+    # Batch-drive the step-wise generator: untangle runs DIRECT (one cpp_untangle
+    # call — the analogue of TMOP chunk == sweeps), TMOP steps per chunk.
+    # generate_steps mutates the grid and does the boundary snaps.
+    tmop_sweeps_done = 0
+    try:
+        for phase, info in generate_steps(
+                grid, config.target_fn,
                 margin=config.margin,
                 sweeps_per_delta=config.untangle_sweeps_per_delta,
                 delta0_factor=config.untangle_delta0_factor,
-                max_outer=config.untangle_max_outer, verbose=config.verbose)
-            report.untangled = True
-            report.untangle_converged = res.converged
-            report.add("untangle", min_det=res.min_det, converged=res.converged,
-                       delta=res.delta, outer_iters=res.outer_iters)
-            project_nodes(grid, grid.dof_constraints)
-
-        for _ in range(config.tmop_sweeps):
-            local_relaxation_sweep(grid, target, config.metric, ctx)
-        project_nodes(grid, grid.dof_constraints)
-        report.final_min_det = _min_det(grid, es)
-        report.final_energy = _energy(grid, es)
-        report.add("tmop", min_det=report.final_min_det,
-                   energy=report.final_energy, sweeps=config.tmop_sweeps)
+                untangle_shrink=config.untangle_shrink,
+                max_outer=config.untangle_max_outer,
+                untangle_direct=True,
+                tmop_sweeps=config.tmop_sweeps,
+                tmop_chunk=config.tmop_chunk,
+                omega=config.omega,
+                report_every=config.report_every,
+                device=config.device):
+            if phase == "init":
+                report.add("init", min_det=info["min_det"])
+            elif phase == "untangle":
+                report.untangled = True
+                report.untangle_converged = bool(info["converged"])
+                report.add("untangle", min_det=info["min_det"],
+                           converged=info["converged"])
+            elif phase == "tmop":
+                tmop_sweeps_done = info["sweeps"]
+            elif phase == "final":
+                report.final_min_det = info["min_det"]
+                report.final_energy = info["energy"]
+                report.add("tmop", min_det=info["min_det"],
+                           energy=info["energy"], sweeps=tmop_sweeps_done)
+    except KeyboardInterrupt:
+        # Grid is synced after each step; report what we have.
+        print(f"\n[interrupted after {tmop_sweeps_done} TMOP sweeps; "
+              "progress preserved]")
 
     if config.verbose:
         print(f"[pipeline] final: min det A={report.final_min_det:.3e} "

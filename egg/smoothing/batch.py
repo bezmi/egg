@@ -1,6 +1,6 @@
 """Vectorized closed-form ``shape_2d`` patch evaluation.
 
-The Gauss-Seidel relaxation re-evaluates a node's *patch* — every corner sample
+The patch relaxation re-evaluates a node's *patch* — every corner sample
 of every cell incident to that node — many times per sweep (once for the
 gradient/Hessian, then once per backtracking trial). Doing that with a Python
 loop over corners, each building tiny 2x2 arrays via tuple indexing, is the hot

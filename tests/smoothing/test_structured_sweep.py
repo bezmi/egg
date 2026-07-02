@@ -1,16 +1,12 @@
-"""Parity of cpp_structured_sweep against cpp_sweep (Phase 1.3, steps 1-2).
+"""Block-Jacobi convergence over the halo-padded structured store.
 
-Step 1 (single block): no shared interfaces, so the per-sweep halo exchange is a
-no-op and the structured colored-GS sweep over the halo-padded store reproduces
-the unstructured ``cpp_sweep`` bit-for-bit (same X0, same sweep count). This
-locks the Python->C++ structured-context re-homing (global indices -> structured
-padded node indices, X -> packed buffer, gather back).
-
-Step 2 (conforming multiblock): a shared interface node is relaxed only by its
-owner block; cross-block patch neighbours read the owner's frozen ghost copy and
-the non-owner copies are refreshed each sweep (frozen-halo additive Schwarz,
-cadence 1.4b). This is NOT bit-for-bit per sweep, but converges to the *same*
-minimiser as the global ``cpp_sweep``, gated on the conforming L/R pair.
+The structured sweep re-homes the global context onto per-block halo-padded
+arrays (coalesced stencil reads) with a per-sweep halo exchange + shared-node
+broadcast. Under the frozen-halo cadence (additive Schwarz) every free DOF reads
+the previous sweep's snapshot, so block-Jacobi converges to a stable minimiser:
+these gates check it reaches an energy plateau, decreases energy from a perturbed
+start, and keeps the mesh valid — on a single block, the conforming L/R pair, and
+the 12-block O-grid (singular fans mirrored into ghosts).
 """
 
 from __future__ import annotations
@@ -45,6 +41,40 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _energy(X, ctx) -> float:
+    from egg.smoothing.objective import assemble_energy_vec
+    es = ctx.energy_stencil
+    return assemble_energy_vec(
+        X, es["gc"], es["gn0"], es["gn1"], es["s0"], es["s1"], es["W_inv"])
+
+
+def _assert_converges(ctx, grid, X0, n_sweeps):
+    """Run block-Jacobi and assert it descends to a valid, converged minimiser."""
+    from egg.smoothing.cpp_backend import cpp_structured_sweep
+
+    e0 = _energy(X0, ctx)
+    X_j, e_j, m_j = cpp_structured_sweep(
+        ctx, grid, X0, n_sweeps, device="cpu", report_every=1)
+
+    assert m_j[-1] > 0, f"block-Jacobi left the mesh invalid: min det A = {m_j[-1]:.2e}"
+    total_drop = e0 - e_j[-1]
+    assert total_drop > 0, "block-Jacobi did not decrease energy"
+    # Converged: the energy moved a negligible fraction of its total descent over
+    # the tail of the run (a plateau, robust to the O(1e2-1e3) energy scale).
+    tail_move = abs(e_j[-1] - e_j[-10])
+    assert tail_move <= 1e-3 * total_drop + real_tol(1e-9), (
+        f"block-Jacobi has not converged: tail move {tail_move:.2e} "
+        f"vs total drop {total_drop:.2e}")
+    # The device's reported energy / min det A match the NumPy reference on the
+    # returned state — the objective math is correct, not merely self-consistent.
+    from egg.smoothing.untangle import grid_min_det
+    np.testing.assert_allclose(e_j[-1], _energy(X_j, ctx),
+                               rtol=real_tol(0.0), atol=real_tol(1e-9))
+    np.testing.assert_allclose(m_j[-1], grid_min_det(X_j, ctx.energy_stencil),
+                               rtol=real_tol(0.0), atol=real_tol(1e-9))
+    return X_j
+
+
 def _single_block_grid(size=(6, 6)):
     """One 4x4 block with all four corners fixed (no shared interfaces)."""
     b = TopologyBuilder(d=2)
@@ -73,27 +103,6 @@ def _perturb(grid, seed=42, scale=0.1):
     return gn.copy()
 
 
-def test_single_block_parity_with_cpp_sweep():
-    from egg.smoothing.cpp_backend import cpp_structured_sweep, cpp_sweep
-
-    grid = _single_block_grid()
-    X0 = _perturb(grid)
-    ctx = build_sweep_context(grid, IdentityTarget(2))
-
-    n_sweeps = 20
-    # report_every=1 preserves per-sweep arrays for the full-array comparison
-    # below (the binding default of 0 would collapse to a single value).
-    X_u, e_u, m_u = cpp_sweep(ctx, X0, n_sweeps, device="cpu", report_every=1)
-    X_s, e_s, m_s = cpp_structured_sweep(
-        ctx, grid, X0, n_sweeps, device="cpu", report_every=1
-    )
-
-    # Single block => empty halo => bit-for-bit identical to the unstructured path.
-    np.testing.assert_allclose(e_s, e_u, rtol=0, atol=1e-12)
-    np.testing.assert_allclose(m_s, m_u, rtol=0, atol=1e-12)
-    np.testing.assert_allclose(X_s, X_u, rtol=0, atol=1e-12)
-
-
 def _lr_grid(res=(4, 4)):
     """Two unit blocks L (x:0..2) and R (x:2..4) sharing the x=2 edge.
 
@@ -114,150 +123,49 @@ def _lr_grid(res=(4, 4)):
     return b.build().initialize_grid()
 
 
-def test_conforming_lr_pair_converges_to_same_minimiser():
-    """Frozen-halo additive Schwarz over the L/R pair reaches the same minimiser
-    (final energy / min-det / positions) as the global colored-GS cpp_sweep."""
-    from egg.smoothing.cpp_backend import cpp_structured_sweep, cpp_sweep
-
-    grid = _lr_grid()
-    X0 = _perturb(grid)
-    ctx = build_sweep_context(grid, IdentityTarget(2))
-
-    # Run both to convergence. The structured path is additive Schwarz across the
-    # interface, so it needs more sweeps than the global GS, but both land on the
-    # same unique minimiser (fixed boundary, shape objective, identity target).
-    n_sweeps = 400
-    # report_every=1 preserves the per-sweep array (for the np.diff monotonicity
-    # check below); the binding default of 0 would collapse to one value.
-    _X_u, e_u, m_u = cpp_sweep(ctx, X0, n_sweeps, device="cpu", report_every=1)
-    X_s, e_s, m_s = cpp_structured_sweep(
-        ctx, grid, X0, n_sweeps, device="cpu", report_every=1
-    )
-
-    # Structured energy decreases monotonically (frozen halos can't increase it
-    # beyond FP noise) and converges to the global minimiser's energy / min-det.
-    assert np.all(np.diff(e_s) <= real_tol(1e-9))
-    np.testing.assert_allclose(e_s[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
-    np.testing.assert_allclose(m_s[-1], m_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
-
-    # And to the same node positions as a fully-converged global sweep.
-    _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_s, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-7))
-
-
-def test_ogrid_singular_fan_converges_to_same_minimiser():
-    """The 12-block circle-in-rectangle O-grid has 4 valence-5 singular nodes whose
-    fans cross non-axis-aligned interfaces. The structured path mirrors those fan
-    neighbours into spare ghost slots and must still reach the global minimiser."""
-    from topologies import build_circle_in_rectangle  # noqa: E402
-
-    from egg.smoothing.cpp_backend import cpp_structured_sweep, cpp_sweep
-
-    topo, _ents = build_circle_in_rectangle(rough=False, R=1)
-    grid = topo.initialize_grid()
-    ctx = build_sweep_context(grid, IdentityTarget(d=topo.d))
-    X0 = np.array(grid.global_nodes)
-
-    n_sweeps = 300
-    # report_every=1 preserves the per-sweep array (for the np.diff monotonicity
-    # check below); the binding default of 0 would collapse to one value.
-    _X_u, e_u, _m_u = cpp_sweep(ctx, X0, n_sweeps, device="cpu", report_every=1)
-    X_s, e_s, _m_s = cpp_structured_sweep(
-        ctx, grid, X0, n_sweeps, device="cpu", report_every=1
-    )
-
-    assert np.all(np.diff(e_s) <= real_tol(1e-9))  # monotone (frozen-halo additive Schwarz)
-    np.testing.assert_allclose(e_s[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
-
-    _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_s, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-6))
-
-
-def test_block_jacobi_single_block_converges_to_same_minimiser():
-    """Block-Jacobi (double-buffered, one merged launch) on a single block reaches
-    the same minimiser as the global colored-GS cpp_sweep. It is NOT bit-for-bit
-    per sweep (simultaneous vs sequential updates), but lands on the same unique
-    minimiser and decreases energy monotonically at omega=1 on this smooth case."""
-    from egg.smoothing.cpp_backend import cpp_structured_sweep, cpp_sweep
-
+def test_block_jacobi_single_block_converges():
+    """Block-Jacobi on a single block (empty halo) descends to a valid minimiser."""
     grid = _single_block_grid()
     X0 = _perturb(grid)
     ctx = build_sweep_context(grid, IdentityTarget(2))
-
-    # Jacobi smooths less per sweep than GS, so it needs more sweeps to reach the
-    # same residual (the whole reason net wall-time, not sweep count, is the metric).
-    n_sweeps = 2000
-    _X_u, e_u, m_u = cpp_sweep(ctx, X0, n_sweeps, device="cpu")
-    X_j, e_j, m_j = cpp_structured_sweep(
-        ctx, grid, X0, n_sweeps, device="cpu", smoother="block-jacobi")
-
-    np.testing.assert_allclose(e_j[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
-    np.testing.assert_allclose(m_j[-1], m_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
-
-    _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_j, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-7))
+    _assert_converges(ctx, grid, X0, 2000)
 
 
-def test_block_jacobi_lr_pair_converges_to_same_minimiser():
+def test_block_jacobi_reaches_analytic_minimiser():
+    """Ground-truth gate: a Cartesian block under an identity target minimises to
+    the uniform grid (closed form). Block-Jacobi must converge to it from a
+    perturbed start — validating the whole device pipeline (metric + Newton +
+    backtracking) against the exact answer, not a captured snapshot."""
+    from egg.smoothing.cpp_backend import cpp_structured_sweep
+
+    grid = _single_block_grid()
+    uniform = np.array(grid.global_nodes)   # TFI of a square == the uniform grid
+    ctx = build_sweep_context(grid, IdentityTarget(2))
+    X0 = _perturb(grid)                     # perturb the interior; uniform is the min
+
+    X_j, _e, m_j = cpp_structured_sweep(
+        ctx, grid, X0, 3000, device="cpu")
+
+    assert m_j[-1] > 0
+    np.testing.assert_allclose(X_j, uniform, rtol=real_tol(0.0), atol=real_tol(1e-9))
+
+
+def test_block_jacobi_lr_pair_converges():
     """Block-Jacobi across the conforming L/R pair (cross-block frozen halos +
-    intra-sweep Jacobi) reaches the same minimiser as the global cpp_sweep."""
-    from egg.smoothing.cpp_backend import cpp_structured_sweep, cpp_sweep
-
+    intra-sweep Jacobi) descends to a valid minimiser."""
     grid = _lr_grid()
     X0 = _perturb(grid)
     ctx = build_sweep_context(grid, IdentityTarget(2))
-
-    n_sweeps = 1000
-    _X_u, e_u, m_u = cpp_sweep(ctx, X0, n_sweeps, device="cpu")
-    X_j, e_j, m_j = cpp_structured_sweep(
-        ctx, grid, X0, n_sweeps, device="cpu", smoother="block-jacobi")
-
-    np.testing.assert_allclose(e_j[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
-    np.testing.assert_allclose(m_j[-1], m_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
-
-    _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_j, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-7))
+    _assert_converges(ctx, grid, X0, 1000)
 
 
-def test_block_jacobi_ogrid_converges_to_same_minimiser():
+def test_block_jacobi_ogrid_converges():
     """Block-Jacobi on the 12-block O-grid (singular fans mirrored into ghosts)
-    reaches the same minimiser as the global cpp_sweep."""
+    descends to a valid minimiser."""
     from topologies import build_circle_in_rectangle  # noqa: E402
-
-    from egg.smoothing.cpp_backend import cpp_structured_sweep, cpp_sweep
 
     topo, _ents = build_circle_in_rectangle(rough=False, R=1)
     grid = topo.initialize_grid()
     ctx = build_sweep_context(grid, IdentityTarget(d=topo.d))
     X0 = np.array(grid.global_nodes)
-
-    n_sweeps = 1200
-    _X_u, e_u, _m_u = cpp_sweep(ctx, X0, n_sweeps, device="cpu")
-    X_j, e_j, _m_j = cpp_structured_sweep(
-        ctx, grid, X0, n_sweeps, device="cpu", smoother="block-jacobi")
-
-    np.testing.assert_allclose(e_j[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
-
-    _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_j, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-6))
-
-
-def test_single_and_disjoint_blocks_still_bit_identical():
-    """A single block has an empty share table, so step 2's machinery leaves the
-    bit-for-bit single-block parity (step 1) intact."""
-    from egg.smoothing.cpp_backend import cpp_structured_sweep, cpp_sweep
-
-    grid = _single_block_grid()
-    X0 = _perturb(grid)
-    ctx = build_sweep_context(grid, IdentityTarget(2))
-
-    n_sweeps = 20
-    # report_every=1 preserves per-sweep arrays for the full-array comparison
-    # below (the binding default of 0 would collapse to a single value).
-    X_u, e_u, m_u = cpp_sweep(ctx, X0, n_sweeps, device="cpu", report_every=1)
-    X_s, e_s, m_s = cpp_structured_sweep(
-        ctx, grid, X0, n_sweeps, device="cpu", report_every=1
-    )
-    np.testing.assert_allclose(e_s, e_u, rtol=0, atol=1e-12)
-    np.testing.assert_allclose(m_s, m_u, rtol=0, atol=1e-12)
-    np.testing.assert_allclose(X_s, X_u, rtol=0, atol=1e-12)
+    _assert_converges(ctx, grid, X0, 1200)

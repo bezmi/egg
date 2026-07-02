@@ -11,7 +11,7 @@
 //
 // The scalar type is templated (`T = egg::real`) so the AD path carries the same
 // precision as the rest of src/ without a double<->real seam; T must support the
-// usual arithmetic and std::sqrt (real/float/double all do).
+// usual arithmetic and sycl::sqrt (real/float/double all do).
 #pragma once
 
 #include <array>
@@ -88,7 +88,7 @@ template <int N, class T> constexpr Dual<N, T> operator-(const Dual<N, T>& a, T 
 template <int N, class T> inline Dual<N, T> sqrt(const Dual<N, T>& a)
 {
     Dual<N, T> r;
-    r.v = std::sqrt(a.v);
+    r.v = sycl::sqrt(a.v);
     const T coef = T(0.5) / r.v;
     for (int i = 0; i < N; ++i) { r.g[i] = coef * a.g[i]; }
     return r;
@@ -190,7 +190,7 @@ template <int N, class T> inline Dual2<N, T> sqrt(const Dual2<N, T>& a)
 {
     // f = sqrt(a): f' = a'/(2f); f'' = (a'' - 2 f' f') / (2f)
     Dual2<N, T> r;
-    r.v = std::sqrt(a.v);
+    r.v = sycl::sqrt(a.v);
     const T inv2f = T(0.5) / r.v;
     for (int i = 0; i < N; ++i) { r.g[i] = inv2f * a.g[i]; }
     for (int i = 0; i < N; ++i) {

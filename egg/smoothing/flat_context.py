@@ -103,41 +103,7 @@ def cell_stencil(blocks, d):
             "m_role": m_role, "nc": nc, "ns": ns, "ncell": ncell}
 
 
-def greedy_colours(m_node_full, m_sid_full, nc, N):
-    """Welsh-Powell greedy colouring of the share-a-cell graph.
-
-    The graph's edges are the distinct within-cell corner pairs; nodes are
-    coloured in descending-degree order (ties by ascending id). ``m_node_full``
-    is the *unfiltered* membership node array (before restricting to DOFs), so
-    the adjacency covers fixed nodes too — matching the reference partition.
-    """
-    # Rebuild each cell's nc corner ids from the (cell, a, b) membership: row
-    # nc*nc*cell + nc*a + b has node = Ccell[cell, a]; take b == 0.
-    ncell = m_node_full.size // (nc * nc)
-    Ccell = m_node_full.reshape(ncell, nc, nc)[:, :, 0]
-    ai, bi = np.triu_indices(nc, k=1)
-    e_u = np.concatenate([Ccell[:, ai].reshape(-1), Ccell[:, bi].reshape(-1)])
-    e_v = np.concatenate([Ccell[:, bi].reshape(-1), Ccell[:, ai].reshape(-1)])
-    keep = e_u != e_v
-    e_u, e_v = e_u[keep], e_v[keep]
-    order_e = np.argsort(e_u, kind="stable")
-    e_u, e_v = e_u[order_e], e_v[order_e]
-    indptr = np.zeros(N + 1, dtype=np.int64)
-    np.cumsum(np.bincount(e_u, minlength=N), out=indptr[1:])
-    deg = np.diff(indptr)
-
-    colours = np.full(N, -1, dtype=np.int64)
-    for v in np.argsort(-deg, kind="stable"):
-        used = {int(x) for x in colours[e_v[indptr[v]:indptr[v + 1]]] if x >= 0}
-        c = 0
-        while c in used:
-            c += 1
-        colours[v] = c
-    return colours
-
-
-def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv,
-                       colours=None):
+def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
     """Assemble the ragged ``{"groups", "energy_stencil"}`` wire format.
 
     ``blocks``       list of global-node-id arrays, one per structured block;
@@ -145,28 +111,43 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv,
     ``dof_entities`` ``{node id -> entity}`` for every moving DOF (``None`` free);
     ``w_inv``        the inverse target metric, either one uniform ``(d, d)``
                      matrix or one ``(ns, d, d)`` matrix per sample (energy-
-                     stencil order);
-    ``colours``      optional ``(N,)`` colour per node; a Welsh-Powell greedy
-                     colouring of the share-a-cell graph is used when omitted.
+                     stencil order).
 
-    Groups are one ragged partition per colour: a colour's moving DOFs in
-    ascending id, each contributing its incident samples contiguously with a
-    ``P_of`` count (the C++ core derives the sample offsets). Patch sample order
-    within a DOF is irrelevant — the energy is a sum.
+    A single group holds every moving DOF (under frozen halos every free DOF
+    reads the previous snapshot, so the DOFs need no ordering). Each DOF
+    contributes its incident samples contiguously with a ``P_of`` count (the C++
+    core derives the sample offsets); sample order within a DOF is irrelevant, as
+    the energy is a sum.
     """
     st = cell_stencil(blocks, d)
-    nc, ns = st["nc"], st["ns"]
-    N = free_mask.shape[0]
+    ns = st["ns"]
     fixed = ~free_mask
     dd = d * d
+    N = free_mask.shape[0]
+
+    # Interior-eligible nodes: strictly inside a block (logical in [1, n-2] on every
+    # axis), so the node AND its whole 2^d-cell patch sit inside that block. The C++
+    # core synthesizes their patch off the block layout (identity target), so they
+    # carry NO per-sample stencil on the wire — just their (block, logical). Every
+    # other moving DOF (block faces, entity boundaries) keeps its stored patch.
+    node_block = np.full(N, -1, dtype=np.int32)
+    node_logical = np.zeros((N, d), dtype=np.int32)
+    for b, ids in enumerate(blocks):
+        sh = np.asarray(ids).shape
+        if any(s < 3 for s in sh):
+            continue  # no strictly-interior node on a < 3-wide axis
+        inner = np.asarray(ids)[tuple(slice(1, s - 1) for s in sh)].reshape(-1)
+        axes = np.meshgrid(*[np.arange(1, s - 1, dtype=np.int32) for s in sh], indexing="ij")
+        node_block[inner] = b
+        node_logical[inner] = np.stack([a.reshape(-1) for a in axes], axis=1)
+    node_interior = node_block >= 0
 
     m_node_full = st["m_node"]
-    if colours is None:
-        colours = greedy_colours(m_node_full, st["m_sid"], nc, N)
-    colours = np.asarray(colours)
 
-    # Restrict membership to moving DOFs (fixed corners never own a patch).
-    keep = ~fixed[m_node_full]
+    # Keep membership for moving, non-interior DOFs only: fixed corners own no
+    # patch, and interior DOFs are synthesized (they contribute no stored samples,
+    # so their P_of is 0).
+    keep = ~fixed[m_node_full] & ~node_interior[m_node_full]
     m_node = m_node_full[keep]
     m_sid = st["m_sid"][keep]
     m_role = st["m_role"][keep]
@@ -174,49 +155,48 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv,
     w_inv = np.asarray(w_inv, dtype=np.float64)
     uniform_w = w_inv.shape == (d, d)
 
-    def sample_fields(sid):
+    def sample_fields(sid, *, uniform_out=False):
         gc = st["gc"][sid].astype(np.int32)
         out = {"gc": gc}
         for k in range(d):
             out[f"gn{k}"] = st["gn"][k][sid].astype(np.int32)
             out[f"s{k}"] = st["s"][k][sid].astype(np.float64)
-        if uniform_w:
+        if uniform_w and uniform_out:
+            # A single shared row: the C++ metric table reads a uniform W_inv with
+            # stride 0. Avoids materializing (and uploading) one identical (d, d)
+            # per sample — the largest wire field for a fixed/identity target.
+            W = np.asarray(w_inv, dtype=np.float64).reshape(1, dd)
+        elif uniform_w:
             W = np.broadcast_to(w_inv, (sid.shape[0], d, d)).reshape(-1, dd)
         else:
             W = w_inv[sid].reshape(-1, dd)
         out["W_inv"] = np.ascontiguousarray(W)
         return out
 
-    # Sort membership by (colour, node): a colour's rows become contiguous and
-    # its DOFs ascending — the reference partition, with each DOF's samples
-    # grouped together.
-    m_col = colours[m_node]
-    perm = np.lexsort((m_node, m_col))
-    m_col, m_node, m_sid, m_role = (m_col[perm], m_node[perm], m_sid[perm],
-                                    m_role[perm])
-    n_colours = int(colours.max()) + 1 if colours.size and colours.max() >= 0 else 0
-    lo_all = np.searchsorted(m_col, np.arange(n_colours), side="left")
-    hi_all = np.searchsorted(m_col, np.arange(n_colours), side="right")
+    # Sort membership by node so each DOF's samples are contiguous and the DOFs
+    # ascend — one group over every moving DOF.
+    perm = np.argsort(m_node, kind="stable")
+    m_node, m_sid, m_role = m_node[perm], m_sid[perm], m_role[perm]
 
     groups = []
-    for c in range(n_colours):
-        dofs = np.flatnonzero((colours == c) & free_mask)
-        if dofs.size == 0:
-            continue
-        lo, hi = lo_all[c], hi_all[c]
-        node_seg, sid_seg, role_seg = m_node[lo:hi], m_sid[lo:hi], m_role[lo:hi]
-        # P_of per DOF (0 for a DOF with no incident cell); node_seg is ascending
-        # so the concatenated sample rows are already in dof-ascending order.
-        uniq, cnt = np.unique(node_seg, return_counts=True)
+    dofs = np.flatnonzero(free_mask)
+    if dofs.size:
+        # P_of per DOF (0 for a DOF with no incident cell); m_node is ascending so
+        # the concatenated sample rows are already in dof-ascending order.
+        uniq, cnt = np.unique(m_node, return_counts=True)
         P_of = np.zeros(dofs.size, dtype=np.int32)
         P_of[np.searchsorted(dofs, uniq)] = cnt
-        g = {"D": int(dofs.size), "role": role_seg.astype(np.int32),
+        g = {"D": int(dofs.size), "role": m_role.astype(np.int32),
              "dof_idx": dofs.astype(np.int32), "P_of": P_of,
+             "interior_block": np.ascontiguousarray(node_block[dofs]),
+             "interior_logical": np.ascontiguousarray(node_logical[dofs]),
              "entities": group_entities_by_type(dofs.tolist(), dof_entities, d=d)}
-        g.update(sample_fields(sid_seg))
+        g.update(sample_fields(m_sid, uniform_out=True))
         groups.append(g)
 
     all_sid = np.arange(ns)
     energy_stencil = {"num_samples": int(ns)}
-    energy_stencil.update(sample_fields(all_sid))
+    # A uniform target ships as one shared W_inv row (the energy reduction reads it
+    # with stride 0), same as the group table — avoids one (d, d) per sample.
+    energy_stencil.update(sample_fields(all_sid, uniform_out=True))
     return {"groups": groups, "energy_stencil": energy_stencil}

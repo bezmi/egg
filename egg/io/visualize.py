@@ -592,18 +592,12 @@ class LiveGridView:
     ]
     _EDGE_COLORS = ["cyan", "magenta", "yellow", "lime", "orange", "white"]
 
-    _GRAPH_COLOUR_MAP = [
-        "red", "green", "blue", "orange", "purple", "brown",
-        "pink", "cyan", "magenta", "yellow",
-    ]
-
     def __init__(
         self,
         plotter: "pv.Plotter",
         grid,
         boundary_tags: dict[int, str] | None = None,
         geometry_entities: list | None = None,
-        graph_colours: "list[int] | None" = None,
         show_edge_verts: bool = True,
     ) -> None:
         import pyvista as pv
@@ -611,7 +605,6 @@ class LiveGridView:
         self.plotter = plotter
         self.grid = grid
         boundary_tags = boundary_tags or {}
-        self._graph_clouds: list = []
 
         if geometry_entities:
             for entity in geometry_entities:
@@ -681,22 +674,6 @@ class LiveGridView:
                 )
                 self._clouds.append((cloud, gids))
 
-        # Graph-colour point clouds: one per colour, rendered as small spheres.
-        if graph_colours is not None:
-            colours_np = np.asarray(graph_colours, dtype=int)
-            max_c = int(colours_np.max()) if len(colours_np) > 0 else -1
-            for c in range(max_c + 1):
-                gids = np.where(colours_np == c)[0]
-                if gids.size == 0:
-                    continue
-                color = self._GRAPH_COLOUR_MAP[c % len(self._GRAPH_COLOUR_MAP)]
-                cloud = pv.PolyData(self._cloud_points(gids))
-                plotter.add_mesh(
-                    cloud, color=color, point_size=6,
-                    render_points_as_spheres=True,
-                )
-                self._graph_clouds.append((cloud, gids))
-
     @staticmethod
     def _fill_points(nodes) -> np.ndarray:
         pts = nodes.reshape(-1, 2)
@@ -723,14 +700,12 @@ class LiveGridView:
             )
         for cloud, gids in self._clouds:
             cloud.points = self._cloud_points(gids)
-        for cloud, gids in self._graph_clouds:
-            cloud.points = self._cloud_points(gids)
         if render:
             self.plotter.render()
 
 
 def animate_pipeline(grid, geometry_entities, steps, *, title="pipeline",
-                     graph_colours=None, show_edge_verts=True):
+                     show_edge_verts=True):
     """Drive a :func:`egg.pipeline.generate_steps` generator from a PyVista
     timer so the grid animates the folded → untangled → smoothed transition.
 
@@ -751,7 +726,6 @@ def animate_pipeline(grid, geometry_entities, steps, *, title="pipeline",
 
     plotter = pv.Plotter()
     view = LiveGridView(plotter, grid, tags, geometry_entities,
-                        graph_colours=graph_colours,
                         show_edge_verts=show_edge_verts)
     plotter.view_xy()
     plotter.show_axes()

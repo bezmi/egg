@@ -5,6 +5,8 @@
 #include <experimental/mdspan>
 #include <limits>
 
+#include <sycl/sycl.hpp>
+
 namespace egg
 {
 
@@ -174,7 +176,7 @@ inline real dot(const std::array<real, N>& a, const std::array<real, N>& b)
 ///         legacy tangent fallbacks.
 template <std::size_t N> inline std::array<real, N> normalize(const std::array<real, N>& a)
 {
-    const real n = std::sqrt(dot(a, a));
+    const real n = sycl::sqrt(dot(a, a));
     if (n < tol::znorm) {
         std::array<real, N> e {};
         e[0] = 1.0_r;  // degenerate => first basis axis (matches the legacy fallbacks)

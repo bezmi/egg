@@ -403,50 +403,11 @@ static const suite<"structured"> structured_suite = [] {
         for (int k = 0; k < D * D; ++k) { expect(rc.hess[k] == rs.hess[k]) << "hess"; }
     };
 
-    // interior_patch_matches accepts the explicitly-built interior patch and
-    // rejects it the moment any stored occurrence diverges or the node is not
-    // eligible — the per-DOF gate the structured build uses to opt into synthesis.
-    "interior patch match gates on an exact reproduction"_test = [] {
-        constexpr int D = 3;
-        constexpr std::size_t n = 4;
-        const BlockLayout<D> layout {{{{n, n, n}}}};
-        const std::array<std::size_t, D> mover {1, 1, 1};
-
-        // Build the stored patch arrays exactly as the host builder would.
-        std::vector<int> gc, role;
-        std::array<std::vector<int>, D> gn;
-        std::array<std::vector<egg::real>, D> s;
-        for (int occ = 0; occ < interior_patch_size<D>(); ++occ) {
-            const InteriorOccurrence<D> o = interior_patch_occurrence<D>(layout, 0, mover, occ);
-            gc.push_back(o.gc);
-            role.push_back(o.role);
-            for (int k = 0; k < D; ++k) {
-                gn[k].push_back(o.gn[k]);
-                s[k].push_back(o.s[k]);
-            }
-        }
-        const std::array<const int*, D> gnp {gn[0].data(), gn[1].data(), gn[2].data()};
-        const std::array<const egg::real*, D> sp {s[0].data(), s[1].data(), s[2].data()};
-        const int P = static_cast<int>(gc.size());
-
-        expect(interior_patch_matches<D>(layout, 0, mover, P, gc.data(), gnp, sp, role.data()));
-        // A single corrupted occurrence breaks the match.
-        std::vector<int> gc_bad = gc;
-        gc_bad[7] += 1;
-        expect(not interior_patch_matches<D>(layout, 0, mover, P, gc_bad.data(), gnp, sp,
-                                             role.data()));
-        // A wrong patch size (truncated) is rejected before any read.
-        expect(not interior_patch_matches<D>(layout, 0, mover, P - 1, gc.data(), gnp, sp,
-                                             role.data()));
-        // A boundary node is ineligible regardless of the stored arrays.
-        expect(not interior_patch_matches<D>(layout, 0, {0, 1, 1}, P, gc.data(), gnp, sp,
-                                             role.data()));
-    };
-
-    // locate_interior_node is the inverse of interior_node_index: a structured
-    // index round-trips to its block + logical, and ghost-shell slots report
-    // false. Exercised across two unequal blocks so the block search bites.
-    "node index inverts to block and logical"_test = [] {
+    // interior_node_index shifts each logical axis +1 into the padded array, so it
+    // must equal padded_node_index at logical+1; consecutive interior nodes are one
+    // node apart along the fastest axis (the coalescing invariant the structured
+    // store is built for). Two unequal blocks so the per-block base offset bites.
+    "interior and padded node indices agree on the +1 shift"_test = [] {
         const BlockLayout<3> layout {{{{2, 3, 4}}, {{3, 2, 2}}}};
         for (std::size_t b = 0; b < layout.num_blocks(); ++b) {
             const auto shape = layout.interior_shape(b);
@@ -454,30 +415,15 @@ static const suite<"structured"> structured_suite = [] {
                 for (std::size_t j = 0; j < shape[1]; ++j) {
                     for (std::size_t k = 0; k < shape[2]; ++k) {
                         const std::array<std::size_t, 3> logical {i, j, k};
-                        const int nidx = interior_node_index<3>(layout, b, logical);
-                        InteriorNode<3> got {};
-                        expect(locate_interior_node<3>(layout, nidx, got));
-                        expect(got.block == b);
-                        expect(got.logical == logical);
+                        const std::array<std::size_t, 3> padded {i + 1, j + 1, k + 1};
+                        expect(interior_node_index<3>(layout, b, logical) ==
+                               padded_node_index<3>(layout, b, padded));
                     }
                 }
             }
         }
-        // A ghost slot (padded face index 0 on axis 0 of block 0) has no logical.
-        InteriorNode<3> ghost {};
-        const int ghost_idx = padded_node_index<3>(layout, 0, {0, 1, 1});
-        expect(not locate_interior_node<3>(layout, ghost_idx, ghost));
-    };
-
-    // Eligibility: a node whose 4^D patch stays inside the block interior (its
-    // corners reach logical ± 1 on every axis) is fast-path eligible; one a step
-    // from the boundary is not, since a neighbour would fall on the ghost layer.
-    "interior patch eligibility tracks the one-node boundary margin"_test = [] {
-        const BlockLayout<3> layout {{{{4, 4, 4}}}};
-        expect(interior_patch_eligible<3>(layout, 0, {1, 1, 1}));
-        expect(interior_patch_eligible<3>(layout, 0, {2, 2, 2}));
-        expect(not interior_patch_eligible<3>(layout, 0, {0, 1, 1}));  // axis-0 near face
-        expect(not interior_patch_eligible<3>(layout, 0, {1, 3, 1}));  // axis-1 far face
-        expect(not interior_patch_eligible<3>(layout, 0, {1, 1, 3}));  // axis-2 far face
+        // Fastest axis: consecutive interior nodes are one node apart.
+        expect((interior_node_index<3>(layout, 0, {1, 1, 2}) -
+                interior_node_index<3>(layout, 0, {1, 1, 1})) == 1);
     };
 };

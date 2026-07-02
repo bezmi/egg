@@ -64,9 +64,8 @@ def assemble_energy(
         Function (cell_base, corner_offset) -> W matrix of shape (d, d).
     metric : str
         One of "shape", "shape_2d", "shape_size". Defaults to ``"shape_2d"`` to
-        match the solver's fast path (:func:`assemble_energy_vec` and
-        :func:`egg.smoothing.solver.local_relaxation_sweep`), so the two energies
-        agree by default.
+        match the backend's fast path (:func:`assemble_energy_vec`), so the two
+        energies agree by default.
 
     Returns
     -------

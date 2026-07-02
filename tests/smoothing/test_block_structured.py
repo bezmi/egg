@@ -10,9 +10,6 @@ from __future__ import annotations
 
 import numpy as np
 
-import numpy as np
-from itertools import product
-
 from egg.smoothing.cpp_backend import build_block_structured_context
 from egg.topology.builder import TopologyBuilder
 
@@ -112,98 +109,6 @@ def _padded_coords_with_halo(grid, sc, bi):
         coord = gn[sc.block_global_dof[sb][flat]]
         padded[tuple(int(c) for c in sc.halo_dst_padded[e])] = coord
     return padded
-
-
-def test_parity_colouring_gives_per_cell_independence():
-    """Every cell's 2**d corners must get distinct colours (GS independence)."""
-    grid = _lr_grid()
-    sc = build_block_structured_context(grid)
-    assert sc.num_colours == 4  # 2**2
-
-    for bi, shape in enumerate(sc.interior_shapes):
-        colour = sc.block_colour[bi].reshape(shape)
-        assert colour.min() >= 0 and colour.max() < sc.num_colours
-        # Walk every cell (base corner i,j) and check its 4 corners are distinct.
-        for i, j in product(range(shape[0] - 1), range(shape[1] - 1)):
-            corners = {
-                int(colour[i, j]), int(colour[i + 1, j]),
-                int(colour[i, j + 1]), int(colour[i + 1, j + 1]),
-            }
-            assert len(corners) == 4, f"cell ({i},{j}) corners not all distinct"
-
-
-def test_parity_colouring_consistent_across_even_interface():
-    """Aligned even-resolution blocks keep a globally consistent parity colour."""
-    grid = _lr_grid(res=(4, 4))
-    sc = build_block_structured_context(grid)
-    assert sc.colour_consistent is True
-
-
-def test_parity_colouring_detects_inconsistent_interface():
-    """Odd resolution flips the face-axis parity across the shared edge."""
-    grid = _lr_grid(res=(3, 4))  # 4 nodes on x -> face at i=3 (L) vs i=0 (R)
-    sc = build_block_structured_context(grid)
-    assert sc.colour_consistent is False
-
-
-def test_owner_block_assigns_shared_nodes_to_lowest_block():
-    """Shared interface nodes are owned by L (block 0); interior nodes by their own."""
-    grid = _lr_grid()
-    sc = build_block_structured_context(grid)
-
-    # The 5 shared face nodes (L i=4 == R i=0) are owned by block 0 (L).
-    for j in range(5):
-        gd = int(grid.block_dof_maps[0][(4, j)])
-        assert gd == int(grid.block_dof_maps[1][(0, j)])  # genuinely the same node
-        assert int(sc.owner_block[gd]) == 0
-
-    # An R-only interior node (i=2, not on the shared face) is owned by block 1.
-    r_interior = int(grid.block_dof_maps[1][(2, 2)])
-    assert int(sc.owner_block[r_interior]) == 1
-    # Every global DOF has a valid owner.
-    assert sc.owner_block.min() >= 0
-
-
-def test_shared_broadcast_entries_are_owner_to_nonowner_interior():
-    """Each shared node yields one owner(L)-interior -> non-owner(R)-interior copy."""
-    grid = _lr_grid()
-    sc = build_block_structured_context(grid)
-
-    # 5 shared face nodes, one non-owner copy each (L owns, R holds the copy).
-    assert sc.num_share_entries == 5
-
-    for e in range(sc.num_share_entries):
-        sb, db = int(sc.share_src_block[e]), int(sc.share_dst_block[e])
-        assert sb == 0 and db == 1  # owner L -> non-owner R
-        src, dst = sc.share_src_padded[e], sc.share_dst_padded[e]
-        shape_s, shape_d = sc.interior_shapes[sb], sc.interior_shapes[db]
-        # Both endpoints are INTERIOR padded indices (1..n on every axis), not ghosts.
-        for k in range(2):
-            assert 1 <= int(src[k]) <= shape_s[k]
-            assert 1 <= int(dst[k]) <= shape_d[k]
-        # The copy connects the same global DOF in both blocks (padded -> interior).
-        src_logical = tuple(int(c) - 1 for c in src)
-        dst_logical = tuple(int(c) - 1 for c in dst)
-        assert int(grid.block_dof_maps[0][src_logical]) == int(
-            grid.block_dof_maps[1][dst_logical]
-        )
-
-
-def test_single_block_has_no_shared_entries():
-    """A single block shares nothing; the broadcast table is empty."""
-    b = TopologyBuilder(d=2)
-    for name, pos in [
-        ("A", (0.0, 0.0)), ("B", (4.0, 0.0)),
-        ("C", (4.0, 4.0)), ("D", (0.0, 4.0)),
-    ]:
-        b.add_corner(name, pos, fixed=True)
-    b.add_block("main", ("A", "D", "B", "C"), (4, 4))
-    grid = b.build().initialize_grid()
-    sc = build_block_structured_context(grid)
-    assert sc.num_share_entries == 0
-    assert sc.share_src_padded.shape == (0, 2)
-    # Every node is owned by its only block (block 0).
-    assert set(np.unique(sc.owner_block)) == {0}
 
 
 def test_ghost_layer_carries_neighbour_interior():

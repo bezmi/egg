@@ -8,8 +8,6 @@
 
 #include "core.hpp"
 
-#include <cmath>
-
 namespace egg
 {
 
@@ -19,7 +17,7 @@ namespace egg
 using Vec2 = VecN<2>;  // d-vector
 using Mat2 = MatN<2>;  // d×d row-major [h00, h01, h10, h11]
 
-inline bool finite2(const Vec2& v) { return std::isfinite(v[0]) && std::isfinite(v[1]); }
+inline bool finite2(const Vec2& v) { return sycl::isfinite(v[0]) && sycl::isfinite(v[1]); }
 
 // (literals below use the _r kit / tol:: so the fp32 build stays bit-clean.)
 
@@ -31,7 +29,7 @@ template <int D> VecN<D> solveNxN(const MatN<D>& H, const VecN<D>& g);
 // D=2: the exact 2×2 closed form (bit-identical to the original solve2x2).
 template <> inline VecN<2> solveNxN<2>(const MatN<2>& H, const VecN<2>& g)
 {
-    const real gnorm = std::sqrt((g[0] * g[0]) + (g[1] * g[1]));
+    const real gnorm = sycl::sqrt((g[0] * g[0]) + (g[1] * g[1]));
     if (gnorm < tol::znorm) { return Vec2 {0.0_r, 0.0_r}; }
 
     const real det = (H[0] * H[3]) - (H[1] * H[2]);
@@ -46,12 +44,12 @@ template <> inline VecN<2> solveNxN<2>(const MatN<2>& H, const VecN<2>& g)
 }
 
 inline bool finite3(const VecN<3>& v)
-{ return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]); }
+{ return sycl::isfinite(v[0]) && sycl::isfinite(v[1]) && sycl::isfinite(v[2]); }
 
 // D=3: 3×3 closed form via the adjugate, same fallback structure as D=2.
 template <> inline VecN<3> solveNxN<3>(const MatN<3>& H, const VecN<3>& g)
 {
-    const real gnorm = std::sqrt((g[0] * g[0]) + (g[1] * g[1]) + (g[2] * g[2]));
+    const real gnorm = sycl::sqrt((g[0] * g[0]) + (g[1] * g[1]) + (g[2] * g[2]));
     if (gnorm < tol::znorm) { return VecN<3> {0.0_r, 0.0_r, 0.0_r}; }
 
     // Cofactors c_ij of H (adj(H) = cof(H)^T); x = -(1/det) adj(H) g.
@@ -82,10 +80,10 @@ inline Vec2 solve2x2(const Mat2& H, const Vec2& g) { return solveNxN<2>(H, g); }
 // Tangent-reduced scalar Newton step: solve a*x = -r (constrained DOF, 1x1).
 inline real solve1x1(real a, real res)
 {
-    const real rnorm = std::abs(res);
+    const real rnorm = sycl::fabs(res);
     if (rnorm < tol::znorm) { return 0.0_r; }
     const real x = -res / a;
-    if (!std::isfinite(x)) { return -0.1_r * res / rnorm; }
+    if (!sycl::isfinite(x)) { return -0.1_r * res / rnorm; }
     return x;
 }
 

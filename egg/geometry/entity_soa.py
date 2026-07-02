@@ -422,7 +422,7 @@ def group_entities_by_type(
     Parameters
     ----------
     dof_indices : list[int]
-        Global DOF indices in the order they appear in the colour group.
+        Global DOF indices in the order they appear in the group.
     entities : dict[int, object]
         Mapping from global DOF index -> geometry entity (or ``None`` for free).
     d : int

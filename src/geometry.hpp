@@ -126,7 +126,7 @@ inline real wrap(real x, real a, real b)
 {
     const real L = b - a;
     if (L <= 0.0_r) { return x; }
-    real t = std::fmod(x - a, L);
+    real t = sycl::fmod(x - a, L);
     if (t < 0.0_r) { t += L; }
     return a + t;
 }
@@ -314,7 +314,7 @@ struct LineSeg {
     [[nodiscard]] Vec tangent(const Pt&) const
     {
         const real abx = ex - sx, aby = ey - sy;
-        const real norm = std::sqrt((abx * abx) + (aby * aby));
+        const real norm = sycl::sqrt((abx * abx) + (aby * aby));
         if (norm < tol::znorm) {
             return Vec {1.0_r, 0.0_r};  // eye[:, 0]
         }
@@ -333,7 +333,7 @@ struct Circle {
     [[nodiscard]] Pt project(const Pt& p) const
     {
         const real dx = p[0] - cx, dy = p[1] - cy;
-        const real dist = std::sqrt((dx * dx) + (dy * dy));
+        const real dist = sycl::sqrt((dx * dx) + (dy * dy));
         if (dist < tol::znorm) {
             return Pt {cx + r, cy};  // arbitrary on-circle point
         }
@@ -342,7 +342,7 @@ struct Circle {
     [[nodiscard]] Vec tangent(const Pt& p) const
     {
         const real dx = p[0] - cx, dy = p[1] - cy;
-        const real rn = std::sqrt((dx * dx) + (dy * dy));
+        const real rn = sycl::sqrt((dx * dx) + (dy * dy));
         real nx, ny;
         if (rn < tol::znorm) {
             nx = 1.0_r;
@@ -367,7 +367,7 @@ struct Ellipse {
     {
         const real dx = p[0] - cx, dy = p[1] - cy;
         const real sx = dx / rx, sy = dy / ry;
-        const real dist = std::sqrt((sx * sx) + (sy * sy));
+        const real dist = sycl::sqrt((sx * sx) + (sy * sy));
         real ux, uy;
         if (dist < tol::znorm) {
             ux = uy = 1.0_r / std::numbers::sqrt2;  // ones(d)/sqrt(d), d = 2
@@ -381,10 +381,10 @@ struct Ellipse {
     {
         const real dx = p[0] - cx, dy = p[1] - cy;
         // Parametric angle from the radial-scaled coordinates (matches Ellipse).
-        const real angle = std::atan2(dy / ry, dx / rx);
-        real tx = -rx * std::sin(angle);
-        real ty = ry * std::cos(angle);
-        const real norm = std::sqrt((tx * tx) + (ty * ty));
+        const real angle = sycl::atan2(dy / ry, dx / rx);
+        real tx = -rx * sycl::sin(angle);
+        real ty = ry * sycl::cos(angle);
+        const real norm = sycl::sqrt((tx * tx) + (ty * ty));
         if (norm < tol::znorm) { return Vec {1.0_r, 0.0_r}; }
         return Vec {tx / norm, ty / norm};
     }
@@ -472,7 +472,7 @@ inline real project_param_seeded(const C& c, const PtN<2>& q, real t_lo, real t_
         const VecN<2> d1 = c.deriv({t});
         const real f = dot(d, d1);
         const real fp = dot(d1, d1) + dot(d, c.deriv2({t}));
-        if (std::fabs(fp) < tol::tiny) { break; }
+        if (sycl::fabs(fp) < tol::tiny) { break; }
         t -= f / fp;
     }
     return t;
@@ -493,13 +493,13 @@ struct CircleArcParam {
     real r;  ///< Radius.
     /// @brief Inverse: the polar angle of @p q about the centre.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
-    { return {std::atan2(q[1] - c[1], q[0] - c[0])}; }
+    { return {sycl::atan2(q[1] - c[1], q[0] - c[0])}; }
     /// @brief Evaluate @f$ C + r(\cos t, \sin t) @f$.
     [[nodiscard]] PtN<2> eval(const Param<1>& t) const
-    { return {c[0] + (r * std::cos(t[0])), c[1] + (r * std::sin(t[0]))}; }
+    { return {c[0] + (r * sycl::cos(t[0])), c[1] + (r * sycl::sin(t[0]))}; }
     /// @brief The raw tangent column @f$ C'(t) = r(-\sin t, \cos t) @f$.
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& t) const
-    { return {VecN<2> {-r * std::sin(t[0]), r * std::cos(t[0])}}; }
+    { return {VecN<2> {-r * sycl::sin(t[0]), r * sycl::cos(t[0])}}; }
 };
 
 /// @brief A rotated, axis-scaled elliptical arc; nearest foot via Newton.
@@ -511,22 +511,22 @@ struct EllipseArcParam {
     /// @brief Evaluate @f$ C + R_\phi (a\cos t, b\sin t) @f$.
     [[nodiscard]] PtN<2> eval(const Param<1>& t) const
     {
-        const real cp = std::cos(phi), sp = std::sin(phi);
-        const real x = a * std::cos(t[0]), y = b * std::sin(t[0]);
+        const real cp = sycl::cos(phi), sp = sycl::sin(phi);
+        const real x = a * sycl::cos(t[0]), y = b * sycl::sin(t[0]);
         return {c[0] + (cp * x) - (sp * y), c[1] + (sp * x) + (cp * y)};
     }
     /// @brief First derivative @f$ C'(t) = R_\phi (-a\sin t, b\cos t) @f$.
     [[nodiscard]] VecN<2> deriv(const Param<1>& t) const
     {
-        const real cp = std::cos(phi), sp = std::sin(phi);
-        const real x = -a * std::sin(t[0]), y = b * std::cos(t[0]);
+        const real cp = sycl::cos(phi), sp = sycl::sin(phi);
+        const real x = -a * sycl::sin(t[0]), y = b * sycl::cos(t[0]);
         return {(cp * x) - (sp * y), (sp * x) + (cp * y)};
     }
     /// @brief Second derivative @f$ C''(t) = R_\phi (-a\cos t, -b\sin t) @f$.
     [[nodiscard]] VecN<2> deriv2(const Param<1>& t) const
     {
-        const real cp = std::cos(phi), sp = std::sin(phi);
-        const real x = -a * std::cos(t[0]), y = -b * std::sin(t[0]);
+        const real cp = sycl::cos(phi), sp = sycl::sin(phi);
+        const real x = -a * sycl::cos(t[0]), y = -b * sycl::sin(t[0]);
         return {(cp * x) - (sp * y), (sp * x) + (cp * y)};
     }
     /// @brief Inverse: seeded-Newton nearest foot over the full angular range.
@@ -945,20 +945,20 @@ struct SphereParam {
     [[nodiscard]] Param<2> invert(const PtN<3>& p) const
     {
         const VecN<3> m = normalize(p - c);
-        return {std::atan2(dot(m, ay), dot(m, ax)), std::asin(std::clamp(dot(m, az), -1.0_r, 1.0_r))};
+        return {sycl::atan2(dot(m, ay), dot(m, ax)), sycl::asin(std::clamp(dot(m, az), -1.0_r, 1.0_r))};
     }
     /// @brief Evaluate @f$ C + r(\cos v\cos u\,a_x + \cos v\sin u\,a_y + \sin v\,a_z) @f$.
     [[nodiscard]] PtN<3> eval(const Param<2>& q) const
     {
-        const real cu = std::cos(q[0]), su = std::sin(q[0]);
-        const real cv = std::cos(q[1]), sv = std::sin(q[1]);
+        const real cu = sycl::cos(q[0]), su = sycl::sin(q[0]);
+        const real cv = sycl::cos(q[1]), sv = sycl::sin(q[1]);
         return c + r * (cv * cu * ax + cv * su * ay + sv * az);
     }
     /// @brief The raw tangent columns @f$ \partial S/\partial u, \partial S/\partial v @f$.
     [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
     {
-        const real cu = std::cos(q[0]), su = std::sin(q[0]);
-        const real cv = std::cos(q[1]), sv = std::sin(q[1]);
+        const real cu = sycl::cos(q[0]), su = sycl::sin(q[0]);
+        const real cv = sycl::cos(q[1]), sv = sycl::sin(q[1]);
         return {r * (cv * -su * ax + cv * cu * ay), r * (-sv * cu * ax - sv * su * ay + cv * az)};
     }
 };
@@ -974,14 +974,14 @@ struct CylinderParam {
     [[nodiscard]] Param<2> invert(const PtN<3>& p) const
     {
         const VecN<3> d = p - o;
-        return {std::atan2(dot(d, ay), dot(d, ax)), dot(d, az)};
+        return {sycl::atan2(dot(d, ay), dot(d, ax)), dot(d, az)};
     }
     /// @brief Evaluate @f$ O + r(\cos u\,a_x + \sin u\,a_y) + v\,a_z @f$.
     [[nodiscard]] PtN<3> eval(const Param<2>& q) const
-    { return o + r * (std::cos(q[0]) * ax + std::sin(q[0]) * ay) + q[1] * az; }
+    { return o + r * (sycl::cos(q[0]) * ax + sycl::sin(q[0]) * ay) + q[1] * az; }
     /// @brief The raw tangent columns.
     [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
-    { return {r * (-std::sin(q[0]) * ax + std::cos(q[0]) * ay), az}; }
+    { return {r * (-sycl::sin(q[0]) * ax + sycl::cos(q[0]) * ay), az}; }
 };
 
 /// @brief A 3D line through @c p0 and @c p1 (an edge curve, tdim==1).
@@ -1186,10 +1186,10 @@ struct BSplineSurfaceParam {
                 j22 += dot(d, S.S02);
             }
             const real det = (j11 * j22) - (j12 * j12);
-            if (std::fabs(det) < tol::tiny) { break; }
+            if (sycl::fabs(det) < tol::tiny) { break; }
             const real qu = std::clamp(q[0] - (((j22 * f1) - (j12 * f2)) / det), u0, u1);
             const real qv = std::clamp(q[1] - (((-j12 * f1) + (j11 * f2)) / det), v0, v1);
-            const bool converged = (std::fabs(qu - q[0]) + std::fabs(qv - q[1])) < tol::newton;
+            const bool converged = (sycl::fabs(qu - q[0]) + sycl::fabs(qv - q[1])) < tol::newton;
             q[0] = qu;
             q[1] = qv;
             if (converged) { break; }
@@ -2356,7 +2356,7 @@ inline Pt tangent_space(const Pt& p, Tag tag, const real* params)
 }
 
 /// @brief Load DOF @p i's concrete entity from its tag's SoA slot and invoke
-///        @p f(ent). The colored-GS sweep's single device-hot-path tag→type
+///        @p f(ent). The sweep's single device-hot-path tag→type
 ///        dispatch.
 ///
 /// Callers pass a *small* callable (tangent-reduced Newton or projection), so
@@ -2369,7 +2369,7 @@ inline Pt tangent_space(const Pt& p, Tag tag, const real* params)
 ///   - launching one monomorphic kernel per entity type → launch-count
 ///     explosion on the in-order queue (the per-partition regression).
 /// Here the dispatch is one cheap `switch` over @p tag around a small
-/// `EntitySoA<E>::load`, and the launch stays one-per-colour.
+/// `EntitySoA<E>::load`.
 ///
 /// @tparam D Embedding dimension.
 /// @tparam F Callable invoked as `f(const E&)` with the loaded entity.

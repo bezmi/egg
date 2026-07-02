@@ -1,7 +1,7 @@
 // golden_soa.hpp — host-side blob→SoA transform for the golden sweep context.
 //
 // The device sweep context (SweepGroupHost) carries only the typed per-
-// (colour,EntityTag) SoA records (`soa`); the positional `(tag, params, arena)`
+// EntityTag SoA records (`soa`); the positional `(tag, params, arena)`
 // blob was retired from it in Phase 4. The golden header (gen_golden.py output)
 // still stores the blob — it is the frozen cross-language wire contract — so the
 // C++ golden test and the bench decode it here into the same SoA the Python wire

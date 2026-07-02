@@ -5,8 +5,8 @@ Identical to ``sphere_in_cube.py`` except the spherical cavity is an exact
 the analytic ``Sphere``. Geometrically it is the same sphere (eval radius error
 ~1e-16), but every cavity node now slides via the heavy
 ``BSplineSurfaceParam`` device project (coarse-grid-seeded Newton on the
-nearest-foot stationarity) — the workload that decides whether the per-colour
-sweep kernel still wins once the constrained entity is expensive.
+nearest-foot stationarity) — the workload that stresses the boundary
+sweep kernel once the constrained entity is expensive.
 
 Mirrors the 2D circle example's topology one dimension up: a 6-block
 "cubed-sphere" **O-shell** wraps the spherical cavity of radius ``r0`` out to
@@ -24,7 +24,7 @@ Constrained DOFs exercise the whole 3D entity set:
 - cube corners          -> fixed; everything else free.
 
 The Python topology/TFI front-end is still 2D, so the flattened sweep context
-(the wire format ``flatten_context`` produces) is assembled by hand and the
+(the wire format ``build_flat_context`` produces) is assembled by hand and the
 C++ core is driven directly at ``dim=3``. The live/grid plots show the grid's
 planar sections in the XY (z=0) and YZ (x=0) planes — each is the familiar 2D
 O-ring picture.
@@ -218,7 +218,7 @@ def build_context(X, blocks, dof_entities, tags, fixed):
     """Flattened sweep context (identity target, W_inv = I).
 
     The structured-grid assembly (cell stencil, node->sample membership, roles,
-    greedy colouring, ragged per-colour groups) lives in the dimension-generic
+    the single free-DOF group) lives in the dimension-generic
     :func:`egg.smoothing.flat_context.build_flat_context`; only the geometry
     (block lattice, entity classification) is example-specific.
     """
@@ -371,13 +371,6 @@ def main():
     p.add_argument("--chunk", type=int, default=10,
                    help="sweeps per device-resident chunk")
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
-    p.add_argument("--structured", action="store_true",
-                   help="run the halo-padded structured path (coalesced stencil) "
-                        "instead of the global colored-GS session")
-    p.add_argument("--smoother", choices=["colored-gs", "block-jacobi"],
-                   default="colored-gs",
-                   help="structured-path smoother (requires --structured): the "
-                        "in-place per-colour chain or one merged block-Jacobi launch")
     p.add_argument("--omega", type=float, default=1.0,
                    help="block-Jacobi SOR/damping weight (1.0 = undamped)")
     p.add_argument("--report-every", type=int, default=0,
@@ -419,25 +412,17 @@ def main():
           f"plane={(tags == TAG_PLANE).sum()} edge={(tags == TAG_LINE3).sum()} "
           f"fixed={fixed.sum()} free={(tags == TAG_FREE).sum() - fixed.sum()}")
 
-    if a.structured:
-        # Re-home the hand-built block lattice onto the halo-padded structured
-        # store (owner/broadcast from the per-block global-DOF arrays; cross-block
-        # stencil neighbours mirrored by the C++ singular-fan fallback). Enables
-        # the merged block-Jacobi launch as well as the structured colored-GS.
-        from egg.smoothing.cpp_backend import (
-            build_structured_context_from_block_maps, structured_arrays)
-        bsc = build_structured_context_from_block_maps(3, blocks, X.shape[0])
-        structured = structured_arrays(bsc)
-        session = cpp_core.CppStructuredSweepSession(
-            ctx, structured, X.ravel(), device=a.device, dim=3)
-        print(f"structured: blocks={bsc.num_blocks} shared-node copies={bsc.num_share_entries} "
-              f"smoother={a.smoother} omega={a.omega}")
-        run_kwargs = {"smoother": a.smoother, "omega": a.omega}
-    else:
-        if a.smoother != "colored-gs":
-            p.error("--smoother requires --structured")
-        session = cpp_core.CppSweepSession(ctx, X.ravel(), device=a.device, dim=3)
-        run_kwargs = {}
+    # Re-home the hand-built block lattice onto the halo-padded structured store
+    # (owner/broadcast from the per-block global-DOF arrays; cross-block stencil
+    # neighbours mirrored by the C++ singular-fan fallback), then relax block-Jacobi.
+    from egg.smoothing.cpp_backend import (
+        build_structured_context_from_block_maps, structured_arrays)
+    bsc = build_structured_context_from_block_maps(3, blocks)
+    structured = structured_arrays(bsc)
+    session = cpp_core.CppStructuredSweepSession(
+        ctx, structured, X.ravel(), device=a.device, dim=3)
+    print(f"structured: blocks={bsc.num_blocks} omega={a.omega}")
+    run_kwargs = {"omega": a.omega}
     energies, mindets = [], []
 
     live = None

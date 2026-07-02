@@ -1,7 +1,7 @@
 """Single-block hex grid with a spherical-cap face — the first d=3 example.
 
 The Python topology/TFI front-end is still 2D, so this example assembles the
-flattened sweep context by hand (the same wire format ``flatten_context``
+flattened sweep context by hand (the same wire format ``build_flat_context``
 produces) and drives the C++ core directly at ``dim=3``:
 
 - an ``n x n x n`` unit-cube hex grid;
@@ -37,10 +37,9 @@ def build_context(n, sphere_c, sphere_r):
     """Flattened sweep context for the single-block cube grid.
 
     The structured-grid assembly (cell stencil, node->sample membership, roles,
-    ragged per-colour groups) lives in the dimension-generic
+    the single free-DOF group) lives in the dimension-generic
     :func:`egg.smoothing.flat_context.build_flat_context`; here we set up the
-    geometry: the n^3 lattice, the moving-DOF classification, and the analytic
-    parity colouring.
+    geometry: the n^3 lattice and the moving-DOF classification.
     """
     h = 1.0 / (n - 1)
     ids = np.arange(n ** 3).reshape(n, n, n)     # ids[i,j,k] == node_id(i,j,k,n)
@@ -60,12 +59,10 @@ def build_context(n, sphere_c, sphere_r):
     for nid in ids[~on_bnd]:
         dof_entities[int(nid)] = None
 
-    # 8-colouring by index parity: same-parity nodes never share a cell.
-    colours = ((ii % 2) * 4 + (jj % 2) * 2 + (kk % 2)).reshape(-1)
     w_inv_sample = np.eye(3) / h                 # W = h I per sample
 
     return build_flat_context([ids], moving_mask, dof_entities, 3,
-                              w_inv=w_inv_sample, colours=colours)
+                              w_inv=w_inv_sample)
 
 
 def _grid_polylines(X, n):
@@ -108,13 +105,6 @@ def main():
     p.add_argument("--chunk", type=int, default=10,
                    help="sweeps per device-resident chunk")
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
-    p.add_argument("--structured", action="store_true",
-                   help="run the halo-padded structured path (coalesced stencil) "
-                        "instead of the global colored-GS session")
-    p.add_argument("--smoother", choices=["colored-gs", "block-jacobi"],
-                   default="colored-gs",
-                   help="structured-path smoother (requires --structured): the "
-                        "in-place per-colour chain or one merged block-Jacobi launch")
     p.add_argument("--omega", type=float, default=1.0,
                    help="block-Jacobi SOR/damping weight (1.0 = undamped)")
     p.add_argument("--report-every", type=int, default=0,
@@ -165,24 +155,17 @@ def main():
 
     # Chunked, device-resident driving: the context/X are uploaded once and the
     # sweeps run in chunks so live plotting only pays one download per chunk.
-    if a.structured:
-        # The dome lattice is a single n^3 block (C-order node ids), so the
-        # structured store has an empty halo: structured colored-GS is bit-for-bit
-        # the global path, and block-Jacobi is the merged single-launch smoother.
-        from egg.smoothing.cpp_backend import (
-            build_structured_context_from_block_maps, structured_arrays)
-        blocks = [np.arange(n ** 3).reshape(n, n, n)]
-        bsc = build_structured_context_from_block_maps(3, blocks, X.shape[0])
-        structured = structured_arrays(bsc)
-        session = cpp_core.CppStructuredSweepSession(
-            ctx, structured, X.ravel(), device=a.device, dim=3)
-        print(f"structured: blocks={bsc.num_blocks} smoother={a.smoother} omega={a.omega}")
-        run_kwargs = {"smoother": a.smoother, "omega": a.omega}
-    else:
-        if a.smoother != "colored-gs":
-            p.error("--smoother requires --structured")
-        session = cpp_core.CppSweepSession(ctx, X.ravel(), device=a.device, dim=3)
-        run_kwargs = {}
+    # The dome lattice is a single n^3 block (C-order node ids), so the structured
+    # store has an empty halo; the sweep relaxes block-Jacobi over it.
+    from egg.smoothing.cpp_backend import (
+        build_structured_context_from_block_maps, structured_arrays)
+    blocks = [np.arange(n ** 3).reshape(n, n, n)]
+    bsc = build_structured_context_from_block_maps(3, blocks)
+    structured = structured_arrays(bsc)
+    session = cpp_core.CppStructuredSweepSession(
+        ctx, structured, X.ravel(), device=a.device, dim=3)
+    print(f"structured: blocks={bsc.num_blocks} omega={a.omega}")
+    run_kwargs = {"omega": a.omega}
     energies, mindets = [], []
 
     live = None

@@ -17,7 +17,7 @@ def _has_cpp() -> bool:
         return False
 
 
-# The pipeline runs on the C++ backend (CppSweepSession / cpp_untangle), so the
+# The pipeline runs on the C++ backend (block-Jacobi sweep / cpp_untangle), so the
 # whole module skips when the extension isn't built.
 pytestmark = pytest.mark.skipif(
     not _has_cpp(), reason="egg._cpp.cpp_core not built")

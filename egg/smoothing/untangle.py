@@ -45,7 +45,7 @@ def untangle(
     grid,
     ctx,
     *,
-    shrink: float = 0.5,
+    shrink: float = 0.8,
     margin: float = 1e-9,
     sweeps_per_delta: int = 20,
     delta0_factor: float = 2.0,
@@ -87,7 +87,7 @@ def untangle(
         return UntangleResult(True, md, 0.0, 0, no_op=True)
 
     X_out, md_final, outer_iters, delta_final = cpp_untangle(
-        ctx, grid.global_nodes,
+        ctx, grid, grid.global_nodes,
         sweeps_per_delta=sweeps_per_delta,
         delta0_factor=delta0_factor,
         shrink=shrink,

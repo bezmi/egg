@@ -1,24 +1,19 @@
 #pragma once
 
-// structured_sweep.hpp — the colored Gauss-Seidel sweep driven over a
-// halo-padded structured store (Phase 1.3 of gpu-performance-improvement.md).
+// structured_sweep.hpp — the block-Jacobi sweep driven over a halo-padded
+// structured store.
 //
-// StructuredExecutorT<D> reuses the exact unstructured sweep machinery —
-// SweepDeviceContextT<D> (the uploaded per-colour patch tables + X store),
-// sweep_colour_kernel, and reduce_energy_mindet — but the SweepContextHostT it
-// carries uses STRUCTURED node indices: gc/gn index into the packed BlockField
-// buffer (built host-side via structured_patch.hpp), and X IS that packed buffer
-// (interior slots filled through the block scatter map, ghost slots refreshed by
-// the halo exchange). The only thing the structured path adds over ExecutorT is
-// a per-sweep halo_exchange + broadcast_shared, injected as the run_colored_gs
-// before-sweep hook — cadence 1.4b (additive Schwarz / frozen halos): cross-block
-// neighbours read the previous sweep's halo and non-owner copies of shared
-// interface nodes are refreshed from their owner, so only within-block colour
-// independence is needed.
-//
-// Because both executors compose the same run_colored_gs driver, the sweep,
-// backtracking, entity dispatch, and reduction paths are single-sourced; this
-// header contributes only the halo interleave and the topology ownership.
+// StructuredExecutorT<D> composes SweepDeviceContextT<D> (the uploaded patch
+// tables + X store), run_block_jacobi, and reduce_energy_mindet, but the
+// SweepContextHostT it carries uses STRUCTURED node indices: gc/gn index into the
+// packed BlockField buffer (built host-side via structured_patch.hpp), and X IS
+// that packed buffer (interior slots filled through the block scatter map, ghost
+// slots refreshed by the halo exchange). The structured path adds a per-sweep
+// halo_exchange + broadcast_shared, injected as the run_block_jacobi before-sweep
+// hook — cadence 1.4b (additive Schwarz / frozen halos): cross-block neighbours
+// read the previous sweep's halo and non-owner copies of shared interface nodes
+// are refreshed from their owner, so every free DOF relaxes from the same
+// snapshot.
 
 #include "structured_halo.hpp"
 #include "sweep.hpp"
@@ -30,7 +25,7 @@
 namespace egg
 {
 
-/// Colored-GS executor over a halo-padded structured store. Owns its in-order
+/// Block-Jacobi executor over a halo-padded structured store. Owns its in-order
 /// queue, the device sweep context (structured indices), and the block halo
 /// topology; refreshes ghost shells once per sweep before relaxing.
 template <int D> class StructuredExecutorT
@@ -53,23 +48,9 @@ template <int D> class StructuredExecutorT
 
     SweepDeviceContextT<D>& ctx() { return ctx_; }
 
-    /// Run n_sweeps with a per-sweep halo exchange; returns (energies, min-dets).
-    /// @p report_every throttles the energy/min-det reduction cadence
-    /// (see @ref run_colored_gs); default preserves the legacy per-sweep contract.
-    std::pair<std::vector<real>, std::vector<real>>
-      run_sweeps(int n_sweeps, const ObjectiveKindT<D>& kind = ShapeObjectiveT<D> {},
-                 int report_every = 1)
-    {
-        return std::visit(
-          [&](auto objective) {
-              return run_colored_gs<D>(q_, ctx_, objective, n_sweeps, halo_hook(), report_every);
-          },
-          kind);
-    }
-
     /// Run n_sweeps of double-buffered block-Jacobi (one merged launch per sweep),
-    /// returns (energies, min-dets). Same per-sweep halo hook as the colored-GS
-    /// path — under the frozen-halo cadence Jacobi converges to the same minimiser.
+    /// returns (energies, min-dets). Under the frozen-halo cadence Jacobi
+    /// converges to the minimiser.
     /// @p omega is the SOR/damping weight (1.0 = undamped).
     /// @p report_every throttles the energy/min-det reduction cadence
     /// (see @ref run_block_jacobi); default preserves the legacy per-sweep contract.
@@ -86,9 +67,9 @@ template <int D> class StructuredExecutorT
     }
 
   private:
-    /// The shared per-sweep hook: refresh the cross-block ghost shell and the
-    /// non-owner copies of shared interface nodes on the read buffer (frozen for
-    /// the sweep — cadence 1.4b). Used by both colored-GS and block-Jacobi.
+    /// The per-sweep hook: refresh the cross-block ghost shell and the non-owner
+    /// copies of shared interface nodes on the read buffer (frozen for the sweep —
+    /// cadence 1.4b).
     /// Fused into a single launch — the two passes write disjoint slots, so
     /// fusion preserves behaviour (see @ref fused_halo_broadcast).
     auto halo_hook()

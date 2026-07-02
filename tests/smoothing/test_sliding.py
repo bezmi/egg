@@ -10,9 +10,10 @@ are inlined here so the test does not depend on the examples package.
 import numpy as np
 
 from egg.geometry.analytic2d import Circle, LineSegment
-from egg.smoothing.solver import build_sweep_context, local_relaxation_sweep
+from egg.smoothing.solver import build_sweep_context
 from egg.smoothing.targets import IdentityTarget
 from egg.topology.builder import TopologyBuilder
+from tests.real_tol import real_tol
 
 
 # --- demo grid (Phase-4 O-grid around a circle in a square) ---------------------
@@ -130,6 +131,19 @@ def constrained_positions(grid):
             for dof, ent in grid.dof_constraints.items()}
 
 
+def _relax(grid, ctx, n_sweeps=400):
+    """Run block-Jacobi on ``grid``; sync the result back in place.
+
+    Block-Jacobi smooths less per sweep than a sequential relaxation, so it needs
+    more sweeps to reach the same slid/evened distribution.
+    """
+    from egg.smoothing.cpp_backend import cpp_structured_sweep
+    X_out, _e, _m = cpp_structured_sweep(
+        ctx, grid, grid.global_nodes, n_sweeps, device="cpu")
+    grid.global_nodes = X_out
+    _propagate(grid)
+
+
 # --- gates ----------------------------------------------------------------------
 def test_constrained_dofs_slide_along_entity():
     grid, _, target, _ = build_demo_grid()
@@ -140,8 +154,7 @@ def test_constrained_dofs_slide_along_entity():
 
     # Relax — constrained DOFs may only slide along their entity.
     ctx = build_sweep_context(grid, target)
-    for _ in range(60):
-        local_relaxation_sweep(grid, target, "shape_2d", ctx)
+    _relax(grid, ctx)
     final = constrained_positions(grid)
 
     # (1) Every constrained point is still exactly on its entity.
@@ -149,7 +162,10 @@ def test_constrained_dofs_slide_along_entity():
         float(np.linalg.norm(p - np.asarray(ent.project(p))))
         for ent, p in final.values()
     )
-    assert max_resid < 1e-8, f"a constrained DOF left its entity: resid={max_resid:.2e}"
+    # fp32 projects onto the entity to ~1e-7, so floor the on-curve tolerance
+    # there (the double build keeps the tight 1e-8).
+    assert max_resid < real_tol(1e-8, floor=1e-6), (
+        f"a constrained DOF left its entity: resid={max_resid:.2e}")
 
     # (2) Points actually slid tangentially (non-trivial along-boundary shift).
     shifts = []
@@ -176,8 +192,7 @@ def test_clumped_circle_spacing_becomes_more_even():
 
     before = circle_gap_std(grid)
     ctx = build_sweep_context(grid, target)
-    for _ in range(60):
-        local_relaxation_sweep(grid, target, "shape_2d", ctx)
+    _relax(grid, ctx)
     after = circle_gap_std(grid)
 
     assert after < before, f"spacing did not even out: std {before:.4f} -> {after:.4f}"

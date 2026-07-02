@@ -58,10 +58,9 @@ template <int D> class BlockTopologyDevice
     /// @param dst_padded   (E,) padded index of each destination ghost node.
     /// @param sing_block   (S,) block of each singular node.
     /// @param sing_logical (S,) interior logical index of each singular node.
-    /// @param share_src_block  (K,) owner block of each shared-node broadcast.
-    /// @param share_src_padded (K,) owner interior padded index of each broadcast.
-    /// @param share_dst_block  (K,) non-owner block of each shared-node broadcast.
-    /// @param share_dst_padded (K,) non-owner interior padded index of each broadcast.
+    /// @param share_src_off (K,) owner interior element offset of each shared-node
+    ///                      broadcast (the owner -> non-owner copy source).
+    /// @param share_dst_off (K,) non-owner interior element offset (the copy dest).
     /// @param fan_src_off  (F,) extra interior->ghost copies as already-computed
     ///                     double offsets (singular-fan neighbours mirrored into
     ///                     spare ghost-ring slots; appended to the ghost halo).
@@ -73,14 +72,12 @@ template <int D> class BlockTopologyDevice
                         const std::vector<Index>& dst_padded,
                         const std::vector<int>& sing_block,
                         const std::vector<Index>& sing_logical,
-                        const std::vector<int>& share_src_block = {},
-                        const std::vector<Index>& share_src_padded = {},
-                        const std::vector<int>& share_dst_block = {},
-                        const std::vector<Index>& share_dst_padded = {},
+                        const std::vector<std::size_t>& share_src_off = {},
+                        const std::vector<std::size_t>& share_dst_off = {},
                         const std::vector<std::size_t>& fan_src_off = {},
                         const std::vector<std::size_t>& fan_dst_off = {}) :
         n_entries_(src_block.size() + fan_src_off.size()), n_sing_(sing_block.size()),
-        n_share_(share_src_block.size())
+        n_share_(share_src_off.size())
     {
         std::vector<std::size_t> hsrc(n_entries_), hdst(n_entries_);
         for (std::size_t e = 0; e < src_block.size(); ++e) {
@@ -98,18 +95,11 @@ template <int D> class BlockTopologyDevice
         src_off_ = UsmBuffer<std::size_t> {q, hsrc};
         dst_off_ = UsmBuffer<std::size_t> {q, hdst};
 
-        // Owner -> non-owner shared-node copies (interior -> interior). Both
-        // endpoints are interior padded indices, so the same padded_node_offset
-        // path applies; the kernel is the same coordinate copy as the ghost halo.
-        std::vector<std::size_t> hssrc(n_share_), hsdst(n_share_);
-        for (std::size_t k = 0; k < n_share_; ++k) {
-            hssrc[k] = layout.padded_node_offset(static_cast<std::size_t>(share_src_block[k]),
-                                                 share_src_padded[k]);
-            hsdst[k] = layout.padded_node_offset(static_cast<std::size_t>(share_dst_block[k]),
-                                                 share_dst_padded[k]);
-        }
-        share_src_off_ = UsmBuffer<std::size_t> {q, hssrc};
-        share_dst_off_ = UsmBuffer<std::size_t> {q, hsdst};
+        // Owner -> non-owner shared-node copies (interior -> interior) arrive as
+        // element offsets already (apply_structured_remap derives them from the
+        // interior node indices); the copy is the same as the ghost halo's.
+        share_src_off_ = UsmBuffer<std::size_t> {q, share_src_off};
+        share_dst_off_ = UsmBuffer<std::size_t> {q, share_dst_off};
 
         std::vector<std::size_t> hsing(n_sing_);
         for (std::size_t s = 0; s < n_sing_; ++s) {

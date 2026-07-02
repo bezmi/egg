@@ -1,25 +1,16 @@
 #pragma once
 
-// structured_smoother.hpp — the structured field/smoother interface (Phase 1.3
-// of gpu-performance-improvement.md).
+// structured_smoother.hpp — the structured field interface.
 //
-// Phase 2 must be able to swap the relaxation (colored-GS -> block-Jacobi)
-// without touching the field storage or the kernel launch plumbing. We express
-// that seam with two C++20 concepts — StructuredField (read/write node store
-// with a halo synchronisation) and BlockSmoother (a relaxation step over a
-// block's interior) — and a concrete StructuredField, BlockFieldStructured<D>,
-// that composes the Phase 1.1b store (BlockField<D>) with the Phase 1.2 halo
-// topology (BlockTopologyDevice<D>).
+// Expresses the node storage the block-Jacobi sweep reads/writes with a C++20
+// concept — StructuredField (read/write node store with a halo synchronisation)
+// — and a concrete model, BlockFieldStructured<D>, that composes the BlockField<D>
+// store with the BlockTopologyDevice<D> halo topology.
 //
 // BlockFieldStructured is a HOST-side orchestration object: it owns the device
 // storage + halo tables and runs exchange_halos(), and it hands out the
 // trivially-copyable interior(b)/with_halo(b) mdspan views that a kernel
 // captures by value. It is never itself captured into a kernel (it owns USM).
-//
-// Only StructuredField + its adapter live here for now; the BlockSmoother
-// concept is stated so the seam is visible, but the colored-GS smoother that
-// satisfies it (structured patch evaluation over the padded neighbourhood)
-// lands with the structured sweep kernel and is gated by the 1.5 parity test.
 
 #include "device.hpp"
 #include "structured.hpp"
@@ -47,22 +38,10 @@ concept StructuredField = requires(F f, std::size_t b) {
     { f.exchange_halos() };
 };
 
-/// A relaxation step over one block's interior DOFs. The smoother reads stencil
-/// neighbours by fixed logical stride (±1 per axis) from a StructuredField —
-/// never an arbitrary gather — and writes the block's interior in place (or to a
-/// second buffer, for the double-buffered Jacobi of Phase 2). `relax` takes the
-/// field, the block index, the objective, and the colour/sub-step selector; the
-/// exact signature is pinned when the structured kernel lands (1.3 core).
-template <class S, int D, class Field, class Obj>
-concept BlockSmoother = StructuredField<Field, D> && requires(S s, Field& f, std::size_t b,
-                                                              Obj objective, int sub_step) {
-    { s.relax(f, b, objective, sub_step) };
-};
-
 /// Concrete StructuredField: BlockField<D> store + BlockTopologyDevice<D> halo
 /// tables on a shared queue. Move-only (owns USM). The structured smoother
 /// composes one of these; exchange_halos() is the per-cadence synchronisation
-/// (1.4) the colored-GS / block-Jacobi sweeps call.
+/// (1.4) the block-Jacobi sweep calls.
 template <int D> class BlockFieldStructured
 {
   public:

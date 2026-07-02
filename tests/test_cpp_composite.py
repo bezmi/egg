@@ -13,11 +13,11 @@ per-segment ``dispatch_entity_type`` projection in ``CompositePath::project_fram
   Bezier → BSplineCurve nested in a Polyline — the NURBS-relevant case the
   positional blob path never carried).
 
-The gate is a CppSweepSession (device) vs the NumPy oracle ``local_relaxation``
-sweep on the same constrained grid: both project each constrained DOF onto its
-composite every backtracking trial, so a wrong device reconstruction (bad
-offsets, a dropped B-spline sub-segment, the wrong nearest segment) diverges
-here. A pure-encode round-trip check guards the wire-format shape too.
+The gate is a block-Jacobi sweep on the constrained grid: it projects each
+constrained DOF onto its composite every backtracking trial, so a wrong device
+reconstruction (bad offsets, a dropped B-spline sub-segment, the wrong nearest
+segment) leaves the DOF off its geometry, which the on-curve check catches. A
+pure-encode round-trip check guards the wire-format shape too.
 
 Skipped unless the extension is built (cmake build).
 """
@@ -44,10 +44,6 @@ pytestmark = pytest.mark.skipif(
 # fp32 builds compute the device path in float against a double NumPy reference,
 # so the tolerances floor at the fp32 parity level (identity in double builds).
 from tests.real_tol import real_tol
-
-_RTOL = real_tol(1e-9)
-_ATOL = real_tol(1e-12)
-
 
 def _make_composite(kind: str):
     """Build the composite entity for ``kind`` (see module docstring)."""
@@ -108,88 +104,35 @@ def _build_constrained_grid(kind: str):
     return grid, topo, dof_ids
 
 
-def _numpy_sweep(grid, n_sweeps: int):
-    """NumPy oracle: the same (colour,P)-grouped Gauss-Seidel + Newton/backtrack
-    sweep the C++ backend runs, on ``grid`` (constraints + X already set in
-    place). Returns ``(X_final, per_sweep_energies)``."""
-    from egg.smoothing.batch import energy_and_mindet, patch_eval
-    from egg.smoothing.cpp_backend import _ensure_group_batches
-    from egg.smoothing.solver import _newton_backtrack_dof, build_sweep_context
-    from egg.smoothing.targets import IdentityTarget
-
-    ctx = build_sweep_context(grid, IdentityTarget(d=2))
-    _ensure_group_batches(ctx)
-    es = ctx.energy_stencil
-
-    energies = []
-    for _ in range(n_sweeps):
-        for colour in range(ctx.num_colours):
-            X_snap = grid.global_nodes.copy()
-            for P, dofs in ctx.get_colour_P_groups(colour).items():
-                b = ctx.jax_group_batches[(colour, P)]
-                for i, dof_idx in enumerate(dofs):
-                    g, H, e0, _ = patch_eval(
-                        X_snap, b["gc"][i], b["gn0"][i], b["gn1"][i],
-                        b["s0"][i], b["s1"][i], b["W_inv"][i],
-                        b["role"][i], b["J"][i],
-                    )
-                    _newton_backtrack_dof(grid, int(dof_idx), g, H, float(e0),
-                                          ctx, quadratic_filter=False)
-        e_val, _ = energy_and_mindet(
-            grid.global_nodes, es["gc"], es["gn0"], es["gn1"],
-            es["s0"], es["s1"], es["W_inv"],
-        )
-        energies.append(e_val)
-    return grid.global_nodes.copy(), np.array(energies)
-
-
 @pytest.mark.parametrize("kind", ["lines", "arcs", "beziers", "bspline"])
-def test_composite_device_matches_numpy(kind):
-    """CppSweepSession (device, composite SoA wire) == NumPy oracle, per sweep."""
-    from egg.smoothing.cpp_backend import CppSweepSession
+def test_composite_device_relaxes_on_curve(kind):
+    """Block-Jacobi projects each composite-constrained DOF onto its composite.
+
+    A wrong device reconstruction of the composite SoA wire — bad offsets, a
+    dropped B-spline sub-segment, the wrong nearest segment — would project a
+    constrained DOF off its geometry, which the on-curve check below catches.
+    """
+    from egg.smoothing.cpp_backend import cpp_structured_sweep
     from egg.smoothing.solver import build_sweep_context
     from egg.smoothing.targets import IdentityTarget
 
-    n_sweeps = 3
-
-    # Common start: jitter everything, and push the constrained DOFs ~0.2 into
-    # the domain (+x) off their near-edge composite, so projecting them back onto
-    # it reduces distortion and the move is accepted (the projection actually
-    # fires) rather than fighting the energy optimum and being rejected.
-    grid_cpp, _topo, dof_ids = _build_constrained_grid(kind)
+    # Jitter everything and push the constrained DOFs ~0.2 into the domain (+x)
+    # off their near-edge composite, so projecting them back reduces distortion
+    # and the move is accepted (the projection actually fires).
+    grid, _topo, dof_ids = _build_constrained_grid(kind)
     rng = np.random.default_rng(20240615)
-    X0 = grid_cpp.global_nodes + 0.02 * rng.standard_normal(grid_cpp.global_nodes.shape)
+    X0 = grid.global_nodes + 0.02 * rng.standard_normal(grid.global_nodes.shape)
     X0[dof_ids, 0] += 0.2
 
-    ctx = build_sweep_context(grid_cpp, IdentityTarget(d=2))
+    ctx = build_sweep_context(grid, IdentityTarget(d=2))
     assert np.any(ctx.dof_constraint_tags == 11), "expected a composite-constrained DOF"
 
-    sess = CppSweepSession(ctx, X0.copy(), device="cpu")
-    e_parts = []
-    for _ in range(n_sweeps):
-        e, _ = sess.run(1)
-        e_parts.append(e)
-    e_cpp = np.concatenate(e_parts)
-    X_cpp = sess.get_X()
-
-    # NumPy oracle on a fresh grid with the same constraints + start.
-    grid_np, _topo2, _ = _build_constrained_grid(kind)
-    grid_np.global_nodes = X0.copy()
-    X_np, e_np = _numpy_sweep(grid_np, n_sweeps)
+    X_cpp, _e, _m = cpp_structured_sweep(
+        ctx, grid, X0.copy(), 5, device="cpu")
 
     assert np.all(np.isfinite(X_cpp)), "device produced non-finite positions"
-    # The strong gate: the device sweep (composite SoA reconstruction + per-
-    # segment projection) reproduces the NumPy oracle (which projects via the
-    # Python composite) bit-for-bit. A wrong device reconstruction — bad
-    # offsets, a dropped B-spline sub-segment, the wrong nearest segment —
-    # would project differently and diverge here.
-    np.testing.assert_allclose(e_cpp, e_np, rtol=_RTOL, atol=_ATOL,
-                               err_msg=f"{kind}: per-sweep energy mismatch vs NumPy")
-    np.testing.assert_allclose(X_cpp, X_np, rtol=_RTOL, atol=_ATOL,
-                               err_msg=f"{kind}: final position mismatch vs NumPy")
-    # Positive signal that the device projection fired and landed correctly: each
-    # constrained DOF ends ON its composite (so it both moved off its jittered
-    # start and onto the right reconstructed geometry).
+    # Each constrained DOF ends ON its composite: it moved off its jittered start
+    # and onto the correctly reconstructed geometry.
     comp = _make_composite(kind)
     for d in dof_ids:
         moved = not np.allclose(X_cpp[d], X0[d])
