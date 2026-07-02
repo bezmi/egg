@@ -24,8 +24,7 @@ import numpy as np
 
 from egg._cpp import cpp_core
 from egg.geometry.analytic3d import Sphere
-from egg.geometry.entity_soa import group_entities_by_type
-from egg.smoothing.batch import make_chain_J_nd
+from egg.smoothing.flat_context import build_flat_context
 
 D = 3
 
@@ -35,115 +34,38 @@ def node_id(i, j, k, n):
 
 
 def build_context(n, sphere_c, sphere_r):
-    """Hand-assembled flattened sweep context for the cube grid."""
+    """Flattened sweep context for the single-block cube grid.
+
+    The structured-grid assembly (cell stencil, node->sample membership, roles,
+    ragged per-colour groups) lives in the dimension-generic
+    :func:`egg.smoothing.flat_context.build_flat_context`; here we set up the
+    geometry: the n^3 lattice, the moving-DOF classification, and the analytic
+    parity colouring.
+    """
     h = 1.0 / (n - 1)
-    N = n ** 3
+    ids = np.arange(n ** 3).reshape(n, n, n)     # ids[i,j,k] == node_id(i,j,k,n)
+    ii, jj, kk = np.indices((n, n, n))
 
-    # Node classification.
-    def on_boundary(idx):
-        return any(v in (0, n - 1) for v in idx)
+    # Node classification. Moving DOFs = free interior + sphere-constrained
+    # top-face interior; everything else (5 faces, all edges/corners) is fixed.
+    on_bnd = ((ii == 0) | (ii == n - 1) | (jj == 0) | (jj == n - 1)
+              | (kk == 0) | (kk == n - 1))
+    top_int = (kk == n - 1) & (ii > 0) & (ii < n - 1) & (jj > 0) & (jj < n - 1)
+    moving_mask = (top_int | ~on_bnd).reshape(-1)
 
-    def on_top_interior(idx):
-        i, j, k = idx
-        return k == n - 1 and 0 < i < n - 1 and 0 < j < n - 1
-
-    # Per-(cell, corner) samples: corner + the d axis neighbours within the cell.
-    # Sign s_k = +1 if the corner sits at the low end of axis k, else -1.
-    samples = []  # (gc, (gn0, gn1, gn2), (s0, s1, s2))
-    node_samples = [[] for _ in range(N)]  # sample indices whose energy involves the node
-    for ci, cj, ck in product(range(n - 1), repeat=3):
-        cell = [(ci + a, cj + b, ck + c) for a, b, c in product((0, 1), repeat=3)]
-        cell_ids = [node_id(*v, n) for v in cell]
-        for o in product((0, 1), repeat=3):
-            corner = (ci + o[0], cj + o[1], ck + o[2])
-            gn, s = [], []
-            for ax in range(3):
-                nb = list(corner)
-                nb[ax] += 1 if o[ax] == 0 else -1
-                gn.append(node_id(*nb, n))
-                s.append(1.0 if o[ax] == 0 else -1.0)
-            si = len(samples)
-            samples.append((node_id(*corner, n), tuple(gn), tuple(s)))
-            for nid in cell_ids:
-                node_samples[nid].append(si)
-
-    # Moving DOFs: free interior + sphere-constrained top-face interior.
-    dof_entities: dict[int, object] = {}
-    moving = []
-    for idx in product(range(n), repeat=3):
-        nid = node_id(*idx, n)
-        if on_top_interior(idx):
-            dof_entities[nid] = Sphere(sphere_c, sphere_r, (1.0, 0.0, 0.0),
-                                       (0.0, 1.0, 0.0))
-            moving.append(nid)
-        elif not on_boundary(idx):
-            dof_entities[nid] = None  # free
-            moving.append(nid)
+    # One shared sphere for every top-interior node; free interior nodes carry no
+    # entity. (top_int is disjoint from the free interior, so keys never clash.)
+    sphere = Sphere(sphere_c, sphere_r, (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+    dof_entities: dict[int, object] = {int(nid): sphere for nid in ids[top_int]}
+    for nid in ids[~on_bnd]:
+        dof_entities[int(nid)] = None
 
     # 8-colouring by index parity: same-parity nodes never share a cell.
-    def colour(nid):
-        i, j, k = nid // (n * n), (nid // n) % n, nid % n
-        return (i % 2) * 4 + (j % 2) * 2 + (k % 2)
+    colours = ((ii % 2) * 4 + (jj % 2) * 2 + (kk % 2)).reshape(-1)
+    w_inv_sample = np.eye(3) / h                 # W = h I per sample
 
-    w_inv_sample = np.eye(3) / h  # W = h I per sample
-
-    groups = []
-    for c in range(8):
-        dofs = [nid for nid in moving if colour(nid) == c]
-        if not dofs:
-            continue
-        gc, gn, ss, role, dof_idx, P_of = [], [[], [], []], [[], [], []], [], [], []
-        for nid in dofs:
-            sids = node_samples[nid]
-            P_of.append(len(sids))
-            dof_idx.append(nid)
-            for si in sids:
-                sc, sgn, s = samples[si]
-                gc.append(sc)
-                for ax in range(3):
-                    gn[ax].append(sgn[ax])
-                    ss[ax].append(s[ax])
-                if sc == nid:
-                    role.append(0)
-                elif nid in sgn:
-                    role.append(1 + sgn.index(nid))
-                else:
-                    role.append(-1)
-        P = len(gc)
-        S = np.stack([np.asarray(ss[0]), np.asarray(ss[1]), np.asarray(ss[2])], axis=1)
-        W_inv = np.broadcast_to(w_inv_sample, (P, 3, 3))
-        J = make_chain_J_nd(S, W_inv)
-        groups.append({
-            "D": len(dofs),
-            "gc": np.asarray(gc, dtype=np.int32),
-            "gn0": np.asarray(gn[0], dtype=np.int32),
-            "gn1": np.asarray(gn[1], dtype=np.int32),
-            "gn2": np.asarray(gn[2], dtype=np.int32),
-            "s0": np.asarray(ss[0], dtype=np.float64),
-            "s1": np.asarray(ss[1], dtype=np.float64),
-            "s2": np.asarray(ss[2], dtype=np.float64),
-            "W_inv": np.ascontiguousarray(W_inv.reshape(P, 9)),
-            "role": np.asarray(role, dtype=np.int32),
-            "J": np.ascontiguousarray(J.reshape(P, 9 * 12)),
-            "dof_idx": np.asarray(dof_idx, dtype=np.int32),
-            "entities": group_entities_by_type(dof_idx, dof_entities, d=3),
-            "P_of": np.asarray(P_of, dtype=np.int32),
-        })
-
-    ns = len(samples)
-    energy_stencil = {
-        "num_samples": ns,
-        "gc": np.asarray([s[0] for s in samples], dtype=np.int32),
-        "gn0": np.asarray([s[1][0] for s in samples], dtype=np.int32),
-        "gn1": np.asarray([s[1][1] for s in samples], dtype=np.int32),
-        "gn2": np.asarray([s[1][2] for s in samples], dtype=np.int32),
-        "s0": np.asarray([s[2][0] for s in samples], dtype=np.float64),
-        "s1": np.asarray([s[2][1] for s in samples], dtype=np.float64),
-        "s2": np.asarray([s[2][2] for s in samples], dtype=np.float64),
-        "W_inv": np.ascontiguousarray(
-            np.broadcast_to(w_inv_sample, (ns, 3, 3)).reshape(ns, 9)),
-    }
-    return {"groups": groups, "energy_stencil": energy_stencil}
+    return build_flat_context([ids], moving_mask, dof_entities, 3,
+                              w_inv=w_inv_sample, colours=colours)
 
 
 def _grid_polylines(X, n):

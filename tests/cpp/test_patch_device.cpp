@@ -13,6 +13,7 @@
 #include "ut_cfg.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <format>
 #include <sycl/sycl.hpp>
 #include <vector>
@@ -48,8 +49,12 @@ void run_patch(sycl::queue& q, std::size_t M, Outputs& out)
     std::vector<int> h_P(M), h_tag(M);
     std::vector<egg::real> h_X(M * kMaxNodes * 2);
     std::vector<int> h_gc(M * kMaxP), h_gn0(M * kMaxP), h_gn1(M * kMaxP), h_role(M * kMaxP);
-    std::vector<egg::real> h_s0(M * kMaxP), h_s1(M * kMaxP), h_W(M * kMaxP * 4),
-      h_J(M * kMaxP * 24), h_params(M * 12);
+    // Identity sample_id: each patch's gc/gn arrays are its own (local) metric
+    // table, so occurrence p reads table row p.
+    std::vector<int> h_sid(kMaxP);
+    for (int i = 0; i < kMaxP; ++i) { h_sid[static_cast<std::size_t>(i)] = i; }
+    std::vector<std::int8_t> h_s0(M * kMaxP), h_s1(M * kMaxP);  // ±1 signs (int8 store)
+    std::vector<egg::real> h_W(M * kMaxP * 4), h_J(M * kMaxP * 24), h_params(M * 12);
     for (std::size_t k = 0; k < M; ++k) {
         const auto& s = golden::kPatchSamples[k];
         h_P[k] = s.P;
@@ -61,8 +66,8 @@ void run_patch(sycl::queue& q, std::size_t M, Outputs& out)
             h_gn0[k * kMaxP + i] = s.gn0[i];
             h_gn1[k * kMaxP + i] = s.gn1[i];
             h_role[k * kMaxP + i] = s.role[i];
-            h_s0[k * kMaxP + i] = static_cast<egg::real>(s.s0[i]);
-            h_s1[k * kMaxP + i] = static_cast<egg::real>(s.s1[i]);
+            h_s0[k * kMaxP + i] = static_cast<std::int8_t>(s.s0[i]);
+            h_s1[k * kMaxP + i] = static_cast<std::int8_t>(s.s1[i]);
         }
         for (int i = 0; i < kMaxP * 4; ++i)
             h_W[k * kMaxP * 4 + i] = static_cast<egg::real>(s.W_inv[i]);
@@ -80,8 +85,9 @@ void run_patch(sycl::queue& q, std::size_t M, Outputs& out)
     auto* d_gn0 = sycl::malloc_device<int>(M * kMaxP, q);
     auto* d_gn1 = sycl::malloc_device<int>(M * kMaxP, q);
     auto* d_role = sycl::malloc_device<int>(M * kMaxP, q);
-    auto* d_s0 = sycl::malloc_device<egg::real>(M * kMaxP, q);
-    auto* d_s1 = sycl::malloc_device<egg::real>(M * kMaxP, q);
+    auto* d_sid = sycl::malloc_device<int>(kMaxP, q);
+    auto* d_s0 = sycl::malloc_device<std::int8_t>(M * kMaxP, q);
+    auto* d_s1 = sycl::malloc_device<std::int8_t>(M * kMaxP, q);
     auto* d_W = sycl::malloc_device<egg::real>(M * kMaxP * 4, q);
     auto* d_J = sycl::malloc_device<egg::real>(M * kMaxP * 24, q);
     auto* d_params = sycl::malloc_device<egg::real>(M * 12, q);
@@ -100,8 +106,9 @@ void run_patch(sycl::queue& q, std::size_t M, Outputs& out)
     q.memcpy(d_gn0, h_gn0.data(), h_gn0.size() * sizeof(int));
     q.memcpy(d_gn1, h_gn1.data(), h_gn1.size() * sizeof(int));
     q.memcpy(d_role, h_role.data(), h_role.size() * sizeof(int));
-    q.memcpy(d_s0, h_s0.data(), h_s0.size() * sizeof(egg::real));
-    q.memcpy(d_s1, h_s1.data(), h_s1.size() * sizeof(egg::real));
+    q.memcpy(d_sid, h_sid.data(), h_sid.size() * sizeof(int));
+    q.memcpy(d_s0, h_s0.data(), h_s0.size() * sizeof(std::int8_t));
+    q.memcpy(d_s1, h_s1.data(), h_s1.size() * sizeof(std::int8_t));
     q.memcpy(d_W, h_W.data(), h_W.size() * sizeof(egg::real));
     q.memcpy(d_J, h_J.data(), h_J.size() * sizeof(egg::real));
     q.memcpy(d_params, h_params.data(), h_params.size() * sizeof(egg::real));
@@ -111,14 +118,14 @@ void run_patch(sycl::queue& q, std::size_t M, Outputs& out)
                    [=](sycl::id<1> idx) {
                        const std::size_t k = idx[0];
                     PatchView v {d_P[k],
+                                 d_sid,
+                                 &d_role[k * kMaxP],
                                  &d_gc[k * kMaxP],
                                  &d_gn0[k * kMaxP],
                                  &d_gn1[k * kMaxP],
                                  &d_s0[k * kMaxP],
                                  &d_s1[k * kMaxP],
-                                 &d_W[k * kMaxP * 4],
-                                 &d_role[k * kMaxP],
-                                 &d_J[k * kMaxP * 24]};
+                                 &d_W[k * kMaxP * 4]};
                     const egg::real* X = &d_X[k * kMaxNodes * 2];
 
                     const PatchResult r = patch_eval(v, X);
@@ -167,6 +174,7 @@ void run_patch(sycl::queue& q, std::size_t M, Outputs& out)
                     (void*)d_gn0,
                     (void*)d_gn1,
                     (void*)d_role,
+                    (void*)d_sid,
                     (void*)d_s0,
                     (void*)d_s1,
                     (void*)d_W,

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <limits>
 
 namespace egg
@@ -14,16 +15,28 @@ namespace egg
 // Non-owning view of one DOF's stencil, generalised to D axis-neighbours. The
 // per-corner stencil couples a corner to its D axis-neighbours (gn[k]/s[k]); for
 // D=2 gn[0]/gn[1] are the old gn0/gn1, so the indices and math are bit-identical.
-// W_inv is P×(d×d) row-major; J is P×(jRows×jCols) row-major (make_chain_J).
+//
+// The bulk per-sample payload (gc/gn/s/W_inv) is deduplicated into one shared
+// table — identical (cell,corner) samples appear in every corner DOF's patch but
+// are stored once. So gc/gn/s/W_inv are the *shared-table base* pointers and are
+// indexed by `sample_id[p]`, NOT by `p`. Only `sample_id` and `role` are
+// per-occurrence (length P, sliced to this DOF). W_inv row stride is dim::wInv(D),
+// keyed on the table index. The chain-Jacobian J is not stored — its role-selected
+// block is recomputed in-kernel from s + W_inv (see role_Jb).
 // role ∈ {0=corner, 1..D=neighbour axis (role−1), -1=absent}.
 template <int D> struct PatchViewT {
     int P;
-    const int* gc;
+    const int* sample_id;  // [P] index of each occurrence into the shared table
+    const int* role;       // [P]
+    const int* gc;         // shared-table base; read gc[sample_id[p]]
     const int* gn[D];
-    const real* s[D];
-    const real* W_inv;  // [P * dim::wInv(D)]
-    const int* role;
-    const real* J;  // [P * dim::jSize(D)]
+    const std::int8_t* s[D];  // per-axis sign ±1; stored as int8, widened on read
+    const real* W_inv;  // shared-table base; row sample_id[p] is dim::wInv(D) wide
+    // Row stride into W_inv (dim::wInv(D) normally). A uniform W_inv table (every
+    // sample shares one row, e.g. an identity target) is stored as a single row
+    // with stride 0, so every sample reads row 0; the read site multiplies the
+    // table index by this stride, so the kernel is unchanged otherwise.
+    int w_stride = dim::wInv(D);
 };
 
 template <int D> struct PatchResultT {
@@ -79,6 +92,18 @@ inline VecTN<D> assemble_vecT(const PtN<D>& corner,
     return T;
 }
 
+// Shared-table index of occurrence p: a PatchViewT carries a `sample_id`
+// indirection (deduplicated payload), while a raw stencil view (StencilSampleViewT)
+// stores its payload one-per-occurrence and indexes directly by p.
+template <class V> inline int table_index(const V& sv, int p)
+{
+    if constexpr (requires { sv.sample_id; }) {
+        return sv.sample_id[p];
+    } else {
+        return p;
+    }
+}
+
 // vec(T) and det(A) for sample p, read from the flat node array via the view's
 // gc/gn[] indices. Generic over any view exposing gc/gn[]/s[]/W_inv.
 template <int D, class V>
@@ -91,7 +116,13 @@ inline VecTN<D> sample_vecT(const V& sv, const real* X, int p, real& detA)
         nbr[k] = load_pt<D>(X, sv.gn[k][p]);
         s[k] = sv.s[k][p];
     }
-    return assemble_vecT<D>(corner, nbr, s, &sv.W_inv[dim::wInv(D) * p], detA);
+    // W_inv row stride is dim::wInv(D) for a per-sample table, or this view's
+    // w_stride when it carries one (0 for a uniform table → always row 0).
+    std::size_t woff = static_cast<std::size_t>(dim::wInv(D)) * static_cast<std::size_t>(p);
+    if constexpr (requires { sv.w_stride; }) {
+        woff = static_cast<std::size_t>(sv.w_stride) * static_cast<std::size_t>(p);
+    }
+    return assemble_vecT<D>(corner, nbr, s, &sv.W_inv[woff], detA);
 }
 
 // Patch energy (sum μ) and min det(A) — the cheap trial path. Mirrors
@@ -104,9 +135,126 @@ inline void patch_energy_mindet(
     mindet = std::numeric_limits<real>::infinity();
     for (int p = 0; p < sv.P; ++p) {
         real detA;
-        const VecTN<D> t = sample_vecT<D>(sv, X, p, detA);
+        const VecTN<D> t = sample_vecT<D>(sv, X, table_index(sv, p), detA);
         energy += objective.value(t);
         mindet = std::min(detA, mindet);
+    }
+}
+
+// Role-selected chain-Jacobian block Jb (kVT×D, row-major), recomputed from the
+// per-axis signs @p s and W_inv @p w (row-major d×d) rather than read from a
+// stored table. Jb is the D columns of the constant J = d·vec(T)/d·coords that
+// belong to the DOF's node (role 0 = corner, role r≥1 = axis-(r−1) neighbour).
+//
+// J's closed form, J[i·d+c, coord] = Σ_k W_inv[k,c]·dA[i,k,coord] with
+// dA[i,k,·] = −s_k on corner[i] and +s_k on nbr_k[i], makes the selected block
+// sparse: for output row a (i = a/D, c = a%D) only column i is nonzero. So the
+// corner block is Jb[a][i] = −Σ_k s_k·W_inv[k,c], and the axis-`ax` neighbour
+// block is Jb[a][i] = s_ax·W_inv[ax,c]. role < 0 (absent) → all-zero block.
+template <int D> inline void role_Jb(int role, const real* s, const real* w, real* Jb)
+{
+    constexpr int kVT = dim::vecT(D);
+    for (int e = 0; e < kVT * D; ++e) { Jb[e] = 0.0_r; }
+    if (role == 0) {
+        for (int a = 0; a < kVT; ++a) {
+            const int i = a / D, c = a % D;
+            real acc = 0.0_r;
+            for (int k = 0; k < D; ++k) { acc += s[k] * w[(k * D) + c]; }
+            Jb[(a * D) + i] = -acc;
+        }
+    } else if (role >= 1) {
+        const int ax = role - 1;
+        for (int a = 0; a < kVT; ++a) {
+            const int i = a / D, c = a % D;
+            Jb[(a * D) + i] = s[ax] * w[(ax * D) + c];
+        }
+    }
+}
+
+// Accumulate one metric sample into the running patch result, given its vec(T)
+// `t`, its row-major d×d `w` (= W_inv), the DOF's `role`, and the per-axis signs
+// `svals`. Factored out of patch_eval so the stored-array path and the
+// synthesized structured path share one audited math body; the caller supplies
+// (t, w, role, svals) from whichever source and owns the mindet update. The
+// fused eval_jhj branch (ShapeObjectiveT<3>) folds value + gradient + contracted
+// Hessian without materialising the 81-entry metric Hessian.
+template <int D, ObjectiveD<D> M>
+inline void accumulate_sample(
+  M& objective, const VecTN<D>& t, const real* w, int role, const real* svals, PatchResultT<D>& r)
+{
+    constexpr int kVT = dim::vecT(D);
+    constexpr bool kUseJhj = requires(M m, VecTN<D> tt, real* d) { m.eval_jhj(tt, d, d, d, d); };
+
+    // Metric gradient g (vec order, row-major). The fused path also folds in the
+    // energy and the contracted-Hessian contribution here.
+    GradN<D> g;
+    if constexpr (kUseJhj) {
+        // Role-selected Jb (kVT×D, row-major), recomputed from s + W_inv; zero
+        // when the DOF is absent so the returned jhj is itself zero.
+        real Jb[kVT * D];
+        role_Jb<D>(role, svals, w, Jb);
+        real val = 0.0_r;
+        real gg[kVT];
+        real jhj[D * D];
+        objective.eval_jhj(t, Jb, &val, gg, jhj);
+        r.energy += val;
+        for (int i = 0; i < kVT; ++i) { g[i] = gg[i]; }
+        for (int i = 0; i < D * D; ++i) { r.hess[i] += jhj[i]; }
+    } else {
+        r.energy += objective.value(t);
+        g = objective.grad(t);
+    }
+
+    // --- gradient contraction (common) ---
+    // dmu_dA[i,k] = sum_j dmu_dT[i,j]·w[k,j].
+    real dA[D][D];
+    for (int i = 0; i < D; ++i) {
+        for (int k = 0; k < D; ++k) {
+            real acc = 0.0_r;
+            for (int j = 0; j < D; ++j) { acc += g[(i * D) + j] * w[(k * D) + j]; }
+            dA[i][k] = acc;
+        }
+    }
+    real c[D];
+    for (int i = 0; i < D; ++i) { c[i] = 0.0_r; }
+    if (role == 0) {  // corner: c[i] = -sum_k s[k]·dA[i][k]
+        for (int i = 0; i < D; ++i) {
+            real acc = 0.0_r;
+            for (int k = 0; k < D; ++k) { acc += svals[k] * dA[i][k]; }
+            c[i] = -acc;
+        }
+    } else if (role >= 1) {  // neighbour on axis (role−1)
+        const int ax = role - 1;
+        for (int i = 0; i < D; ++i) { c[i] = svals[ax] * dA[i][ax]; }
+    }  // role == -1: absent, contributes nothing
+    for (int i = 0; i < D; ++i) { r.grad[i] += c[i]; }
+
+    // --- hessian (non-fused path) ---
+    // Role-selected Jb (kVT×D, recomputed from s + W_inv); skip entirely when
+    // the DOF is absent (role < 0) so the costly metric Hessian is not formed.
+    if constexpr (!kUseJhj) {
+        if (role >= 0) {
+            const HessN<D> H = objective.hess(t);  // (d²)×(d²) row-major
+            real Jbf[kVT * D];
+            role_Jb<D>(role, svals, w, Jbf);
+            const auto Jb = [&](int a, int k) -> real { return Jbf[(a * D) + k]; };
+            // HJb[a,j] = sum_b H[a,b] Jb[b,j].
+            real HJb[kVT][D];
+            for (int a = 0; a < kVT; ++a) {
+                for (int j = 0; j < D; ++j) {
+                    real acc = 0.0_r;
+                    for (int b = 0; b < kVT; ++b) { acc += H[(a * kVT) + b] * Jb(b, j); }
+                    HJb[a][j] = acc;
+                }
+            }
+            for (int i = 0; i < D; ++i) {
+                for (int j = 0; j < D; ++j) {
+                    real acc = 0.0_r;
+                    for (int a = 0; a < kVT; ++a) { acc += Jb(a, i) * HJb[a][j]; }
+                    r.hess[(i * D) + j] += acc;
+                }
+            }
+        }
     }
 }
 
@@ -117,14 +265,6 @@ template <int D, ObjectiveD<D> M = ShapeObjectiveT<D>>
 __attribute__((noinline)) inline PatchResultT<D>
   patch_eval(const PatchViewT<D>& sv, const real* X, M objective = {})
 {
-    constexpr int kVT = dim::vecT(D);
-    constexpr int kJC = dim::jCols(D);
-    // Fused path when the objective offers eval_jhj (ShapeObjectiveT<3>): one CSE
-    // pass yields value + metric gradient + the contracted Hessian Jbᵀ H Jb,
-    // without ever materialising the 81-entry metric Hessian (the live state that
-    // pins the 3D sweep kernel at 256 VGPR). Otherwise the separate
-    // value/grad/hess path (D=2 closed form, or the AD untangle objective) runs.
-    constexpr bool kUseJhj = requires(M m, VecTN<D> tt, real* d) { m.eval_jhj(tt, d, d, d, d); };
     PatchResultT<D> r {};
     r.grad = VecN<D> {};
     r.hess = MatN<D> {};
@@ -132,93 +272,15 @@ __attribute__((noinline)) inline PatchResultT<D>
     r.mindet = std::numeric_limits<real>::infinity();
 
     for (int p = 0; p < sv.P; ++p) {
+        const int sid = sv.sample_id[p];  // shared-table index of this occurrence
         real detA;
-        const VecTN<D> t = sample_vecT<D>(sv, X, p, detA);
+        const VecTN<D> t = sample_vecT<D>(sv, X, sid, detA);
         if (detA < r.mindet) { r.mindet = detA; }
-        const real* w = &sv.W_inv[dim::wInv(D) * p];  // row-major d×d
+        const real* w = &sv.W_inv[sv.w_stride * sid];  // row-major d×d (stride 0 ⇒ uniform)
         const int role = sv.role[p];
-
-        // Metric gradient g (vec order, row-major). The fused path also folds in
-        // the energy and the contracted-Hessian contribution here.
-        GradN<D> g;
-        if constexpr (kUseJhj) {
-            // Role-selected Jb (kVT×D, row-major); zero when the DOF is absent so
-            // the returned jhj is itself zero (the Hessian block is role-gated).
-            real Jb[kVT * D];
-            for (int e = 0; e < kVT * D; ++e) { Jb[e] = 0.0_r; }
-            if (role >= 0) {
-                const real* Jp = &sv.J[dim::jSize(D) * p];
-                const int c0 = D * role;
-                for (int a = 0; a < kVT; ++a) {
-                    for (int k = 0; k < D; ++k) { Jb[(a * D) + k] = Jp[(a * kJC) + c0 + k]; }
-                }
-            }
-            real val = 0.0_r;
-            real gg[kVT];
-            real jhj[D * D];
-            objective.eval_jhj(t, Jb, &val, gg, jhj);
-            r.energy += val;
-            for (int i = 0; i < kVT; ++i) { g[i] = gg[i]; }
-            for (int i = 0; i < D * D; ++i) { r.hess[i] += jhj[i]; }
-        } else {
-            r.energy += objective.value(t);
-            g = objective.grad(t);
-        }
-
-        // --- gradient contraction (common) ---
-        // dmu_dA[i,k] = sum_j dmu_dT[i,j]·w[k,j].
-        real dA[D][D];
-        for (int i = 0; i < D; ++i) {
-            for (int k = 0; k < D; ++k) {
-                real acc = 0.0_r;
-                for (int j = 0; j < D; ++j) { acc += g[(i * D) + j] * w[(k * D) + j]; }
-                dA[i][k] = acc;
-            }
-        }
-        real c[D];
-        for (int i = 0; i < D; ++i) { c[i] = 0.0_r; }
-        if (role == 0) {  // corner: c[i] = -sum_k s[k]·dA[i][k]
-            for (int i = 0; i < D; ++i) {
-                real acc = 0.0_r;
-                for (int k = 0; k < D; ++k) { acc += sv.s[k][p] * dA[i][k]; }
-                c[i] = -acc;
-            }
-        } else if (role >= 1) {  // neighbour on axis (role−1)
-            const int ax = role - 1;
-            for (int i = 0; i < D; ++i) { c[i] = sv.s[ax][p] * dA[i][ax]; }
-        }  // role == -1: absent, contributes nothing
-        for (int i = 0; i < D; ++i) { r.grad[i] += c[i]; }
-
-        // --- hessian (non-fused path) ---
-        // Select the D columns of J for this role (cols D·role + {0..D-1}); zero
-        // the whole block when the DOF is absent (role < 0). Jb is kVT×D.
-        if constexpr (!kUseJhj) {
-            if (role >= 0) {
-                const HessN<D> H = objective.hess(t);         // (d²)×(d²) row-major
-                const real* Jp = &sv.J[dim::jSize(D) * p];  // jRows×jCols row-major
-                const int c0 = D * role;                      // first selected column
-                real Jb[kVT][D];
-                for (int a = 0; a < kVT; ++a) {
-                    for (int k = 0; k < D; ++k) { Jb[a][k] = Jp[(a * kJC) + c0 + k]; }
-                }
-                // HJb[a,j] = sum_b H[a,b] Jb[b,j].
-                real HJb[kVT][D];
-                for (int a = 0; a < kVT; ++a) {
-                    for (int j = 0; j < D; ++j) {
-                        real acc = 0.0_r;
-                        for (int b = 0; b < kVT; ++b) { acc += H[(a * kVT) + b] * Jb[b][j]; }
-                        HJb[a][j] = acc;
-                    }
-                }
-                for (int i = 0; i < D; ++i) {
-                    for (int j = 0; j < D; ++j) {
-                        real acc = 0.0_r;
-                        for (int a = 0; a < kVT; ++a) { acc += Jb[a][i] * HJb[a][j]; }
-                        r.hess[(i * D) + j] += acc;
-                    }
-                }
-            }
-        }
+        real svals[D];
+        for (int k = 0; k < D; ++k) { svals[k] = sv.s[k][sid]; }
+        accumulate_sample<D>(objective, t, w, role, svals, r);
     }
     return r;
 }

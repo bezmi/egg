@@ -190,6 +190,29 @@ def _encode_cubicbezier(entity) -> np.ndarray:
     ], dtype=np.float64)
 
 
+def _bspline_curve_degree_guard(degree: int) -> None:
+    """Reject a B-spline *curve* whose degree exceeds the compiled de Boor cap.
+
+    The device de Boor work arrays are fixed-size (``kBSplineCurveCap`` in
+    ``geometry.hpp``); a higher-degree curve would index them out of bounds and
+    segfault. The standalone-curve C++ loader guards this, but a curve nested in
+    a composite is encoded positionally and bypasses that loader, so the guard is
+    applied here too. The cap is read from the compiled extension when present
+    (so it tracks any ``-DEGG_MAX_BSPLINE_CURVE_DEGREE`` override); without the
+    extension there is no device de Boor to overflow, so the check is skipped.
+    """
+    try:
+        from egg._cpp import cpp_core
+    except ImportError:
+        return
+    cap = getattr(cpp_core, "MAX_BSPLINE_CURVE_DEGREE", None)
+    if cap is not None and degree > cap:
+        raise ValueError(
+            f"B-spline curve degree {degree} exceeds the compiled cap {cap}; "
+            f"rebuild with a larger -DEGG_MAX_BSPLINE_CURVE_DEGREE."
+        )
+
+
 def _encode_bspline(entity):
     """Encode a BSplineCurve into (scalars_row, segmented_data).
 
@@ -199,6 +222,7 @@ def _encode_bspline(entity):
     matching the C++ BSplineCurveParam::ctrl span layout; weights is empty
     for the polynomial path). has_w == 0.0 selects the polynomial path.
     """
+    _bspline_curve_degree_guard(int(entity.degree))
     has_w = entity.weights is not None
     row = np.array([
         float(entity.degree),
@@ -234,7 +258,12 @@ def _encode_composite(entity):
     NURBS-relevant case. Nested composites are rejected by ``CompositePath``
     itself at construction, so they never reach here.
     """
+    from egg.geometry.curves2d import BSplineCurve
     from egg.geometry.entity_encoding import encode_entity
+
+    for seg in entity.segments:
+        if isinstance(seg, BSplineCurve):
+            _bspline_curve_degree_guard(int(seg.degree))
 
     local_arena: list[float] = []
     _tag, params = encode_entity(entity, d=2, arena=local_arena)

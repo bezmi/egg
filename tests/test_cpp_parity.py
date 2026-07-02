@@ -37,9 +37,13 @@ pytestmark = pytest.mark.skipif(
 # Energy is a sum over ~10^4 samples, so the C++ device reduction and the NumPy
 # oracle accumulate in different orders; 1e-9 keeps the gate meaningful while
 # allowing that float64 reduction-order drift (abs diff ~1e-6 on energies ~6e3).
-_RTOL_E = 1e-9
-_RTOL_X = 1e-9
-_ATOL = 1e-12
+# In the fp32 build the C++ side computes in float, so the tolerances floor at
+# the fp32 parity level (the NumPy reference stays double); see tests/real_tol.py.
+from tests.real_tol import real_tol
+
+_RTOL_E = real_tol(1e-9)
+_RTOL_X = real_tol(1e-9)
+_ATOL = real_tol(1e-12)
 
 
 def _mini_context(perturb: bool = True):
@@ -228,9 +232,18 @@ def test_cpp_session_per_sweep_matches_numpy(n_sweeps, ctx_name):
     X_sess = sess.get_X()
 
     assert e_sess.shape == (n_sweeps,)
-    np.testing.assert_allclose(e_sess, e_ref, rtol=_RTOL_E, atol=_ATOL,
+    # The perturbed circle_in_rect mesh is briefly tangled (min det < 0); its
+    # near-degenerate cells make the barrier line search take a different branch
+    # in float, so ~5 of its 4320 nodes step differently and the fp32 vs double
+    # reference diverges ~2% (positions and the amplified barrier energy). Floor
+    # the fp32 tolerance accordingly for that case; the well-conditioned free_4x4
+    # case keeps the 5e-4 parity floor, and the double build keeps the 1e-9 gate.
+    floor = 5e-2 if ctx_name == "circle_in_rect" else 5e-4
+    rtol_e, rtol_x = real_tol(1e-9, floor), real_tol(1e-9, floor)
+    atol = real_tol(1e-12, floor)
+    np.testing.assert_allclose(e_sess, e_ref, rtol=rtol_e, atol=atol,
                                err_msg="per-sweep energy mismatch vs NumPy")
-    np.testing.assert_allclose(X_sess, X_ref, rtol=_RTOL_X, atol=_ATOL,
+    np.testing.assert_allclose(X_sess, X_ref, rtol=rtol_x, atol=atol,
                                err_msg="final position mismatch vs NumPy")
 
 

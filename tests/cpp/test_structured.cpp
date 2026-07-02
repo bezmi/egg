@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 using namespace boost::ut;
@@ -200,7 +201,8 @@ static const suite<"structured"> structured_suite = [] {
         const std::array<std::array<int, 2>, 4> corner_offs {{{0, 0}, {1, 0}, {0, 1}, {1, 1}}};
 
         std::vector<int> gc_c, gn0_c, gn1_c, gc_p, gn0_p, gn1_p, role;
-        std::vector<egg::real> s0, s1, W_inv, J;
+        std::vector<std::int8_t> s0, s1;  // per-axis sign ±1, matches PatchViewT::s
+        std::vector<egg::real> W_inv, J;
         double jfill = 0.0;
         for (const auto& base : cell_bases) {
             for (const auto& co : corner_offs) {
@@ -221,8 +223,8 @@ static const suite<"structured"> structured_suite = [] {
                 gc_p.push_back(interior_node_index<2>(layout, 0, corner));
                 gn0_p.push_back(interior_node_index<2>(layout, 0, nb0));
                 gn1_p.push_back(interior_node_index<2>(layout, 0, nb1));
-                s0.push_back(sx);
-                s1.push_back(sy);
+                s0.push_back(static_cast<std::int8_t>(sx));
+                s1.push_back(static_cast<std::int8_t>(sy));
                 int r = -1;
                 if (corner == mover) { r = 0; }
                 else if (nb0 == mover) { r = 1; }
@@ -233,10 +235,16 @@ static const suite<"structured"> structured_suite = [] {
             }
         }
 
+        // Identity sample_id: these compact arrays are their own metric table,
+        // so occurrence p reads table row p.
+        std::vector<int> sid(gc_c.size());
+        for (std::size_t i = 0; i < sid.size(); ++i) { sid[i] = static_cast<int>(i); }
+
         auto make_view = [&](const std::vector<int>& gc, const std::vector<int>& gn0,
                              const std::vector<int>& gn1) {
             PatchViewT<2> pv;
             pv.P = static_cast<int>(gc.size());
+            pv.sample_id = sid.data();
             pv.gc = gc.data();
             pv.gn[0] = gn0.data();
             pv.gn[1] = gn1.data();
@@ -244,7 +252,6 @@ static const suite<"structured"> structured_suite = [] {
             pv.s[1] = s1.data();
             pv.W_inv = W_inv.data();
             pv.role = role.data();
-            pv.J = J.data();
             return pv;
         };
 
@@ -255,5 +262,222 @@ static const suite<"structured"> structured_suite = [] {
         expect(rc.mindet == rp.mindet) << "mindet";
         for (int k = 0; k < 2; ++k) { expect(rc.grad[k] == rp.grad[k]) << "grad component"; }
         for (int k = 0; k < 4; ++k) { expect(rc.hess[k] == rp.hess[k]) << "hess component"; }
+    };
+
+    // The synthesized interior patch must reproduce, occurrence for occurrence,
+    // the explicit per-DOF patch the host builder emits (cells in row-major base
+    // order, corners in row-major offset order). Reference here mirrors the
+    // hand-assembled build_context loop: iterate every cell in C-order, and for
+    // each cell that has the mover as a corner emit its 2^D corner samples.
+    "interior patch synthesis matches the explicit builder order"_test = [] {
+        constexpr int D = 3;
+        constexpr std::size_t n = 4;  // interior (4,4,4); movers (1,1,1)/(2,2,2) eligible
+        const BlockLayout<D> layout {{{{n, n, n}}}};
+        const std::array<std::size_t, D> mover {1, 1, 1};
+
+        auto id = [&](const std::array<std::size_t, D>& l) {
+            return interior_node_index<D>(layout, 0, l);
+        };
+        // Build the reference occurrence list exactly as the host builder does.
+        std::vector<int> e_gc, e_role;
+        std::array<std::vector<int>, D> e_gn;
+        std::array<std::vector<egg::real>, D> e_s;
+        for (std::size_t ci = 0; ci < n - 1; ++ci) {
+            for (std::size_t cj = 0; cj < n - 1; ++cj) {
+                for (std::size_t ck = 0; ck < n - 1; ++ck) {
+                    const std::array<std::size_t, D> base {ci, cj, ck};
+                    bool has_mover = false;
+                    for (int o = 0; o < (1 << D); ++o) {
+                        std::array<std::size_t, D> corner = base;
+                        for (int k = 0; k < D; ++k) { corner[k] += (o >> (D - 1 - k)) & 1; }
+                        if (corner == mover) { has_mover = true; }
+                    }
+                    if (!has_mover) { continue; }
+                    for (int o = 0; o < (1 << D); ++o) {
+                        std::array<std::size_t, D> corner = base;
+                        int ob[D];
+                        for (int k = 0; k < D; ++k) {
+                            ob[k] = (o >> (D - 1 - k)) & 1;
+                            corner[k] += ob[k];
+                        }
+                        e_gc.push_back(id(corner));
+                        int role = (corner == mover) ? 0 : -1;
+                        for (int k = 0; k < D; ++k) {
+                            const int sk = ob[k] == 0 ? 1 : -1;
+                            std::array<std::size_t, D> nbr = corner;
+                            nbr[k] = ob[k] == 0 ? nbr[k] + 1 : nbr[k] - 1;
+                            e_gn[k].push_back(id(nbr));
+                            e_s[k].push_back(static_cast<egg::real>(sk));
+                            if (role < 0 && nbr == mover) { role = k + 1; }
+                        }
+                        e_role.push_back(role);
+                    }
+                }
+            }
+        }
+
+        expect(interior_patch_size<D>() == 1 << (2 * D));  // 4^D == 64
+        expect(e_gc.size() == static_cast<std::size_t>(interior_patch_size<D>()));
+
+        for (int occ = 0; occ < interior_patch_size<D>(); ++occ) {
+            const InteriorOccurrence<D> oc =
+              interior_patch_occurrence<D>(layout, 0, mover, occ);
+            expect(oc.gc == e_gc[static_cast<std::size_t>(occ)]) << "gc occ" << occ;
+            expect(oc.role == e_role[static_cast<std::size_t>(occ)]) << "role occ" << occ;
+            for (int k = 0; k < D; ++k) {
+                expect(oc.gn[k] == e_gn[k][static_cast<std::size_t>(occ)]) << "gn occ" << occ;
+                expect(oc.s[k] == e_s[k][static_cast<std::size_t>(occ)]) << "s occ" << occ;
+            }
+        }
+    };
+
+    // patch_eval_synth (the in-kernel synthesized path) must reproduce the stored
+    // patch_eval bit-for-bit when fed the same interior patch — this locks the
+    // device synthesis + identity-W_inv evaluation to the audited stored math.
+    "synthesized patch_eval matches the stored evaluation"_test = [] {
+        constexpr int D = 3;
+        constexpr std::size_t n = 5;
+        const BlockLayout<D> layout {{{{n, n, n}}}};
+        const std::array<std::size_t, D> mover {2, 2, 2};
+
+        auto pos = [](std::size_t i, std::size_t j, std::size_t k) {
+            return PtN<3> {static_cast<egg::real>(i) + 0.03_r * static_cast<egg::real>(j),
+                           static_cast<egg::real>(j) + 0.02_r * static_cast<egg::real>(k),
+                           static_cast<egg::real>(k) + 0.01_r * static_cast<egg::real>(i)};
+        };
+        std::vector<egg::real> buf(layout.total_doubles());
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                for (std::size_t k = 0; k < n; ++k) {
+                    const std::size_t off = layout.interior_node_offset(0, {i, j, k});
+                    const PtN<3> p = pos(i, j, k);
+                    for (int c = 0; c < D; ++c) { buf[off + static_cast<std::size_t>(c)] = p[c]; }
+                }
+            }
+        }
+
+        // Stored arrays for the mover, built from the (trusted) synthesizer with
+        // identity W_inv and identity sample_id — what the stored path consumes.
+        std::vector<int> gc, role;
+        std::array<std::vector<int>, D> gn;
+        std::array<std::vector<std::int8_t>, D> s;  // per-axis sign ±1, matches PatchViewT::s
+        std::vector<egg::real> W_inv;
+        std::vector<int> sid;
+        for (int occ = 0; occ < interior_patch_size<D>(); ++occ) {
+            const InteriorOccurrence<D> o = interior_patch_occurrence<D>(layout, 0, mover, occ);
+            gc.push_back(o.gc);
+            role.push_back(o.role);
+            for (int k = 0; k < D; ++k) {
+                gn[k].push_back(o.gn[k]);
+                s[k].push_back(static_cast<std::int8_t>(o.s[k]));
+            }
+            for (int a = 0; a < D; ++a) {
+                for (int c = 0; c < D; ++c) { W_inv.push_back(a == c ? 1.0_r : 0.0_r); }
+            }
+            sid.push_back(occ);
+        }
+        PatchViewT<D> pv;
+        pv.P = static_cast<int>(gc.size());
+        pv.sample_id = sid.data();
+        pv.role = role.data();
+        pv.gc = gc.data();
+        for (int k = 0; k < D; ++k) {
+            pv.gn[k] = gn[k].data();
+            pv.s[k] = s[k].data();
+        }
+        pv.W_inv = W_inv.data();
+        const PatchResultT<D> rc = patch_eval<D>(pv, buf.data());
+
+        // Synthesized path: node-unit block base + strides from the layout.
+        const int block_off[1] = {0};
+        const auto ns = layout.node_strides(0);  // doubles
+        const int nstride[D] = {static_cast<int>(ns[0] / D), static_cast<int>(ns[1] / D),
+                                static_cast<int>(ns[2] / D)};
+        const int logical[D] = {2, 2, 2};
+        const PatchResultT<D> rs =
+          patch_eval_synth<D>(block_off, nstride, 0, logical, buf.data());
+
+        expect(rc.energy == rs.energy) << "energy";
+        expect(rc.mindet == rs.mindet) << "mindet";
+        for (int k = 0; k < D; ++k) { expect(rc.grad[k] == rs.grad[k]) << "grad"; }
+        for (int k = 0; k < D * D; ++k) { expect(rc.hess[k] == rs.hess[k]) << "hess"; }
+    };
+
+    // interior_patch_matches accepts the explicitly-built interior patch and
+    // rejects it the moment any stored occurrence diverges or the node is not
+    // eligible — the per-DOF gate the structured build uses to opt into synthesis.
+    "interior patch match gates on an exact reproduction"_test = [] {
+        constexpr int D = 3;
+        constexpr std::size_t n = 4;
+        const BlockLayout<D> layout {{{{n, n, n}}}};
+        const std::array<std::size_t, D> mover {1, 1, 1};
+
+        // Build the stored patch arrays exactly as the host builder would.
+        std::vector<int> gc, role;
+        std::array<std::vector<int>, D> gn;
+        std::array<std::vector<egg::real>, D> s;
+        for (int occ = 0; occ < interior_patch_size<D>(); ++occ) {
+            const InteriorOccurrence<D> o = interior_patch_occurrence<D>(layout, 0, mover, occ);
+            gc.push_back(o.gc);
+            role.push_back(o.role);
+            for (int k = 0; k < D; ++k) {
+                gn[k].push_back(o.gn[k]);
+                s[k].push_back(o.s[k]);
+            }
+        }
+        const std::array<const int*, D> gnp {gn[0].data(), gn[1].data(), gn[2].data()};
+        const std::array<const egg::real*, D> sp {s[0].data(), s[1].data(), s[2].data()};
+        const int P = static_cast<int>(gc.size());
+
+        expect(interior_patch_matches<D>(layout, 0, mover, P, gc.data(), gnp, sp, role.data()));
+        // A single corrupted occurrence breaks the match.
+        std::vector<int> gc_bad = gc;
+        gc_bad[7] += 1;
+        expect(not interior_patch_matches<D>(layout, 0, mover, P, gc_bad.data(), gnp, sp,
+                                             role.data()));
+        // A wrong patch size (truncated) is rejected before any read.
+        expect(not interior_patch_matches<D>(layout, 0, mover, P - 1, gc.data(), gnp, sp,
+                                             role.data()));
+        // A boundary node is ineligible regardless of the stored arrays.
+        expect(not interior_patch_matches<D>(layout, 0, {0, 1, 1}, P, gc.data(), gnp, sp,
+                                             role.data()));
+    };
+
+    // locate_interior_node is the inverse of interior_node_index: a structured
+    // index round-trips to its block + logical, and ghost-shell slots report
+    // false. Exercised across two unequal blocks so the block search bites.
+    "node index inverts to block and logical"_test = [] {
+        const BlockLayout<3> layout {{{{2, 3, 4}}, {{3, 2, 2}}}};
+        for (std::size_t b = 0; b < layout.num_blocks(); ++b) {
+            const auto shape = layout.interior_shape(b);
+            for (std::size_t i = 0; i < shape[0]; ++i) {
+                for (std::size_t j = 0; j < shape[1]; ++j) {
+                    for (std::size_t k = 0; k < shape[2]; ++k) {
+                        const std::array<std::size_t, 3> logical {i, j, k};
+                        const int nidx = interior_node_index<3>(layout, b, logical);
+                        InteriorNode<3> got {};
+                        expect(locate_interior_node<3>(layout, nidx, got));
+                        expect(got.block == b);
+                        expect(got.logical == logical);
+                    }
+                }
+            }
+        }
+        // A ghost slot (padded face index 0 on axis 0 of block 0) has no logical.
+        InteriorNode<3> ghost {};
+        const int ghost_idx = padded_node_index<3>(layout, 0, {0, 1, 1});
+        expect(not locate_interior_node<3>(layout, ghost_idx, ghost));
+    };
+
+    // Eligibility: a node whose 4^D patch stays inside the block interior (its
+    // corners reach logical ± 1 on every axis) is fast-path eligible; one a step
+    // from the boundary is not, since a neighbour would fall on the ghost layer.
+    "interior patch eligibility tracks the one-node boundary margin"_test = [] {
+        const BlockLayout<3> layout {{{{4, 4, 4}}}};
+        expect(interior_patch_eligible<3>(layout, 0, {1, 1, 1}));
+        expect(interior_patch_eligible<3>(layout, 0, {2, 2, 2}));
+        expect(not interior_patch_eligible<3>(layout, 0, {0, 1, 1}));  // axis-0 near face
+        expect(not interior_patch_eligible<3>(layout, 0, {1, 3, 1}));  // axis-1 far face
+        expect(not interior_patch_eligible<3>(layout, 0, {1, 1, 3}));  // axis-2 far face
     };
 };

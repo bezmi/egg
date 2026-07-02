@@ -41,8 +41,12 @@ pytestmark = pytest.mark.skipif(
     reason="egg._cpp.cpp_core not built (requires cmake build)",
 )
 
-_RTOL = 1e-9
-_ATOL = 1e-12
+# fp32 builds compute the device path in float against a double NumPy reference,
+# so the tolerances floor at the fp32 parity level (identity in double builds).
+from tests.real_tol import real_tol
+
+_RTOL = real_tol(1e-9)
+_ATOL = real_tol(1e-12)
 
 
 def _make_composite(kind: str):
@@ -189,7 +193,7 @@ def test_composite_device_matches_numpy(kind):
     comp = _make_composite(kind)
     for d in dof_ids:
         moved = not np.allclose(X_cpp[d], X0[d])
-        on_curve = np.allclose(comp.project(X_cpp[d]), X_cpp[d], atol=1e-7)
+        on_curve = np.allclose(comp.project(X_cpp[d]), X_cpp[d], atol=real_tol(1e-7))
         assert moved and on_curve, (
             f"{kind}: DOF {d} not projected onto its composite "
             f"(moved={moved}, on_curve={on_curve}, X={X_cpp[d]})"

@@ -12,6 +12,7 @@
 #include "ut_cfg.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <format>
 
 using namespace boost::ut;
@@ -31,21 +32,33 @@ bool close(double a, double b, double tol)
 // so the view's pointers stay valid through the move. (No-op copy when
 // egg::real == double.)
 struct PatchInputs {
-    std::vector<egg::real> s0, s1, W_inv, J, X;
+    std::vector<std::int8_t> s0, s1;  // per-axis sign ±1, matches PatchView::s
+    std::vector<egg::real> W_inv, X;
+    std::vector<int> sample_id;  // identity [0..P): this single patch IS its own table
     PatchView v;
 };
+
+// Narrow a span of ±1 doubles to the int8 sign storage PatchView expects.
+std::vector<std::int8_t> to_sign(const double* p, std::size_t n)
+{
+    std::vector<std::int8_t> out(n);
+    for (std::size_t i = 0; i < n; ++i) { out[i] = static_cast<std::int8_t>(p[i]); }
+    return out;
+}
 
 PatchInputs view_of(const golden::PatchSample& s)
 {
     PatchInputs in;
-    in.s0 = egg_test::to_real(s.s0.data(), s.s0.size());
-    in.s1 = egg_test::to_real(s.s1.data(), s.s1.size());
+    in.s0 = to_sign(s.s0.data(), s.s0.size());
+    in.s1 = to_sign(s.s1.data(), s.s1.size());
     in.W_inv = egg_test::to_real(s.W_inv.data(), s.W_inv.size());
-    in.J = egg_test::to_real(s.J.data(), s.J.size());
     in.X = egg_test::to_real(s.X.data(), s.X.size());
-    in.v = PatchView {s.P,         s.gc.data(),    s.gn0.data(),
-                      s.gn1.data(), in.s0.data(),  in.s1.data(),
-                      in.W_inv.data(), s.role.data(), in.J.data()};
+    in.sample_id.resize(static_cast<std::size_t>(s.P));
+    for (int p = 0; p < s.P; ++p) { in.sample_id[static_cast<std::size_t>(p)] = p; }
+    // J is recomputed in-kernel from s + W_inv, so the view no longer carries it.
+    in.v = PatchView {s.P, in.sample_id.data(), s.role.data(),
+                      s.gc.data(), s.gn0.data(), s.gn1.data(),
+                      in.s0.data(), in.s1.data(), in.W_inv.data()};
     return in;
 }
 }  // namespace

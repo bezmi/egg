@@ -590,35 +590,52 @@ struct CubicBezierParam {
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& t) const { return {deriv(t)}; }
 };
 
-/// @brief Largest B-spline degree the fixed-size de Boor work arrays support.
+/// @brief Largest B-spline *surface* degree the fixed-size de Boor work arrays support.
 ///
-/// Sizes every `[kBSplineCap]` / `[kBSplineCap][kBSplineCap]` de Boor work array
-/// (`ndu`, `du`, `dv`, …). Defaulted to 3 (cubic — covers virtually all CAD
-/// NURBS) to keep the surface projection's scratch footprint small: at degree 7
-/// the boundary sweep kernel spilled ~3.3 KB; degree 3 cuts that ~3×. Override at
-/// build time with `-DEGG_MAX_BSPLINE_DEGREE=N` for higher-degree models. A model
-/// whose degree exceeds this cap is rejected at context build (see the host
-/// `bspline_degree_guard` in the `load_into` encoders) rather than indexing the
-/// work arrays out of bounds.
+/// Sizes the surface de Boor work arrays (`ndu`, `du`, `dv`, the `A*/w*` sums).
+/// Defaulted to 3 (bicubic — the de-facto CAD NURBS surface standard, covering
+/// virtually all 3D STEP) to keep the boundary projection's scratch footprint
+/// small: at degree 7 the boundary sweep kernel spilled ~3.3 KB; degree 3 cuts
+/// that ~3×. This cap drives the 3D boundary kernel's register/VGPR budget, so it
+/// is kept tight on purpose. Override with `-DEGG_MAX_BSPLINE_DEGREE=N` for
+/// higher-degree surface models. A surface whose degree exceeds it is rejected at
+/// context build (see `bspline_degree_guard` in the `load_into` encoders).
 #ifndef EGG_MAX_BSPLINE_DEGREE
 #define EGG_MAX_BSPLINE_DEGREE 3
 #endif
 inline constexpr int kMaxBSplineDegree = EGG_MAX_BSPLINE_DEGREE;
-/// @brief Leading dimension of the de Boor basis/derivative work arrays.
+/// @brief Leading dimension of the *surface* de Boor work arrays.
 inline constexpr int kBSplineCap = kMaxBSplineDegree + 1;
 
+/// @brief Largest B-spline *curve* degree the de Boor work arrays support.
+///
+/// Decoupled from @ref kMaxBSplineDegree: 2D profile/trim curves (and curve
+/// sub-segments nested in composites) routinely exceed degree 3 — e.g. a degree-4
+/// Bézier arch — whereas 3D surfaces are bicubic in practice. The curve de Boor
+/// is not in the VGPR-pinned 3D boundary surface kernel, so its work arrays can
+/// carry generous headroom (default 7) without touching the surface scratch the
+/// boundary kernel's register budget depends on. Override with
+/// `-DEGG_MAX_BSPLINE_CURVE_DEGREE=N`.
+#ifndef EGG_MAX_BSPLINE_CURVE_DEGREE
+#define EGG_MAX_BSPLINE_CURVE_DEGREE 7
+#endif
+inline constexpr int kMaxBSplineCurveDegree = EGG_MAX_BSPLINE_CURVE_DEGREE;
+/// @brief Leading dimension of the *curve* de Boor work arrays.
+inline constexpr int kBSplineCurveCap = kMaxBSplineCurveDegree + 1;
+
 /// @brief Host-side guard: reject a B-spline whose degree exceeds the compiled
-///        @ref kMaxBSplineDegree before it can index the fixed de Boor work
-///        arrays out of bounds on the device. Throws with an actionable message
-///        (rebuild with a larger `-DEGG_MAX_BSPLINE_DEGREE`). Host-only — called
-///        from the `EntitySoA::load_into` encoders, never from device code.
-inline void bspline_degree_guard(int degree, const char* what)
+///        @p cap before it can index the fixed de Boor work arrays out of bounds
+///        on the device. Throws with an actionable message. Host-only — called
+///        from the `load_into` encoders (and the composite encoder), never from
+///        device code. Pass @ref kMaxBSplineDegree for surfaces and
+///        @ref kMaxBSplineCurveDegree for curves.
+inline void bspline_degree_guard(int degree, const char* what, int cap)
 {
-    if (degree > kMaxBSplineDegree) {
+    if (degree > cap) {
         throw std::runtime_error(
           std::string("B-spline ") + what + " degree " + std::to_string(degree) +
-          " exceeds the compiled kMaxBSplineDegree=" + std::to_string(kMaxBSplineDegree) +
-          "; rebuild with -DEGG_MAX_BSPLINE_DEGREE=" + std::to_string(degree) + " (or higher).");
+          " exceeds the compiled max degree " + std::to_string(cap) +
+          "; rebuild with a larger -DEGG_MAX_BSPLINE_DEGREE / -DEGG_MAX_BSPLINE_CURVE_DEGREE.");
     }
 }
 
@@ -657,13 +674,14 @@ inline int bspline_find_span(int degree, int n_ctrl, std::span<const real> knots
 /// @param nd Highest derivative order to compute.
 /// @param ders Output: `ders[k][j]` is the k-th derivative of the j-th nonzero
 ///             basis function, @f$ k = 0..nd @f$, @f$ j = 0..degree @f$.
+template <int CAP>
 inline void bspline_basis_ders(
-  int degree, std::span<const real> knots, int span, real u, int nd, real ders[][kBSplineCap])
+  int degree, std::span<const real> knots, int span, real u, int nd, real ders[][CAP])
 {
     const int p = degree;
-    real ndu[kBSplineCap][kBSplineCap];
-    real a[2][kBSplineCap];
-    real left[kBSplineCap], right[kBSplineCap];
+    real ndu[CAP][CAP];
+    real a[2][CAP];
+    real left[CAP], right[CAP];
     ndu[0][0] = 1.0_r;
     for (int j = 1; j <= p; ++j) {
         left[j] = u - knots[span + 1 - j];
@@ -711,6 +729,73 @@ inline void bspline_basis_ders(
     }
 }
 
+/// @brief Compile-time-`nd` de Boor basis-and-derivatives (F2 Lever A).
+///
+/// Identical to the runtime @ref bspline_basis_ders for `nd == ND`, but the
+/// derivative-order bound `ND` is a template parameter so `if constexpr (ND>=1)`
+/// statically elides the entire derivative recurrence (and its `a[2][cap]`
+/// scratch and the factorial scaling) when `ND==0`. On the SSCP/SYCL path —
+/// where `noinline` and unroll pragmas are ignored, so a runtime `nd` keeps the
+/// nd≥1 rows live across the whole inlined call — making `ND` static is the only
+/// way to keep those temporaries (and registers) out of the nd=0/nd=1 paths.
+/// `ders` need only have `ND+1` rows.
+template <int ND, int CAP>
+inline void bspline_basis_ders(
+  int degree, std::span<const real> knots, int span, real u, real ders[][CAP])
+{
+    const int p = degree;
+    real ndu[CAP][CAP];
+    real left[CAP], right[CAP];
+    ndu[0][0] = 1.0_r;
+    for (int j = 1; j <= p; ++j) {
+        left[j] = u - knots[span + 1 - j];
+        right[j] = knots[span + j] - u;
+        real saved = 0.0_r;
+        for (int r = 0; r < j; ++r) {
+            ndu[j][r] = right[r + 1] + left[j - r];
+            const real temp = ndu[r][j - 1] / ndu[j][r];
+            ndu[r][j] = saved + (right[r + 1] * temp);
+            saved = left[j - r] * temp;
+        }
+        ndu[j][j] = saved;
+    }
+    for (int j = 0; j <= p; ++j) { ders[0][j] = ndu[j][p]; }
+    if constexpr (ND >= 1) {
+        real a[2][CAP];
+        for (int r = 0; r <= p; ++r) {
+            int s1 = 0, s2 = 1;
+            a[0][0] = 1.0_r;
+            for (int k = 1; k <= ND; ++k) {
+                real d = 0.0_r;
+                const int rk = r - k, pk = p - k;
+                if (r >= k) {
+                    a[s2][0] = a[s1][0] / ndu[pk + 1][rk];
+                    d = a[s2][0] * ndu[rk][pk];
+                }
+                const int j1 = (rk >= -1) ? 1 : -rk;
+                const int j2 = (r - 1 <= pk) ? k - 1 : p - r;
+                for (int j = j1; j <= j2; ++j) {
+                    a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[pk + 1][rk + j];
+                    d += a[s2][j] * ndu[rk + j][pk];
+                }
+                if (r <= pk) {
+                    a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r];
+                    d += a[s2][k] * ndu[r][pk];
+                }
+                ders[k][r] = d;
+                const int tmp = s1;
+                s1 = s2;
+                s2 = tmp;
+            }
+        }
+        int fac = p;
+        for (int k = 1; k <= ND; ++k) {
+            for (int j = 0; j <= p; ++j) { ders[k][j] *= fac; }
+            fac *= (p - k);
+        }
+    }
+}
+
 /// @brief A B-spline / NURBS curve over a knot vector and a flat control net.
 ///
 /// The control points, knots, and (optional) weights live in spans over a
@@ -735,8 +820,8 @@ struct BSplineCurveParam {
     [[nodiscard]] PtN<2> point_at(real u, int order) const
     {
         const int span = bspline_find_span(degree, n_ctrl, knots, u);
-        real ders[3][kBSplineCap];
-        bspline_basis_ders(degree, knots, span, u, order, ders);
+        real ders[3][kBSplineCurveCap];
+        bspline_basis_ders<kBSplineCurveCap>(degree, knots, span, u, order, ders);
         if (weights.empty()) {
             PtN<2> acc {0.0_r, 0.0_r};
             for (int j = 0; j <= degree; ++j) {
@@ -959,13 +1044,24 @@ struct BSplineSurfaceParam {
     /// (no full `A[3][3]`/`w[3][3]`/`S[3][3]` grid — that 9-entry nd=2 machinery
     /// was the boundary kernel's 256-VGPR pin). The bivariate quotient rule
     /// (rational case) and the unweighted pass-through are applied inline.
-    __attribute__((noinline)) [[nodiscard]] SurfDers ders(const Param<2>& q, int nd) const
+    /// @brief Compile-time-`nd` fused @ref SurfDers evaluation (F2 Lever A).
+    ///
+    /// Identical numerically to the runtime @ref ders for `nd == ND`, but with
+    /// `ND` static `if constexpr` elides the nd≥1 / nd≥2 homogeneous-sum rows
+    /// and their `A*/w*` accumulators (and, via the templated de Boor, the
+    /// derivative recurrence and the extra `du/dv` rows). On the SSCP path a
+    /// runtime `nd` kept the nd=2 trio (`A11/A20/A02`, the 9-entry grid's
+    /// residue) live across the whole inlined kernel — the boundary kernel's
+    /// 256-VGPR pin. Routing the warm GN path through `ders_nd<1>` keeps those
+    /// out of the warm kernel; the cold path keeps `ders_nd<2>`.
+    template <int ND>
+    [[nodiscard]] SurfDers ders_nd(const Param<2>& q) const
     {
         const int su = bspline_find_span(pu, nu, knots_u, q[0]);
         const int sv = bspline_find_span(pv, nv, knots_v, q[1]);
-        real du[3][kBSplineCap], dv[3][kBSplineCap];
-        bspline_basis_ders(pu, knots_u, su, q[0], nd, du);
-        bspline_basis_ders(pv, knots_v, sv, q[1], nd, dv);
+        real du[ND + 1][kBSplineCap], dv[ND + 1][kBSplineCap];
+        bspline_basis_ders<ND, kBSplineCap>(pu, knots_u, su, q[0], du);
+        bspline_basis_ders<ND, kBSplineCap>(pv, knots_v, sv, q[1], dv);
 
         // Homogeneous tensor-product sums A^(a,b) and weight sums w^(a,b) for ONLY
         // (a,b) in {00,10,01,11,20,02}. wt = weight (rational) or 1 (polynomial),
@@ -984,14 +1080,14 @@ struct BSplineSurfaceParam {
                 const real n00 = b0u * b0v;
                 A00 = A00 + (n00 * Pw);
                 w00 += n00 * wt;
-                if (nd >= 1) {
+                if constexpr (ND >= 1) {
                     const real b1u = du[1][i], b1v = dv[1][j];
                     const real n10 = b1u * b0v, n01 = b0u * b1v;
                     A10 = A10 + (n10 * Pw);
                     A01 = A01 + (n01 * Pw);
                     w10 += n10 * wt;
                     w01 += n01 * wt;
-                    if (nd >= 2) {
+                    if constexpr (ND >= 2) {
                         const real b2u = du[2][i], b2v = dv[2][j];
                         const real n11 = b1u * b1v, n20 = b2u * b0v, n02 = b0u * b2v;
                         A11 = A11 + (n11 * Pw);
@@ -1007,18 +1103,18 @@ struct BSplineSurfaceParam {
         SurfDers S;
         if (!rat) {
             S.S00 = A00;
-            if (nd >= 1) { S.S10 = A10, S.S01 = A01; }
-            if (nd >= 2) { S.S11 = A11, S.S20 = A20, S.S02 = A02; }
+            if constexpr (ND >= 1) { S.S10 = A10, S.S01 = A01; }
+            if constexpr (ND >= 2) { S.S11 = A11, S.S20 = A20, S.S02 = A02; }
             return S;
         }
         // Bivariate quotient rule for S = A/w, up to second order per direction.
         const real iw = 1.0_r / w00;
         S.S00 = iw * A00;
-        if (nd >= 1) {
+        if constexpr (ND >= 1) {
             S.S10 = iw * (A10 - (w10 * S.S00));
             S.S01 = iw * (A01 - (w01 * S.S00));
         }
-        if (nd >= 2) {
+        if constexpr (ND >= 2) {
             S.S11 = iw * (A11 - (w10 * S.S01) - (w01 * S.S10) - (w11 * S.S00));
             S.S20 = iw * (A20 - (2.0_r * w10 * S.S10) - (w20 * S.S00));
             S.S02 = iw * (A02 - (2.0_r * w01 * S.S01) - (w02 * S.S00));
@@ -1027,12 +1123,12 @@ struct BSplineSurfaceParam {
     }
 
     /// @brief Evaluate the surface point @f$ S(u, v) @f$.
-    [[nodiscard]] PtN<3> eval(const Param<2>& q) const { return ders(q, 0).S00; }
+    [[nodiscard]] PtN<3> eval(const Param<2>& q) const { return ders_nd<0>(q).S00; }
 
     /// @brief The raw tangent columns @f$ \{S_u, S_v\} @f$.
     [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
     {
-        const SurfDers S = ders(q, 1);
+        const SurfDers S = ders_nd<1>(q);
         return {S.S10, S.S01};
     }
 
@@ -1064,12 +1160,21 @@ struct BSplineSurfaceParam {
     ///     at nd=1 (no `S11/S20/S02`) — a cheaper iter (the boundary kernel's
     ///     steady-state hot path). GN is *not* robust for large residuals (the
     ///     curvature is then first-order), hence the cold path keeps `Exact`.
+    ///
+    /// @param frame_out If non-null, receives the raw tangent frame
+    ///   `{S_u, S_v}` from the **last** Newton iterate — at convergence this is
+    ///   `< tol::newton` in parameter from the returned foot, so it reuses the
+    ///   `ders(nd=1)` already computed here instead of a redundant `frame(q*)`
+    ///   call by the caller (F2 Lever C). Parity-gated (not bit-identical: the
+    ///   frame is at the pre-final-step iterate).
     template <bool Exact>
     [[nodiscard]] Param<2>
-      newton_foot(const PtN<3>& p, Param<2> q, real u0, real u1, real v0, real v1) const
+      newton_foot(const PtN<3>& p, Param<2> q, real u0, real u1, real v0, real v1,
+                  std::array<VecN<3>, 2>* frame_out = nullptr) const
     {
         for (int it = 0; it < 12; ++it) {
-            const SurfDers S = ders(q, Exact ? 2 : 1);
+            const SurfDers S = ders_nd<Exact ? 2 : 1>(q);
+            if (frame_out != nullptr) { *frame_out = {S.S10, S.S01}; }
             const VecN<3> d = S.S00 - p;
             const real f1 = dot(d, S.S10), f2 = dot(d, S.S01);
             real j11 = dot(S.S10, S.S10);
@@ -1106,19 +1211,20 @@ struct BSplineSurfaceParam {
     ///     `newton_foot<false>` (GN nd=1). That keeps the heavy de Boor nd=2 rows
     ///     and the grid out of the warm kernel entirely — the scratch lever.
     template <bool Warm = false>
-    __attribute__((noinline)) [[nodiscard]] Param<2>
-      invert_seeded(const PtN<3>& p, Param<2> seed, bool has_seed) const
+    __attribute__((noinline)) [[nodiscard]] Param<2> invert_seeded(
+      const PtN<3>& p, Param<2> seed, bool has_seed,
+      std::array<VecN<3>, 2>* frame_out = nullptr) const
     {
         const real u0 = knots_u[pu], u1 = knots_u[nu];
         const real v0 = knots_v[pv], v1 = knots_v[nv];
         if constexpr (Warm) {
             (void)has_seed;  // the cold pass guarantees a live seed before any warm sweep
             const Param<2> q {std::clamp(seed[0], u0, u1), std::clamp(seed[1], v0, v1)};
-            return newton_foot<false>(p, q, u0, u1, v0, v1);
+            return newton_foot<false>(p, q, u0, u1, v0, v1, frame_out);
         } else {
             if (has_seed) {
                 const Param<2> q {std::clamp(seed[0], u0, u1), std::clamp(seed[1], v0, v1)};
-                return newton_foot<false>(p, q, u0, u1, v0, v1);
+                return newton_foot<false>(p, q, u0, u1, v0, v1, frame_out);
             }
             Param<2> q {u0, v0};
             constexpr int kSeed = 8;
@@ -1135,7 +1241,7 @@ struct BSplineSurfaceParam {
                     }
                 }
             }
-            return newton_foot<true>(p, q, u0, u1, v0, v1);
+            return newton_foot<true>(p, q, u0, u1, v0, v1, frame_out);
         }
     }
 };
@@ -1748,7 +1854,7 @@ template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
 
     static void load_into(Host& h, std::size_t i, const TrimmedEntity<BSplineCurveParam>& e)
     {
-        bspline_degree_guard(e.param.degree, "curve");
+        bspline_degree_guard(e.param.degree, "curve", kMaxBSplineCurveDegree);
         real* r = h.records.data() + i * kFields;
         r[DEGREE] = static_cast<real>(e.param.degree);
         r[N_CTRL] = static_cast<real>(e.param.n_ctrl);
@@ -2058,8 +2164,8 @@ template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
 
     static void load_into(Host& h, std::size_t i, const TrimmedEntity<BSplineSurfaceParam>& e)
     {
-        bspline_degree_guard(e.param.pu, "surface (u)");
-        bspline_degree_guard(e.param.pv, "surface (v)");
+        bspline_degree_guard(e.param.pu, "surface (u)", kMaxBSplineDegree);
+        bspline_degree_guard(e.param.pv, "surface (v)", kMaxBSplineDegree);
         real* r = h.records.data() + i * kFields;
         r[PU] = static_cast<real>(e.param.pu);
         r[PV] = static_cast<real>(e.param.pv);

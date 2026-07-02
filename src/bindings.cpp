@@ -13,6 +13,7 @@ namespace py = pybind11;
 #include "sweep.hpp"
 
 #include <array>
+#include <cstdint>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -115,7 +116,8 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         }
         eq(g.role.size(), ts, "role");
         eq(g.W_inv.size(), ts * egg::dim::wInv(D), "W_inv");
-        eq(g.J.size(), ts * egg::dim::jSize(D), "J");
+        // J is optional (recomputed in-kernel); only size-check it when supplied.
+        if (!g.J.empty()) { eq(g.J.size(), ts * egg::dim::jSize(D), "J"); }
         eq(g.dof_idx.size(), g.ndof, "dof_idx");
         eq(g.P_of.size(), g.ndof, "P_of");
 
@@ -319,7 +321,9 @@ egg::SweepContextHostT<D>
         }
         sg.W_inv = extract_real(gd, "W_inv");
         sg.role = extract_int(gd, "role");
-        sg.J = extract_real(gd, "J");
+        // J is optional: no kernel reads it (the role-selected chain-Jacobian
+        // block is recomputed in-kernel from s + W_inv). Contexts may omit it.
+        if (gd.contains("J")) { sg.J = extract_real(gd, "J"); }
         sg.dof_idx = extract_int(gd, "dof_idx");
         sg.P_of = extract_int(gd, "P_of");
 
@@ -631,6 +635,37 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         // soa[*].dof_local are GROUP-LOCAL DOF positions, not global ids — never remapped.
     }
 
+    // Flag DOFs whose whole (now-remapped) patch lies inside one block's interior:
+    // those can be swept from indices synthesized off the block layout rather than
+    // the stored gc/gn/role/s. The flag is set only when synthesis reproduces the
+    // stored patch occurrence for occurrence (interior_patch_matches), so taking it
+    // is bit-identical to the stored path; every other DOF keeps interior_block ==
+    // -1 and reads its arrays.
+    for (auto& g : host.groups) {
+        g.interior_block.assign(g.ndof, -1);
+        g.interior_logical.assign(g.ndof * static_cast<std::size_t>(D), 0);
+        for (std::size_t d = 0; d < g.ndof; ++d) {
+            const std::size_t off = static_cast<std::size_t>(g.sample_offset[d]);
+            const int P = g.P_of[d];
+            egg::InteriorNode<D> node;
+            if (!egg::locate_interior_node<D>(layout, g.dof_idx[d], node)) { continue; }
+            std::array<const int*, D> gn {};
+            std::array<const egg::real*, D> s {};
+            for (int k = 0; k < D; ++k) {
+                gn[static_cast<std::size_t>(k)] = g.gn[k].data() + off;
+                s[static_cast<std::size_t>(k)] = g.s[k].data() + off;
+            }
+            if (egg::interior_patch_matches<D>(layout, node.block, node.logical, P,
+                                               g.gc.data() + off, gn, s, g.role.data() + off)) {
+                g.interior_block[d] = static_cast<int>(node.block);
+                for (int k = 0; k < D; ++k) {
+                    g.interior_logical[(d * static_cast<std::size_t>(D)) + static_cast<std::size_t>(k)] =
+                      static_cast<int>(node.logical[static_cast<std::size_t>(k)]);
+                }
+            }
+        }
+    }
+
     auto remap_stencil = [&](std::vector<int>& v) {
         for (int& x : v) {
             const int s = g2s[static_cast<std::size_t>(x)];
@@ -647,6 +682,20 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
 
     host.X = std::move(Xp);
     host.num_nodes = layout.total_doubles() / static_cast<std::size_t>(D);
+
+    // Flatten the block layout into node-unit arrays the device synthesis reads
+    // (block base + padded node strides per block). Doubles/D are exact: a block
+    // base and every stride is a whole multiple of D (D coords per node).
+    host.block_off.assign(num_blocks, 0);
+    host.nstride.assign(num_blocks * static_cast<std::size_t>(D), 0);
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+        host.block_off[b] = static_cast<int>(layout.block_offset(b) / static_cast<std::size_t>(D));
+        const auto ns = layout.node_strides(b);
+        for (int k = 0; k < D; ++k) {
+            host.nstride[(b * static_cast<std::size_t>(D)) + static_cast<std::size_t>(k)] =
+              static_cast<int>(ns[static_cast<std::size_t>(k)] / static_cast<std::size_t>(D));
+        }
+    }
 
     return StructuredRemap<D> {std::move(layout), std::move(g2s), M, std::move(fan_src_off),
                                std::move(fan_dst_off)};
@@ -857,6 +906,20 @@ PYBIND11_MODULE(cpp_core, m)
 {
     m.doc() = "egg C++ compute core (AdaptiveCpp).";
     m.def("ping", [] { return 0; }, "Liveness check; returns 0.");
+
+    // The compiled de Boor degree caps, so host-side encoders can reject an
+    // over-degree B-spline with a clean error instead of letting it index the
+    // fixed device work arrays out of bounds (a segfault). Curve and surface
+    // caps are decoupled (see geometry.hpp): the surface cap drives the 3D
+    // boundary kernel's VGPR budget, the curve cap carries 2D-profile headroom.
+    m.attr("MAX_BSPLINE_DEGREE") = egg::kMaxBSplineDegree;
+    m.attr("MAX_BSPLINE_CURVE_DEGREE") = egg::kMaxBSplineCurveDegree;
+
+    // The compiled precision of egg::real (float vs double). Cross-precision
+    // parity tests read this to floor their double-tuned tolerances at the fp32
+    // level in the float build (see tests/real_tol.py, the mirror of
+    // tests/cpp/real_tol.hpp). True when built with -DEGG_REAL_IS_FLOAT=ON.
+    m.attr("REAL_IS_FLOAT") = (sizeof(egg::real) == 4);
 
     py::class_<CppSweepSession>(
       m,
@@ -1189,12 +1252,27 @@ PYBIND11_MODULE(cpp_core, m)
         -> std::tuple<py::array_t<double>, py::array_t<double>, double, double> {
           // Narrow the real-typed views at the boundary (no-ops when real==double).
           const std::vector<egg::real> X = narrow(X_arr);
-          const std::vector<egg::real> s0 = narrow(s0_arr);
-          const std::vector<egg::real> s1 = narrow(s1_arr);
+          // s is ±1; PatchView stores it as int8, so narrow the signs to match.
+          const auto to_sign = [](const py::array_t<double>& a) {
+              std::vector<std::int8_t> out(static_cast<std::size_t>(a.size()));
+              const double* p = a.data();
+              for (std::size_t i = 0; i < out.size(); ++i) {
+                  out[i] = static_cast<std::int8_t>(p[i]);
+              }
+              return out;
+          };
+          const std::vector<std::int8_t> s0 = to_sign(s0_arr);
+          const std::vector<std::int8_t> s1 = to_sign(s1_arr);
           const std::vector<egg::real> W_inv = narrow(W_inv_arr);
-          const std::vector<egg::real> J = narrow(J_arr);
+          // J_arr is accepted for API stability but ignored: patch_eval recomputes
+          // the role-selected chain-Jacobian block from s + W_inv (role_Jb).
+          static_cast<void>(J_arr);
           egg::PatchView pv;
           pv.P = static_cast<int>(gc_arr.size());
+          // Identity sample_id: this single patch's arrays are its own metric table.
+          std::vector<int> sid(static_cast<std::size_t>(pv.P));
+          for (int p = 0; p < pv.P; ++p) { sid[static_cast<std::size_t>(p)] = p; }
+          pv.sample_id = sid.data();
           pv.gc = gc_arr.data();
           pv.gn[0] = gn0_arr.data();
           pv.gn[1] = gn1_arr.data();
@@ -1202,7 +1280,6 @@ PYBIND11_MODULE(cpp_core, m)
           pv.s[1] = s1.data();
           pv.W_inv = W_inv.data();
           pv.role = role_arr.data();
-          pv.J = J.data();
           auto result = egg::patch_eval(pv, X.data());
           return std::make_tuple(to_f64(result.grad.data(), 2),
                                  to_f64(result.hess.data(), 4),

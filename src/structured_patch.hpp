@@ -55,4 +55,296 @@ template <int D>
                             static_cast<std::size_t>(D));
 }
 
+/// An interior node located by its owning block and logical (un-padded) index.
+template <int D> struct InteriorNode {
+    std::size_t block;
+    std::array<std::size_t, D> logical;
+};
+
+/// Invert a flat node index (the value `interior_node_index`/`padded_node_index`
+/// return) back to its owning block and interior logical index. Returns false
+/// when the index addresses a ghost-layer slot (a padded coordinate on a block
+/// face); such slots have no logical index and are never DOFs. The inverse of
+/// `interior_node_index` for every interior node.
+template <int D>
+[[nodiscard]] inline bool locate_interior_node(const BlockLayout<D>& layout, int node_index,
+                                              InteriorNode<D>& out)
+{
+    const auto nidx = static_cast<std::size_t>(node_index);
+    const auto Dz = static_cast<std::size_t>(D);
+    // The owning block is the last one whose node base does not exceed nidx
+    // (block b spans node indices [block_offset(b)/D, block_offset(b+1)/D)).
+    std::size_t b = 0;
+    const std::size_t nb = layout.num_blocks();
+    while (b + 1 < nb && nidx >= layout.block_offset(b + 1) / Dz) { ++b; }
+
+    // Unravel the block-local node index (row-major over the padded axes).
+    const std::size_t local = nidx - (layout.block_offset(b) / Dz);
+    const auto padded = layout.padded_shape(b);
+    std::array<std::size_t, D> p {};
+    std::size_t rem = local;
+    for (int k = D - 1; k >= 0; --k) {
+        p[static_cast<std::size_t>(k)] = rem % padded[static_cast<std::size_t>(k)];
+        rem /= padded[static_cast<std::size_t>(k)];
+    }
+    // Interior iff no padded coordinate sits on the ghost shell (0 or n_k+1).
+    for (int k = 0; k < D; ++k) {
+        const std::size_t pk = p[static_cast<std::size_t>(k)];
+        if (pk == 0 || pk + 1 >= padded[static_cast<std::size_t>(k)]) { return false; }
+        out.logical[static_cast<std::size_t>(k)] = pk - 1;
+    }
+    out.block = b;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Implicit interior patch synthesis.
+//
+// A structured node's metric patch is a fixed stencil: it is a corner of the
+// corners(D)=2^D adjacent cells, and each of those cells contributes one
+// (cell,corner) sample per its 2^D corners, so the patch is exactly
+// corners(D)^2 = 4^D occurrences. For a node whose whole patch stays inside one
+// block's interior the occurrence list is therefore *derivable* from the node's
+// logical index alone — no per-occurrence gc/gn/sample_id/role/sign arrays need
+// be stored. This is the structured connectivity the explicit index arrays
+// otherwise spell out node by node.
+//
+// The occurrence ORDER reproduces the host patch builder exactly (the
+// hand-assembled `build_context`): outer over the 2^D cells in row-major order
+// of their base, inner over the 2^D corner offsets `o` in row-major order. So a
+// kernel walking these occurrences accumulates in the same order as the stored
+// path — bit-identical parity, not merely the same set.
+//
+// `s[k]` and `role` depend only on the occurrence index (the (cell, o) bit
+// pattern), not on the node's position, so they are a fixed table; only `gc`
+// and `gn[k]` carry the node's absolute structured indices.
+// ---------------------------------------------------------------------------
+
+/// Number of metric occurrences in an interior structured node's patch: 4^D.
+template <int D> [[nodiscard]] constexpr int interior_patch_size() { return 1 << (2 * D); }
+
+/// One synthesized patch occurrence over the halo-padded structured buffer:
+/// the corner node index, its D axis-neighbour indices, the D axis signs, and
+/// the DOF's role (0 = corner, 1..D = axis-(role−1) neighbour, −1 = absent).
+template <int D> struct InteriorOccurrence {
+    int gc;
+    int gn[D];
+    real s[D];
+    int role;
+};
+
+/// True when node `logical` in block `b` is far enough from the block boundary
+/// that its entire 4^D patch (corners reach `logical ± 1` per axis) lands inside
+/// the block interior — i.e. every `gc`/`gn` resolves via `interior_node_index`
+/// with no ghost/interface fallback. Callers must additionally confirm the node
+/// is owned by `b` (not a shared-interface node) before taking the fast path;
+/// that ownership lives outside BlockLayout.
+template <int D>
+[[nodiscard]] inline bool interior_patch_eligible(const BlockLayout<D>& layout, std::size_t b,
+                                                  const std::array<std::size_t, D>& logical)
+{
+    const auto& shape = layout.interior_shape(b);
+    for (int k = 0; k < D; ++k) {
+        if (logical[static_cast<std::size_t>(k)] < 1 ||
+            logical[static_cast<std::size_t>(k)] + 1 >= shape[static_cast<std::size_t>(k)]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Synthesize occurrence `occ` (∈ [0, 4^D)) of an interior patch, given the
+/// node's integer `logical` index and a node-indexing callable `idx` mapping a
+/// logical index (`const int (&)[D]`) to its flat node index. Fills `gc`, the D
+/// axis neighbours `gn`, the D axis signs `s`, and the DOF's `role` (0 = corner,
+/// 1..D = axis-(role−1) neighbour, −1 = absent).
+///
+/// `occ` splits as `cell = occ / 2^D` and `o = occ % 2^D`, each a row-major bit
+/// pattern over D axes (axis 0 most significant), matching product((0,1),
+/// repeat=D) order: the cell base is `logical − 1 + cell_bits` (the 2^D cells the
+/// node corners), the corner within that cell is `base + o`, and the neighbour on
+/// axis k flips bit k of `o`, stepping the corner by `s[k] = (o[k]==0 ? +1 : −1)`.
+/// This is the single source the host (BlockLayout) and device (flat stride
+/// arrays) callers share; only `idx` differs. Pure integer/sign math, no reads.
+template <int D, class IdxFn>
+inline void interior_occurrence_raw(int occ, const int (&logical)[D], const IdxFn& idx, int& gc,
+                                    int (&gn)[D], real (&s)[D], int& role)
+{
+    constexpr int kC = 1 << D;  // corners(D)
+    const int cell_bits = occ / kC;
+    const int o = occ % kC;
+
+    int corner[D];
+    int o_bit[D];
+    for (int k = 0; k < D; ++k) {
+        const int shift = D - 1 - k;
+        o_bit[k] = (o >> shift) & 1;
+        corner[k] = logical[k] - 1 + ((cell_bits >> shift) & 1) + o_bit[k];
+    }
+
+    gc = idx(corner);
+    bool is_corner = true;
+    for (int k = 0; k < D; ++k) {
+        if (corner[k] != logical[k]) { is_corner = false; }
+    }
+    role = is_corner ? 0 : -1;
+    for (int k = 0; k < D; ++k) {
+        s[k] = (o_bit[k] == 0) ? 1.0_r : -1.0_r;
+        int nbr[D];
+        for (int j = 0; j < D; ++j) { nbr[j] = corner[j]; }
+        nbr[k] = corner[k] + (o_bit[k] == 0 ? 1 : -1);
+        gn[k] = idx(nbr);
+        if (role < 0) {
+            bool eq = true;
+            for (int j = 0; j < D; ++j) {
+                if (nbr[j] != logical[j]) { eq = false; }
+            }
+            if (eq) { role = k + 1; }
+        }
+    }
+}
+
+/// BlockLayout-backed synthesis of occurrence `occ` for node `logical` in block
+/// `b`. The std::array/host convenience wrapper over `interior_occurrence_raw`.
+/// Requires `interior_patch_eligible(layout, b, logical)`.
+template <int D>
+[[nodiscard]] inline InteriorOccurrence<D>
+  interior_patch_occurrence(const BlockLayout<D>& layout, std::size_t b,
+                            const std::array<std::size_t, D>& logical, int occ)
+{
+    int li[D];
+    for (int k = 0; k < D; ++k) { li[k] = static_cast<int>(logical[static_cast<std::size_t>(k)]); }
+    const auto idx = [&](const int (&l)[D]) {
+        std::array<std::size_t, D> a;
+        for (int k = 0; k < D; ++k) { a[static_cast<std::size_t>(k)] = static_cast<std::size_t>(l[k]); }
+        return interior_node_index<D>(layout, b, a);
+    };
+    InteriorOccurrence<D> out {};
+    interior_occurrence_raw<D>(occ, li, idx, out.gc, out.gn, out.s, out.role);
+    return out;
+}
+
+/// True iff node `logical` in block `b` is eligible AND the synthesized interior
+/// patch reproduces the stored per-DOF patch arrays occurrence for occurrence
+/// (`gc`, the D `gn`/`s` axis arrays, and `role`, each length `P`). A node passing
+/// this can be swept from synthesized indices with a result bit-identical to the
+/// stored path — the test is what makes the fast path safe to take per DOF rather
+/// than assumed from geometry. Returns false (use the stored arrays) for any
+/// boundary/interface DOF or unexpected layout.
+template <int D>
+[[nodiscard]] inline bool interior_patch_matches(const BlockLayout<D>& layout, std::size_t b,
+                                                const std::array<std::size_t, D>& logical, int P,
+                                                const int* gc, const std::array<const int*, D>& gn,
+                                                const std::array<const real*, D>& s, const int* role)
+{
+    if (!interior_patch_eligible<D>(layout, b, logical)) { return false; }
+    if (P != interior_patch_size<D>()) { return false; }
+    for (int occ = 0; occ < P; ++occ) {
+        const InteriorOccurrence<D> o = interior_patch_occurrence<D>(layout, b, logical, occ);
+        if (o.gc != gc[occ] || o.role != role[occ]) { return false; }
+        for (int k = 0; k < D; ++k) {
+            if (o.gn[k] != gn[static_cast<std::size_t>(k)][occ] ||
+                o.s[k] != s[static_cast<std::size_t>(k)][occ]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Flat node index from device-resident stride arrays: the block's node base +
+/// Σ (logical_k + 1)·stride_k. The device analogue of interior_node_index —
+/// `nstride` holds the padded node strides in NODE units (innermost == 1) and
+/// `block_off` the per-block node base, both packed per block. Lets a kernel
+/// resolve a synthesized stencil node without a host BlockLayout.
+template <int D>
+[[nodiscard]] inline int dev_node_index(const int* block_off, const int* nstride, int b,
+                                       const int (&logical)[D])
+{
+    int idx = block_off[b];
+    for (int k = 0; k < D; ++k) { idx += (logical[k] + 1) * nstride[(b * D) + k]; }
+    return idx;
+}
+
+/// Evaluate an interior structured patch from SYNTHESIZED indices: the same pass
+/// as patch_eval, but each of the 4^D occurrences' gc/gn/sign/role is rebuilt
+/// in-kernel from the block layout (`block_off`/`nstride` at block `b`, logical
+/// index `logical`) and W_inv is the identity — nothing is read from per-DOF
+/// arrays. Shares accumulate_sample with patch_eval, so the math is identical.
+/// Valid only for DOFs the structured build flagged interior-eligible: their
+/// stored patch reproduces this occurrence for occurrence with identity W_inv.
+template <int D, ObjectiveD<D> M = ShapeObjectiveT<D>>
+inline PatchResultT<D> patch_eval_synth(const int* block_off, const int* nstride, int b,
+                                        const int (&logical)[D], const real* X, M objective = {})
+{
+    real wI[D * D];
+    for (int i = 0; i < D * D; ++i) { wI[i] = 0.0_r; }
+    for (int k = 0; k < D; ++k) { wI[(k * D) + k] = 1.0_r; }
+
+    PatchResultT<D> r {};
+    r.grad = VecN<D> {};
+    r.hess = MatN<D> {};
+    r.energy = 0.0_r;
+    r.mindet = std::numeric_limits<real>::infinity();
+
+    const auto idx = [&](const int (&l)[D]) { return dev_node_index<D>(block_off, nstride, b, l); };
+    for (int occ = 0; occ < interior_patch_size<D>(); ++occ) {
+        int gc;
+        int gn[D];
+        real s[D];
+        int role;
+        interior_occurrence_raw<D>(occ, logical, idx, gc, gn, s, role);
+        const PtN<D> corner = load_pt<D>(X, gc);
+        std::array<PtN<D>, D> nbr;
+        std::array<real, D> sa;
+        for (int k = 0; k < D; ++k) {
+            nbr[static_cast<std::size_t>(k)] = load_pt<D>(X, gn[k]);
+            sa[static_cast<std::size_t>(k)] = s[k];
+        }
+        real detA;
+        const VecTN<D> t = assemble_vecT<D>(corner, nbr, sa, wI, detA);
+        if (detA < r.mindet) { r.mindet = detA; }
+        accumulate_sample<D>(objective, t, wI, role, s, r);
+    }
+    return r;
+}
+
+/// Trial energy + min det over a SYNTHESIZED interior patch, substituting `trial`
+/// for the moving node `dof` (all other nodes read from `X`). The line-search
+/// analogue of patch_eval_synth: same synthesized indices + identity W_inv, but
+/// only the scalar energy and det are needed, so the role/grad/hess work is
+/// skipped. Mirrors the stored trial loop in the interior update kernel.
+template <int D, class Obj>
+inline void synth_trial_energy_mindet(const int* block_off, const int* nstride, int b,
+                                      const int (&logical)[D], const real* X, int dof,
+                                      const PtN<D>& trial, Obj& objective, real& e_new, real& mdet)
+{
+    real wI[D * D];
+    for (int i = 0; i < D * D; ++i) { wI[i] = 0.0_r; }
+    for (int k = 0; k < D; ++k) { wI[(k * D) + k] = 1.0_r; }
+
+    e_new = 0.0_r;
+    mdet = std::numeric_limits<real>::infinity();
+    const auto idx = [&](const int (&l)[D]) { return dev_node_index<D>(block_off, nstride, b, l); };
+    for (int occ = 0; occ < interior_patch_size<D>(); ++occ) {
+        int gc;
+        int gn[D];
+        real s[D];
+        int role;
+        interior_occurrence_raw<D>(occ, logical, idx, gc, gn, s, role);
+        const auto node = [&](int ni) -> PtN<D> { return ni == dof ? trial : load_pt<D>(X, ni); };
+        const PtN<D> corner = node(gc);
+        std::array<PtN<D>, D> nbr;
+        std::array<real, D> sa;
+        for (int k = 0; k < D; ++k) {
+            nbr[static_cast<std::size_t>(k)] = node(gn[k]);
+            sa[static_cast<std::size_t>(k)] = s[k];
+        }
+        real detA;
+        const VecTN<D> t = assemble_vecT<D>(corner, nbr, sa, wI, detA);
+        e_new += objective.value(t);
+        mdet = std::min(detA, mdet);
+    }
+}
+
 }  // namespace egg

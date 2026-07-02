@@ -130,121 +130,83 @@ def build_sweep_context(
     With all-corner sampling a cell's energy depends on *all* 2**d of its corner
     nodes, so every corner DOF lists the cell as incident.
     """
+    from egg.smoothing.flat_context import cell_stencil
+
     M = grid.global_node_count
     d = grid.topology.d
-    dof_to_cells: list[list[tuple[int, tuple]]] = [[] for _ in range(M)]
-    dof_to_locals: list[list[tuple[int, tuple]]] = [[] for _ in range(M)]
-    w_inv: dict[tuple[int, tuple, tuple], np.ndarray] = {}
     corners = list(product((0, 1), repeat=d))
 
-    # Batch stencil accumulators (one list per global DOF)
-    dof_gc: list[list[int]] = [[] for _ in range(M)]
-    dof_gn0: list[list[int]] = [[] for _ in range(M)]
-    dof_gn1: list[list[int]] = [[] for _ in range(M)]
-    dof_s0: list[list[int]] = [[] for _ in range(M)]
-    dof_s1: list[list[int]] = [[] for _ in range(M)]
-    dof_roles: list[list[int]] = [[] for _ in range(M)]
-    dof_w_inv: list[list[np.ndarray]] = [[] for _ in range(M)]
+    # Shared vectorized cell stencil + node->sample membership over each block's
+    # global-dof id array. cell_stencil enumerates cells in iter_cells (C) order
+    # and corners in `corners` (product) order, so the per-sample W_inv computed
+    # below aligns index-for-index (sample id = 2**d * cell + corner). gn[k]/s[k]
+    # are the k-th axis neighbour's global id and sign.
+    st = cell_stencil([np.asarray(dm) for dm in grid.block_dof_maps], d)
+    ns = st["ns"]
+    en_gc = st["gc"].astype(np.intp)
+    en_gn0, en_gn1 = st["gn"][0].astype(np.intp), st["gn"][1].astype(np.intp)
+    en_s0, en_s1 = st["s"][0].astype(np.intp), st["s"][1].astype(np.intp)
 
-    # Global energy stencil accumulators (one entry per (cell, corner) sample)
-    en_gc: list[int] = []
-    en_gn0: list[int] = []
-    en_gn1: list[int] = []
-    en_s0: list[int] = []
-    en_s1: list[int] = []
-    en_w_inv: list[np.ndarray] = []
-
-    # Share-a-cell adjacency for DOF colouring (Step 2). Built across all blocks
-    # from the unified dof maps, so shared-interface DOFs colour consistently.
+    # Per-(cell, corner) target inverse in sample order, the raw w_inv dict, the
+    # incidence maps (dof -> cells / locals), and the share-a-cell adjacency for
+    # colouring — built across all blocks so shared-interface DOFs colour
+    # consistently.
+    w_inv: dict[tuple[int, tuple, tuple], np.ndarray] = {}
+    dof_to_cells: list[list[tuple[int, tuple]]] = [[] for _ in range(M)]
+    dof_to_locals: list[list[tuple[int, tuple]]] = [[] for _ in range(M)]
     adj: list[set[int]] = [set() for _ in range(M)]
+    samp_w_inv = np.empty((ns, d, d))
 
     for bi, block in enumerate(grid.blocks):
         dof_map = grid.block_dof_maps[bi]
-
         for logical_idx in product(*[range(s) for s in block.logical_shape]):
-            dof = int(dof_map[logical_idx])
-            dof_to_locals[dof].append((bi, logical_idx))
+            dof_to_locals[int(dof_map[logical_idx])].append((bi, logical_idx))
 
+    sid = 0
+    for bi, block in enumerate(grid.blocks):
+        dof_map = grid.block_dof_maps[bi]
         for cell_base in block.iter_cells():
             corner_dofs = {int(dof_map[ci]) for ci in block.corner_indices(cell_base)}
             for dof in corner_dofs:
                 dof_to_cells[dof].append((bi, cell_base))
-            # Every pair of this cell's corner DOFs couples (K4 per quad).
-            for i in corner_dofs:
-                adj[i].update(corner_dofs)
-                adj[i].discard(i)
-
-            base_arr = np.asarray(cell_base, dtype=int)
-
+                adj[dof].update(corner_dofs)       # K4 per quad cell
+                adj[dof].discard(dof)
             for co in corners:
-                w_inv[(bi, cell_base, co)] = np.linalg.inv(
-                    target_fn(bi, block, cell_base, co))
+                wi = np.linalg.inv(target_fn(bi, block, cell_base, co))
+                w_inv[(bi, cell_base, co)] = wi
+                samp_w_inv[sid] = wi
+                sid += 1
 
-                o_arr = np.asarray(co, dtype=int)
-                corner_idx = tuple(base_arr + o_arr)
-                gidx_c = int(dof_map[corner_idx])
-
-                s0 = 1 if o_arr[0] == 0 else -1
-                nbr0 = (base_arr + o_arr).copy()
-                nbr0[0] += s0
-                gidx_n0 = int(dof_map[tuple(nbr0)])
-
-                s1 = 1 if o_arr[1] == 0 else -1
-                nbr1 = (base_arr + o_arr).copy()
-                nbr1[1] += s1
-                gidx_n1 = int(dof_map[tuple(nbr1)])
-
-                wi = w_inv[(bi, cell_base, co)]
-
-                # Each (cell, corner) sample contributes once to global energy
-                en_gc.append(gidx_c)
-                en_gn0.append(gidx_n0)
-                en_gn1.append(gidx_n1)
-                en_s0.append(s0)
-                en_s1.append(s1)
-                en_w_inv.append(wi)
-
-                for dof in corner_dofs:
-                    dof_gc[dof].append(gidx_c)
-                    dof_gn0[dof].append(gidx_n0)
-                    dof_gn1[dof].append(gidx_n1)
-                    dof_s0[dof].append(s0)
-                    dof_s1[dof].append(s1)
-                    dof_w_inv[dof].append(wi)
-                    if gidx_c == dof:
-                        dof_roles[dof].append(0)
-                    elif gidx_n0 == dof:
-                        dof_roles[dof].append(1)
-                    elif gidx_n1 == dof:
-                        dof_roles[dof].append(2)
-                    else:
-                        dof_roles[dof].append(-1)
+    # Per-DOF patches: group the node->sample membership by DOF. A stable sort
+    # keeps each DOF's samples in cell/corner traversal order (the reference
+    # order); patches are built for every node (the CPU sweep indexes by id).
+    order = np.argsort(st["m_node"], kind="stable")
+    m_node = st["m_node"][order]
+    m_sid = st["m_sid"][order]
+    m_role = st["m_role"][order].astype(np.intp)
+    starts = np.searchsorted(m_node, np.arange(M), side="left")
+    ends = np.searchsorted(m_node, np.arange(M), side="right")
 
     dof_patches: list[dict] = []
     for dof_idx in range(M):
-        p = dof_w_inv[dof_idx]
+        lo, hi = starts[dof_idx], ends[dof_idx]
+        sids = m_sid[lo:hi]
+        P = int(sids.shape[0])
         patch = {
-            "gc": np.array(dof_gc[dof_idx], dtype=np.intp),
-            "gn0": np.array(dof_gn0[dof_idx], dtype=np.intp),
-            "gn1": np.array(dof_gn1[dof_idx], dtype=np.intp),
-            "s0": np.array(dof_s0[dof_idx], dtype=np.intp),
-            "s1": np.array(dof_s1[dof_idx], dtype=np.intp),
-            "W_inv": np.stack(p) if p else np.zeros((0, 2, 2)),
-            "role": np.array(dof_roles[dof_idx], dtype=np.intp),
+            "gc": en_gc[sids], "gn0": en_gn0[sids], "gn1": en_gn1[sids],
+            "s0": en_s0[sids], "s1": en_s1[sids],
+            "W_inv": samp_w_inv[sids] if P else np.zeros((0, 2, 2)),
+            "role": m_role[lo:hi],
         }
-        P = patch["gc"].shape[0]
         patch["J"] = _batch.make_chain_J(
             patch["s0"], patch["s1"], patch["W_inv"],
         ) if P > 0 else np.zeros((0, 4, 6))
         dof_patches.append(patch)
 
     energy_stencil = {
-        "gc": np.array(en_gc, dtype=np.intp),
-        "gn0": np.array(en_gn0, dtype=np.intp),
-        "gn1": np.array(en_gn1, dtype=np.intp),
-        "s0": np.array(en_s0, dtype=np.intp),
-        "s1": np.array(en_s1, dtype=np.intp),
-        "W_inv": np.stack(en_w_inv) if en_w_inv else np.zeros((0, 2, 2)),
+        "gc": en_gc, "gn0": en_gn0, "gn1": en_gn1,
+        "s0": en_s0, "s1": en_s1,
+        "W_inv": samp_w_inv if ns else np.zeros((0, 2, 2)),
     }
 
     # --- Step 2: greedy colouring + (colour, P) grouping ---

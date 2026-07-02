@@ -24,6 +24,7 @@ import pytest
 from egg.smoothing.solver import build_sweep_context
 from egg.smoothing.targets import IdentityTarget
 from egg.topology.builder import TopologyBuilder
+from tests.real_tol import real_tol
 
 # The circle-in-rectangle O-grid builder lives with the examples.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "circles"))
@@ -135,13 +136,13 @@ def test_conforming_lr_pair_converges_to_same_minimiser():
 
     # Structured energy decreases monotonically (frozen halos can't increase it
     # beyond FP noise) and converges to the global minimiser's energy / min-det.
-    assert np.all(np.diff(e_s) <= 1e-9)
-    np.testing.assert_allclose(e_s[-1], e_u[-1], rtol=0, atol=1e-9)
-    np.testing.assert_allclose(m_s[-1], m_u[-1], rtol=0, atol=1e-9)
+    assert np.all(np.diff(e_s) <= real_tol(1e-9))
+    np.testing.assert_allclose(e_s[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
+    np.testing.assert_allclose(m_s[-1], m_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
 
     # And to the same node positions as a fully-converged global sweep.
     _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_s, _X_ref, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(X_s, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-7))
 
 
 def test_ogrid_singular_fan_converges_to_same_minimiser():
@@ -165,11 +166,11 @@ def test_ogrid_singular_fan_converges_to_same_minimiser():
         ctx, grid, X0, n_sweeps, device="cpu", report_every=1
     )
 
-    assert np.all(np.diff(e_s) <= 1e-9)  # monotone (frozen-halo additive Schwarz)
-    np.testing.assert_allclose(e_s[-1], e_u[-1], rtol=0, atol=1e-9)
+    assert np.all(np.diff(e_s) <= real_tol(1e-9))  # monotone (frozen-halo additive Schwarz)
+    np.testing.assert_allclose(e_s[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
 
     _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_s, _X_ref, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(X_s, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-6))
 
 
 def test_block_jacobi_single_block_converges_to_same_minimiser():
@@ -190,11 +191,11 @@ def test_block_jacobi_single_block_converges_to_same_minimiser():
     X_j, e_j, m_j = cpp_structured_sweep(
         ctx, grid, X0, n_sweeps, device="cpu", smoother="block-jacobi")
 
-    np.testing.assert_allclose(e_j[-1], e_u[-1], rtol=0, atol=1e-9)
-    np.testing.assert_allclose(m_j[-1], m_u[-1], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(e_j[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
+    np.testing.assert_allclose(m_j[-1], m_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
 
     _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_j, _X_ref, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(X_j, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-7))
 
 
 def test_block_jacobi_lr_pair_converges_to_same_minimiser():
@@ -211,11 +212,11 @@ def test_block_jacobi_lr_pair_converges_to_same_minimiser():
     X_j, e_j, m_j = cpp_structured_sweep(
         ctx, grid, X0, n_sweeps, device="cpu", smoother="block-jacobi")
 
-    np.testing.assert_allclose(e_j[-1], e_u[-1], rtol=0, atol=1e-9)
-    np.testing.assert_allclose(m_j[-1], m_u[-1], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(e_j[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
+    np.testing.assert_allclose(m_j[-1], m_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
 
     _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_j, _X_ref, rtol=0, atol=1e-7)
+    np.testing.assert_allclose(X_j, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-7))
 
 
 def test_block_jacobi_ogrid_converges_to_same_minimiser():
@@ -235,10 +236,10 @@ def test_block_jacobi_ogrid_converges_to_same_minimiser():
     X_j, e_j, _m_j = cpp_structured_sweep(
         ctx, grid, X0, n_sweeps, device="cpu", smoother="block-jacobi")
 
-    np.testing.assert_allclose(e_j[-1], e_u[-1], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(e_j[-1], e_u[-1], rtol=real_tol(0.0), atol=real_tol(1e-9))
 
     _X_ref, _e_ref, _m_ref = cpp_sweep(ctx, X0, 2 * n_sweeps, device="cpu")
-    np.testing.assert_allclose(X_j, _X_ref, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(X_j, _X_ref, rtol=real_tol(0.0), atol=real_tol(1e-6))
 
 
 def test_single_and_disjoint_blocks_still_bit_identical():

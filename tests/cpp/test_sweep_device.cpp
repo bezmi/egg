@@ -13,6 +13,7 @@
 // Requires the acpp toolchain (SYCL).
 #include "golden_soa.hpp"
 #include "golden_sweep.hpp"
+#include "real_tol.hpp"
 #include "structured_sweep.hpp"
 #include "sweep.hpp"
 #include "sycl_devices.hpp"
@@ -101,9 +102,9 @@ void check_against_golden(const std::vector<egg::real>& energies,
                           const std::vector<egg::real>& X_final)
 {
     for (int s = 0; s < golden::kNumSweeps; ++s) {
-        expect(close(energies[s], golden::kEnergies[s], 1e-10))
+        expect(close(energies[s], golden::kEnergies[s], egg_test::real_tol(1e-10)))
           << std::format("sweep {} energy: {} vs golden {}", s, energies[s], golden::kEnergies[s]);
-        expect(close(mindets[s], golden::kMindets[s], 1e-10))
+        expect(close(mindets[s], golden::kMindets[s], egg_test::real_tol(1e-10)))
           << std::format("sweep {} mindet: {} vs golden {}", s, mindets[s], golden::kMindets[s]);
     }
 
@@ -111,7 +112,7 @@ void check_against_golden(const std::vector<egg::real>& energies,
     for (std::size_t i = 0; i < golden::kNumNodes * 2; ++i) {
         const double diff = std::abs(X_final[i] - golden::kXFinal[i]);
         if (diff > max_x_diff) max_x_diff = diff;
-        expect(close(X_final[i], golden::kXFinal[i], 1e-9))
+        expect(close(X_final[i], golden::kXFinal[i], egg_test::real_tol(1e-9)))
           << std::format("X[{}]: {} vs golden {}", i, X_final[i], golden::kXFinal[i]);
     }
     boost::ut::log << std::format("  max X diff: {:.2e}\n", max_x_diff);

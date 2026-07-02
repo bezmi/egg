@@ -5,14 +5,18 @@
 #include "geometry.hpp"
 #include "metric.hpp"
 #include "patch.hpp"
+#include "structured_patch.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <limits>
+#include <string>
 #include <sycl/sycl.hpp>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -59,6 +63,16 @@ template <int D> struct SweepGroupHostT {
     std::vector<int> P_of;           // [ndof]  patch size per DOF
     std::vector<int> sample_offset;  // [ndof]  exclusive prefix sum of P_of
     std::vector<SoAHostRecord> soa;  // typed per-(colour,EntityTag) SoA stores (the entity data)
+
+    // Structured interior fast path: for a DOF whose entire metric patch lies
+    // inside one block's interior, interior_block[d] names that block and
+    // interior_logical[d*D + k] its logical index, so a consumer can synthesize
+    // the patch indices from the block layout instead of reading this DOF's
+    // stored gc/gn/role/s. interior_block[d] == -1 means "read the stored
+    // arrays" (boundary/interface DOFs); both stay empty on the unstructured
+    // path, where the fast path never applies.
+    std::vector<int> interior_block;    // [ndof] or empty; -1 = use stored arrays
+    std::vector<int> interior_logical;  // [ndof * D] or empty
 };
 
 template <int D> struct EnergyStencilHostT {
@@ -74,6 +88,13 @@ template <int D> struct SweepContextHostT {
     EnergyStencilHostT<D> energy_stencil;
     std::size_t num_nodes;
     std::vector<real> X;  // [num_nodes * D] initial positions
+
+    // Structured block layout in NODE units, for synthesizing interior DOF
+    // patches on the device (empty on the unstructured path): block_off[b] is
+    // block b's first node index, nstride[b*D + k] the padded node stride on
+    // axis k. Pairs with SweepGroupHostT::interior_block/interior_logical.
+    std::vector<int> block_off;  // [num_blocks] or empty
+    std::vector<int> nstride;    // [num_blocks * D] or empty
 };
 
 /// @brief One (colour, EntityTag) partition of a colour group: a contiguous
@@ -103,15 +124,39 @@ struct PartitionView {
 template <int D> struct GroupViewT {
     std::size_t ndof;
     std::size_t n_free = 0;  // DOFs are Free-first reordered; [0, n_free) are Free
-    View1<const int> gc, role;                           // [total_samples]
-    View1<const int> gn[D];                              // [total_samples]
-    View1<const real> s[D];                            // [total_samples]
-    View1<const real> W_inv;                           // [total_samples * wInv]
-    View1<const real> J;                               // [total_samples * jSize]
+    // Per-occurrence (length total_samples, sliced per DOF by sample_offset):
+    View1<const int> sample_id, role;
+    // Shared deduplicated metric table (base pointers, indexed by sample_id[p],
+    // shared by every group/the merged view — sized num table samples, NOT
+    // total_samples). gc/gn/s/W_inv below are these bases; J is recomputed.
+    View1<const int> gc;                                 // [n_table]
+    View1<const int> gn[D];                              // [n_table]
+    View1<const std::int8_t> s[D];                       // [n_table] per-axis sign ±1
+    View1<const real> W_inv;                           // [n_table * wInv], or one row if uniform
+    int w_stride = dim::wInv(D);                          // 0 when W_inv is a uniform shared row
     View1<const int> dof_idx, P_of, sample_offset;       // [ndof]
     View1<const int> part_of, row_of;                    // [ndof] DOF -> (partition, row)
     const PartitionView* partitions = nullptr;           // [num_partitions]
     std::size_t num_partitions = 0;                      // per-(colour,EntityTag) splits
+
+    // Structured interior fast path (null on the unstructured path): interior_block
+    // [d] (or -1) names the block whose layout synthesizes DOF d's patch, and
+    // interior_logical[d*D + k] its logical index; block_off/nstride are the shared
+    // node-unit layout the synthesis indexes. See interior() and patch_eval_synth.
+    const int* interior_block = nullptr;    // [ndof]
+    const int* interior_logical = nullptr;  // [ndof * D]
+    const int* block_off = nullptr;         // [num_blocks] (shared)
+    const int* nstride = nullptr;           // [num_blocks * D] (shared)
+
+    // True when DOF d's patch can be synthesized from the block layout (its whole
+    // patch lies inside one block's interior); fills the block + logical index.
+    bool interior(std::size_t d, int& block, int (&logical)[D]) const
+    {
+        if (interior_block == nullptr || interior_block[d] < 0) { return false; }
+        block = interior_block[d];
+        for (int k = 0; k < D; ++k) { logical[k] = interior_logical[(d * D) + static_cast<std::size_t>(k)]; }
+        return true;
+    }
 
     // PatchViewT over DOF d's contiguous ragged slice
     // [sample_offset[d], sample_offset[d] + P_of[d]).
@@ -120,14 +165,17 @@ template <int D> struct GroupViewT {
         const auto off = static_cast<std::size_t>(sample_offset[d]);
         PatchViewT<D> pv;
         pv.P = P_of[d];
-        pv.gc = gc.data_handle() + off;
-        for (int k = 0; k < D; ++k) {
-            pv.gn[k] = gn[k].data_handle() + off;
-            pv.s[k] = s[k].data_handle() + off;
-        }
-        pv.W_inv = W_inv.data_handle() + (off * dim::wInv(D));
+        // Per-occurrence arrays slice to this DOF; the metric table bases are
+        // shared (global), indexed by sample_id[p] inside patch_eval.
+        pv.sample_id = sample_id.data_handle() + off;
         pv.role = role.data_handle() + off;
-        pv.J = J.data_handle() + (off * dim::jSize(D));
+        pv.gc = gc.data_handle();
+        for (int k = 0; k < D; ++k) {
+            pv.gn[k] = gn[k].data_handle();
+            pv.s[k] = s[k].data_handle();
+        }
+        pv.W_inv = W_inv.data_handle();
+        pv.w_stride = w_stride;
         return pv;
     }
 
@@ -146,6 +194,10 @@ template <int D> struct GroupViewT {
         sub.sample_offset = View1<const int> {sample_offset.data_handle() + begin, count};
         sub.part_of = View1<const int> {part_of.data_handle() + begin, count};
         sub.row_of = View1<const int> {row_of.data_handle() + begin, count};
+        if (interior_block != nullptr) {
+            sub.interior_block = interior_block + begin;
+            sub.interior_logical = interior_logical + (begin * D);
+        }
         return sub;
     }
 };
@@ -156,6 +208,19 @@ template <int D> struct StencilViewT {
     View1<const int> gn[D];
     View1<const real> s[D];
     View2<const real> W_inv;  // [num_samples][wInv]
+};
+
+// Base pointers of the shared deduplicated metric table, indexed by a patch
+// occurrence's sample_id. One table is shared by every group and the merged view.
+// J is not stored — its role block is recomputed in-kernel from s + W_inv.
+template <int D> struct MetricTableViewT {
+    View1<const int> gc;       // [n_table]
+    View1<const int> gn[D];    // [n_table]
+    View1<const std::int8_t> s[D];  // [n_table] per-axis sign ±1, widened on read
+    View1<const real> W_inv; // [n_table * dim::wInv(D)], or one row when uniform
+    // W_inv row stride: dim::wInv(D), or 0 when every sample shares one row (a
+    // uniform target), in which case W_inv holds a single dim::wInv(D)-wide row.
+    int w_stride = dim::wInv(D);
 };
 
 template <int D> class SweepDeviceContextT
@@ -172,20 +237,19 @@ template <int D> class SweepDeviceContextT
                std::vector<real>(host.num_nodes * kSeedStride,
                                    std::numeric_limits<real>::quiet_NaN()))
     {
+        // Deduplicate the per-sample payload (gc/gn/s/W_inv/J) across every group
+        // into one shared table; each group keeps only a per-occurrence sample_id.
+        const std::vector<std::vector<int>> group_sid = build_metric_table(host);
+
         groups_.reserve(host.groups.size());
         group_partitions_.reserve(host.groups.size());
-        for (const auto& g : host.groups) {
+        for (std::size_t gi = 0; gi < host.groups.size(); ++gi) {
+            const auto& g = host.groups[gi];
             DeviceGroup dg;
             dg.ndof = g.ndof;
             dg.total_samples = g.total_samples;
-            dg.gc = {q, g.gc};
+            dg.sample_id = {q, group_sid[gi]};
             dg.role = {q, g.role};
-            for (int k = 0; k < D; ++k) {
-                dg.gn[k] = {q, g.gn[k]};
-                dg.s[k] = {q, g.s[k]};
-            }
-            dg.W_inv = {q, g.W_inv};
-            dg.J = {q, g.J};
 
             // Each SoAHostRecord in g.soa is one (colour, EntityTag) partition:
             // its dof_local is the group-local DOF list, its records/seg the
@@ -258,7 +322,28 @@ template <int D> class SweepDeviceContextT
             dg.part_of = {q, gather(part_of)};
             dg.row_of = {q, gather(row_of)};
 
+            // Interior fast-path descriptors (structured only): reorder in lockstep
+            // with the per-DOF arrays. interior_logical is D-wide per DOF.
+            if (!g.interior_block.empty()) {
+                dg.interior_block = {q, gather(g.interior_block)};
+                std::vector<int> ilog(g.ndof * static_cast<std::size_t>(D));
+                for (std::size_t i = 0; i < perm.size(); ++i) {
+                    const auto src = static_cast<std::size_t>(perm[i]);
+                    for (int k = 0; k < D; ++k) {
+                        ilog[(i * D) + static_cast<std::size_t>(k)] =
+                          g.interior_logical[(src * D) + static_cast<std::size_t>(k)];
+                    }
+                }
+                dg.interior_logical = {q, ilog};
+            }
+
             groups_.push_back(std::move(dg));
+        }
+
+        // Upload the shared node-unit block layout once (empty unless structured).
+        if (!host.block_off.empty()) {
+            block_off_ = {q, host.block_off};
+            nstride_ = {q, host.nstride};
         }
         const auto& es = host.energy_stencil;
         stencil_.num_samples = es.num_samples;
@@ -298,13 +383,19 @@ template <int D> class SweepDeviceContextT
             // part_of[d]), so it must live in USM — a host std::vector pointer
             // would fault on the GPU. Upload once; the device pointer is stable.
             group_partitions_.emplace_back(q, pvs);
-            group_views_.push_back(dg.view(group_partitions_.back().data(), pvs.size()));
+            group_views_.push_back(
+              dg.view(group_partitions_.back().data(), pvs.size(), table_view(),
+                      block_off_.data(), nstride_.data()));
             host_pvs_.push_back(std::move(pvs));  // retained for the merged Jacobi view
         }
         stencil_view_ = stencil_.view();
     }
 
     const std::vector<GroupViewT<D>>& group_views() const { return group_views_; }
+    /// @brief True once the merged block-Jacobi view has been built and the
+    ///        per-group per-sample buffers backing @ref group_views() were freed.
+    ///        Colored-GS is unavailable on this instance thereafter.
+    bool per_group_released() const { return per_group_released_; }
     const StencilViewT<D>& stencil_view() const { return stencil_view_; }
     real* X() const { return X_.data(); }
     std::size_t x_size() const { return X_.size(); }
@@ -334,6 +425,32 @@ template <int D> class SweepDeviceContextT
         return merged_view_;
     }
 
+    /// @brief One monomorphic boundary launch descriptor: a single (entity-type)
+    ///        partition's list of **Free-first-reordered DOF positions** into the
+    ///        merged view (§4.7). Kernels A/C launch over `positions[0..count)`;
+    ///        for each position `d` they recover the patch (`merged.patch(d)`), the
+    ///        global node (`merged.dof_idx[d]`), and the SoA row (`merged.row_of[d]`)
+    ///        exactly as the subrange kernel does — but with the entity type fixed
+    ///        at launch (`tag`/`pv.soa_view`), so `dispatch_entity_type` collapses
+    ///        to one arm and the +144 control-flow union is gone. Block-Jacobi only
+    ///        (the merged view is a single "colour"); never used by colored-GS.
+    struct BoundaryLaunch {
+        EntityTag tag;          ///< Entity type of this partition (drives monomorphization).
+        PartitionView pv;       ///< Entity SoA view (records + seg) for this partition.
+        std::size_t count;      ///< Number of boundary DOFs in this partition.
+        const int* positions;   ///< Device USM: reordered positions into the merged view.
+    };
+
+    /// @brief The per-partition boundary launch descriptors (§4.7 / S1). Built
+    ///        lazily alongside the merged view; one entry per boundary partition
+    ///        actually present (~1–2 for sphere_in_cube). The union of every
+    ///        entry's positions is exactly `[merged.n_free, merged.ndof)`.
+    const std::vector<BoundaryLaunch>& boundary_launches()
+    {
+        merged_group_view();  // ensure built
+        return boundary_launches_;
+    }
+
     void upload_X(const std::vector<real>& host_X)
     {
         X_.upload(host_X);
@@ -355,28 +472,30 @@ template <int D> class SweepDeviceContextT
         std::size_t ndof;
         std::size_t n_free = 0;  // count of Free DOFs (the [0, n_free) prefix)
         std::size_t total_samples;
-        UsmBuffer<int> gc, role;
-        UsmBuffer<int> gn[D];
-        UsmBuffer<real> s[D];
-        UsmBuffer<real> W_inv, J;
+        // Per-occurrence only (the bulk gc/gn/s/W_inv/J payload is deduplicated
+        // into the context-level shared MetricTable, referenced by sample_id).
+        UsmBuffer<int> sample_id, role;
         UsmBuffer<int> dof_idx, P_of, sample_offset;
         UsmBuffer<int> part_of, row_of;  // [ndof] DOF -> (partition, row)
+        UsmBuffer<int> interior_block, interior_logical;  // [ndof], [ndof*D]; empty if unstructured
         std::vector<DevicePartition> partitions;
 
-        GroupViewT<D> view(const PartitionView* pvs, std::size_t np) const
+        GroupViewT<D> view(const PartitionView* pvs, std::size_t np, const MetricTableViewT<D>& tbl,
+                           const int* block_off, const int* nstride) const
         {
             const std::size_t n = total_samples;
             GroupViewT<D> gv;
             gv.ndof = ndof;
             gv.n_free = n_free;
-            gv.gc = View1<const int> {gc.data(), n};
+            gv.sample_id = View1<const int> {sample_id.data(), n};
             gv.role = View1<const int> {role.data(), n};
+            gv.gc = tbl.gc;
             for (int k = 0; k < D; ++k) {
-                gv.gn[k] = View1<const int> {gn[k].data(), n};
-                gv.s[k] = View1<const real> {s[k].data(), n};
+                gv.gn[k] = tbl.gn[k];
+                gv.s[k] = tbl.s[k];
             }
-            gv.W_inv = View1<const real> {W_inv.data(), n * dim::wInv(D)};
-            gv.J = View1<const real> {J.data(), n * dim::jSize(D)};
+            gv.W_inv = tbl.W_inv;
+            gv.w_stride = tbl.w_stride;
             gv.dof_idx = View1<const int> {dof_idx.data(), ndof};
             gv.P_of = View1<const int> {P_of.data(), ndof};
             gv.sample_offset = View1<const int> {sample_offset.data(), ndof};
@@ -384,6 +503,12 @@ template <int D> class SweepDeviceContextT
             gv.row_of = View1<const int> {row_of.data(), ndof};
             gv.partitions = pvs;
             gv.num_partitions = np;
+            if (interior_block.size() > 0) {
+                gv.interior_block = interior_block.data();
+                gv.interior_logical = interior_logical.data();
+                gv.block_off = block_off;
+                gv.nstride = nstride;
+            }
             return gv;
         }
     };
@@ -409,11 +534,13 @@ template <int D> class SweepDeviceContextT
         }
     };
 
-    /// Concatenate every colour group's tables into one GroupViewT (cached in the
-    /// m_* buffers + merged_view_). Bulk per-sample arrays are joined by
-    /// device-to-device copy; the small per-DOF index arrays are rebuilt on host
-    /// with the running sample/partition offsets; the partition list is the
-    /// per-group PartitionView arrays concatenated (entity SoA pointers unchanged).
+    /// Concatenate every colour group's per-occurrence arrays into one GroupViewT
+    /// (cached in the m_* buffers + merged_view_). Only the small per-occurrence
+    /// sample_id/role and the per-DOF index arrays are joined — the bulk metric
+    /// payload lives once in the shared table_ (referenced unchanged via
+    /// sample_id, which is already a global table index). The per-DOF index arrays
+    /// are rebuilt with the running sample/partition offsets; the partition list is
+    /// the per-group PartitionView arrays concatenated (entity SoA pointers unchanged).
     void build_merged_view()
     {
         const std::size_t ng = groups_.size();
@@ -423,19 +550,17 @@ template <int D> class SweepDeviceContextT
             total_samples += groups_[gi].total_samples;
             total_parts += host_pvs_[gi].size();
         }
-        const std::size_t wInv = dim::wInv(D), jSize = dim::jSize(D);
 
-        m_gc_ = UsmBuffer<int> {q_, total_samples};
+        m_sample_id_ = UsmBuffer<int> {q_, total_samples};
         m_role_ = UsmBuffer<int> {q_, total_samples};
-        for (int k = 0; k < D; ++k) {
-            m_gn_[k] = UsmBuffer<int> {q_, total_samples};
-            m_s_[k] = UsmBuffer<real> {q_, total_samples};
-        }
-        m_W_inv_ = UsmBuffer<real> {q_, total_samples * wInv};
-        m_J_ = UsmBuffer<real> {q_, total_samples * jSize};
 
         std::vector<int> dof_idx(total_ndof), P_of(total_ndof), sample_offset(total_ndof);
         std::vector<int> part_of(total_ndof), row_of(total_ndof);
+        // Interior fast-path descriptors carried through the merge (structured only;
+        // -1 / 0 elsewhere, so the merged view's interior() simply never fires).
+        const bool structured = !groups_.empty() && groups_[0].interior_block.size() > 0;
+        std::vector<int> interior_block(total_ndof, -1);
+        std::vector<int> interior_logical(total_ndof * static_cast<std::size_t>(D), 0);
         std::vector<PartitionView> merged_pvs;
         merged_pvs.reserve(total_parts);
 
@@ -443,14 +568,10 @@ template <int D> class SweepDeviceContextT
         for (std::size_t gi = 0; gi < ng; ++gi) {
             auto& dg = groups_[gi];
             const std::size_t gs = dg.total_samples, gd = dg.ndof;
-            q_.memcpy(m_gc_.data() + sbase, dg.gc.data(), gs * sizeof(int));
+            // sample_id already indexes the shared table_, so concatenation keeps
+            // each occurrence's table index intact (no per-group rebasing).
+            q_.memcpy(m_sample_id_.data() + sbase, dg.sample_id.data(), gs * sizeof(int));
             q_.memcpy(m_role_.data() + sbase, dg.role.data(), gs * sizeof(int));
-            for (int k = 0; k < D; ++k) {
-                q_.memcpy(m_gn_[k].data() + sbase, dg.gn[k].data(), gs * sizeof(int));
-                q_.memcpy(m_s_[k].data() + sbase, dg.s[k].data(), gs * sizeof(real));
-            }
-            q_.memcpy(m_W_inv_.data() + sbase * wInv, dg.W_inv.data(), gs * wInv * sizeof(real));
-            q_.memcpy(m_J_.data() + sbase * jSize, dg.J.data(), gs * jSize * sizeof(real));
 
             std::vector<int> g_dof_idx(gd), g_P_of(gd), g_so(gd), g_part(gd), g_row(gd);
             dg.dof_idx.download(g_dof_idx.data());
@@ -464,6 +585,18 @@ template <int D> class SweepDeviceContextT
                 sample_offset[dbase + r] = g_so[r] + static_cast<int>(sbase);
                 part_of[dbase + r] = g_part[r] + static_cast<int>(pbase);
                 row_of[dbase + r] = g_row[r];
+            }
+            if (structured) {
+                std::vector<int> g_ib(gd), g_il(gd * static_cast<std::size_t>(D));
+                dg.interior_block.download(g_ib.data());
+                dg.interior_logical.download(g_il.data());
+                for (std::size_t r = 0; r < gd; ++r) {
+                    interior_block[dbase + r] = g_ib[r];
+                    for (int k = 0; k < D; ++k) {
+                        interior_logical[((dbase + r) * D) + static_cast<std::size_t>(k)] =
+                          g_il[(r * D) + static_cast<std::size_t>(k)];
+                    }
+                }
             }
             for (const auto& pv : host_pvs_[gi]) { merged_pvs.push_back(pv); }
 
@@ -498,24 +631,78 @@ template <int D> class SweepDeviceContextT
             return dst;
         };
 
+        const std::vector<int> r_part_of = gather(part_of);
         m_dof_idx_ = UsmBuffer<int> {q_, gather(dof_idx)};
         m_P_of_ = UsmBuffer<int> {q_, gather(P_of)};
         m_sample_offset_ = UsmBuffer<int> {q_, gather(sample_offset)};
-        m_part_of_ = UsmBuffer<int> {q_, gather(part_of)};
+        m_part_of_ = UsmBuffer<int> {q_, r_part_of};
         m_row_of_ = UsmBuffer<int> {q_, gather(row_of)};
         m_partitions_ = UsmBuffer<PartitionView> {q_, merged_pvs};
+        if (structured) {
+            m_interior_block_ = UsmBuffer<int> {q_, gather(interior_block)};
+            std::vector<int> ril(interior_logical.size());
+            for (std::size_t i = 0; i < perm.size(); ++i) {
+                const auto src = static_cast<std::size_t>(perm[i]);
+                for (int k = 0; k < D; ++k) {
+                    ril[(i * D) + static_cast<std::size_t>(k)] =
+                      interior_logical[(src * D) + static_cast<std::size_t>(k)];
+                }
+            }
+            m_interior_logical_ = UsmBuffer<int> {q_, ril};
+        }
+
+        // Per-partition reordered-position lists for the boundary tail (§4.7 / S1).
+        // Bucket every boundary position [merged_n_free, total_ndof) by its merged
+        // partition; each non-empty bucket becomes one monomorphic launch. The
+        // interior prefix [0, merged_n_free) stays a single entity-agnostic launch
+        // and is intentionally not bucketed. Reserve up front so the position
+        // UsmBuffers never reallocate (BoundaryLaunch::positions holds raw pointers
+        // into them; a vector reallocation would move-construct each buffer — the
+        // device pointer survives a move, but reserving keeps the invariant simple).
+        std::vector<std::vector<int>> buckets(total_parts);
+        for (std::size_t i = merged_n_free; i < total_ndof; ++i) {
+            buckets[static_cast<std::size_t>(r_part_of[i])].push_back(static_cast<int>(i));
+        }
+        std::size_t n_bnd_parts = 0;
+        for (const auto& b : buckets) {
+            if (!b.empty()) { ++n_bnd_parts; }
+        }
+        boundary_launches_.clear();
+        boundary_launches_.reserve(n_bnd_parts);
+        m_part_positions_.clear();
+        m_part_positions_.reserve(n_bnd_parts);
+        std::size_t bnd_total = 0;
+        for (std::size_t p = 0; p < total_parts; ++p) {
+            if (buckets[p].empty()) { continue; }
+            // Every boundary position must belong to a non-Free partition (the
+            // Free DOFs are exactly the [0, merged_n_free) prefix). This is the S1
+            // unit-check that the reordered positions ↔ partition mapping holds.
+            assert(merged_pvs[p].tag != EntityTag::Free);
+            bnd_total += buckets[p].size();
+            m_part_positions_.emplace_back(q_, buckets[p]);
+            boundary_launches_.push_back(BoundaryLaunch {
+              .tag = merged_pvs[p].tag,
+              .pv = merged_pvs[p],
+              .count = buckets[p].size(),
+              .positions = m_part_positions_.back().data()});
+        }
+        // The boundary partitions must exactly tile the boundary tail.
+        assert(bnd_total == total_ndof - merged_n_free);
 
         GroupViewT<D> gv;
         gv.ndof = total_ndof;
         gv.n_free = merged_n_free;
-        gv.gc = View1<const int> {m_gc_.data(), total_samples};
+        gv.sample_id = View1<const int> {m_sample_id_.data(), total_samples};
         gv.role = View1<const int> {m_role_.data(), total_samples};
+        // Bulk payload is the shared table — same bases as every per-group view.
+        const MetricTableViewT<D> tbl = table_view();
+        gv.gc = tbl.gc;
         for (int k = 0; k < D; ++k) {
-            gv.gn[k] = View1<const int> {m_gn_[k].data(), total_samples};
-            gv.s[k] = View1<const real> {m_s_[k].data(), total_samples};
+            gv.gn[k] = tbl.gn[k];
+            gv.s[k] = tbl.s[k];
         }
-        gv.W_inv = View1<const real> {m_W_inv_.data(), total_samples * wInv};
-        gv.J = View1<const real> {m_J_.data(), total_samples * jSize};
+        gv.W_inv = tbl.W_inv;
+        gv.w_stride = tbl.w_stride;
         gv.dof_idx = View1<const int> {m_dof_idx_.data(), total_ndof};
         gv.P_of = View1<const int> {m_P_of_.data(), total_ndof};
         gv.sample_offset = View1<const int> {m_sample_offset_.data(), total_ndof};
@@ -523,29 +710,179 @@ template <int D> class SweepDeviceContextT
         gv.row_of = View1<const int> {m_row_of_.data(), total_ndof};
         gv.partitions = m_partitions_.data();
         gv.num_partitions = total_parts;
+        if (structured) {
+            gv.interior_block = m_interior_block_.data();
+            gv.interior_logical = m_interior_logical_.data();
+            gv.block_off = block_off_.data();
+            gv.nstride = nstride_.data();
+        }
         merged_view_ = gv;
+
+        // The merged view now owns its own concatenated per-occurrence arrays
+        // (m_sample_id_/m_role_) and per-DOF index arrays. The per-group
+        // `groups_[*]` copies they were built from are dead duplicates from here on.
+        // Free them. (The shared table_ is NOT freed — it is the live payload for
+        // both the merged view and any per-group view.)
+        //
+        // This commits the instance to the block-Jacobi path: colored-GS reads
+        // `group_views()`, whose View1s alias exactly these per-group buffers, so
+        // it must not run afterward. `group_views_` is cleared (so the dangling
+        // views are unreachable rather than silently reading freed memory) and the
+        // release is flagged; `run_colored_gs` asserts the flag is unset. In
+        // practice each smoother gets a fresh executor (see bindings.cpp), so the
+        // two never share an instance. NOT freed: `partitions` (entity SoA, aliased
+        // by the merged PartitionViews) and `stencil_`/`stencil_view_` (read by the
+        // energy reduction on both paths).
+        for (auto& dg : groups_) {
+            dg.sample_id = UsmBuffer<int> {};
+            dg.role = UsmBuffer<int> {};
+            dg.dof_idx = UsmBuffer<int> {};
+            dg.P_of = UsmBuffer<int> {};
+            dg.sample_offset = UsmBuffer<int> {};
+            dg.part_of = UsmBuffer<int> {};
+            dg.row_of = UsmBuffer<int> {};
+            dg.interior_block = UsmBuffer<int> {};
+            dg.interior_logical = UsmBuffer<int> {};
+        }
+        group_views_.clear();
+        per_group_released_ = true;
     }
 
     sycl::queue q_;
     std::size_t num_nodes_;
     UsmBuffer<real> X_;
     UsmBuffer<real> seeds_;  // [num_nodes * kSeedStride] warm-start param cache
+    // Shared node-unit block layout for interior patch synthesis (empty on the
+    // unstructured path). Referenced by every group view + the merged view.
+    UsmBuffer<int> block_off_, nstride_;
     std::vector<DeviceGroup> groups_;
     std::vector<UsmBuffer<PartitionView>> group_partitions_;  // device-resident PartitionView arrays
     DeviceStencil stencil_;
     std::vector<GroupViewT<D>> group_views_;
     StencilViewT<D> stencil_view_ {};
 
+    // Shared deduplicated metric table (built once in the ctor): every group view
+    // and the merged view reference these bases via a per-occurrence sample_id, so
+    // the bulk gc/gn/s/W_inv payload is stored once rather than per occurrence.
+    // J is not stored — its role block is recomputed in-kernel from s + W_inv.
+    struct MetricTable {
+        std::size_t n = 0;
+        UsmBuffer<int> gc;
+        UsmBuffer<int> gn[D];
+        UsmBuffer<std::int8_t> s[D];  // per-axis sign ±1 (was real; widened on read)
+        UsmBuffer<real> W_inv;
+        bool w_uniform = false;  // every sample shares one W_inv row → store one row
+    } table_;
+
+    MetricTableViewT<D> table_view() const
+    {
+        MetricTableViewT<D> t;
+        t.gc = View1<const int> {table_.gc.data(), table_.n};
+        for (int k = 0; k < D; ++k) {
+            t.gn[k] = View1<const int> {table_.gn[k].data(), table_.n};
+            t.s[k] = View1<const std::int8_t> {table_.s[k].data(), table_.n};
+        }
+        const std::size_t wInv = dim::wInv(D);
+        t.w_stride = table_.w_uniform ? 0 : static_cast<int>(wInv);
+        t.W_inv = View1<const real> {table_.W_inv.data(),
+                                     table_.w_uniform ? wInv : (table_.n * wInv)};
+        return t;
+    }
+
+    // Build the shared metric table from the per-group host payloads, returning
+    // each group's per-occurrence sample_id (index into the table). Identical
+    // (gc,gn,s,W_inv) occurrences — the same physical (cell,corner) sample shared
+    // by a cell's corner DOFs — fold to one entry. The host J payload is ignored:
+    // the role-selected block is recomputed in-kernel from s + W_inv (role_Jb).
+    // The energy stencil is a separate, already-deduplicated table, left untouched.
+    std::vector<std::vector<int>> build_metric_table(const SweepContextHostT<D>& host)
+    {
+        constexpr std::size_t wInv = dim::wInv(D);
+        std::vector<int> t_gc;
+        std::vector<int> t_gn[D];
+        std::vector<std::int8_t> t_s[D];  // s is ±1; store as int8 (key still hashes the real bytes)
+        std::vector<real> t_W;
+        std::vector<std::vector<int>> sid(host.groups.size());
+
+        // Dedup key: the raw bytes of one occurrence's (gc, gn[], s[], W_inv).
+        // Equal keys mean an exact byte match, which for the shared (cell,corner)
+        // samples holds bit-for-bit; distinct cells that happen to match also fold
+        // harmlessly (same payload → same read).
+        std::unordered_map<std::string, int> seen;
+        std::size_t total = 0;
+        for (const auto& g : host.groups) { total += g.total_samples; }
+        seen.reserve((total / dim::corners(D)) + 1);
+        std::string key;
+
+        const auto emit = [&](const SweepGroupHostT<D>& g, std::size_t p) {
+            key.clear();
+            const auto put = [&](const void* ptr, std::size_t n) {
+                key.append(static_cast<const char*>(ptr), n);
+            };
+            put(&g.gc[p], sizeof(int));
+            for (int k = 0; k < D; ++k) { put(&g.gn[k][p], sizeof(int)); }
+            for (int k = 0; k < D; ++k) { put(&g.s[k][p], sizeof(real)); }
+            put(&g.W_inv[p * wInv], wInv * sizeof(real));
+
+            const auto [it, fresh] = seen.try_emplace(key, static_cast<int>(t_gc.size()));
+            if (!fresh) { return it->second; }
+
+            t_gc.push_back(g.gc[p]);
+            for (int k = 0; k < D; ++k) {
+                t_gn[k].push_back(g.gn[k][p]);
+                t_s[k].push_back(static_cast<std::int8_t>(g.s[k][p]));
+            }
+            for (std::size_t e = 0; e < wInv; ++e) { t_W.push_back(g.W_inv[(p * wInv) + e]); }
+            return it->second;
+        };
+
+        for (std::size_t gi = 0; gi < host.groups.size(); ++gi) {
+            const auto& g = host.groups[gi];
+            sid[gi].resize(g.total_samples);
+            for (std::size_t p = 0; p < g.total_samples; ++p) { sid[gi][p] = emit(g, p); }
+        }
+
+        // Detect a uniform W_inv table (every row byte-identical to the first —
+        // the common case of a fixed/identity target). When uniform, store a
+        // single row and read it with stride 0; W_inv is the largest per-sample
+        // field, so this drops the bulk of the table for those workloads.
+        bool uniform = !t_W.empty();
+        for (std::size_t r = 1; r < t_gc.size() && uniform; ++r) {
+            for (std::size_t e = 0; e < wInv; ++e) {
+                if (t_W[(r * wInv) + e] != t_W[e]) {
+                    uniform = false;
+                    break;
+                }
+            }
+        }
+        table_.w_uniform = uniform;
+        if (uniform) { t_W.resize(wInv); }
+
+        table_.n = t_gc.size();
+        table_.gc = {q_, t_gc};
+        for (int k = 0; k < D; ++k) {
+            table_.gn[k] = {q_, t_gn[k]};
+            table_.s[k] = {q_, t_s[k]};
+        }
+        table_.W_inv = {q_, t_W};
+        return sid;
+    }
+
     // Merged single-launch view for block-Jacobi (lazily built, then cached).
     std::vector<std::vector<PartitionView>> host_pvs_;  // per-group PartitionView (host copies)
     bool merged_built_ = false;
+    bool per_group_released_ = false;  // per-group per-occurrence buffers freed after the merge
     GroupViewT<D> merged_view_ {};
-    UsmBuffer<int> m_gc_, m_role_;
-    UsmBuffer<int> m_gn_[D];
-    UsmBuffer<real> m_s_[D];
-    UsmBuffer<real> m_W_inv_, m_J_;
+    UsmBuffer<int> m_sample_id_, m_role_;
     UsmBuffer<int> m_dof_idx_, m_P_of_, m_sample_offset_, m_part_of_, m_row_of_;
+    UsmBuffer<int> m_interior_block_, m_interior_logical_;  // structured only; empty otherwise
     UsmBuffer<PartitionView> m_partitions_;
+
+    // Per-partition boundary launch descriptors (§4.7 / S1). m_part_positions_
+    // owns the device position arrays; boundary_launches_ holds raw pointers into
+    // them (kept stable by the reserve in build_merged_view).
+    std::vector<UsmBuffer<int>> m_part_positions_;
+    std::vector<BoundaryLaunch> boundary_launches_;
 };
 
 /// @brief Single per-colour sweep kernel (backup architecture, SoA-backed).
@@ -719,16 +1056,17 @@ inline void sweep_colour_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X,
                 auto node = [&](int ni) -> PtN<D> {
                     return ni == dof ? trial : load_pt<D>(X, ni);
                 };
-                PtN<D> corner = node(pv.gc[p]);
+                const int sid = pv.sample_id[p];  // shared-table index of occurrence p
+                PtN<D> corner = node(pv.gc[sid]);
                 std::array<PtN<D>, D> nbr;
                 std::array<real, D> sc;
                 for (int k = 0; k < D; ++k) {
-                    nbr[k] = node(pv.gn[k][p]);
-                    sc[k] = pv.s[k][p];
+                    nbr[k] = node(pv.gn[k][sid]);
+                    sc[k] = pv.s[k][sid];
                 }
                 real detA;
                 const VecTN<D> t =
-                  assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[dim::wInv(D) * p], detA);
+                  assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
                 e_new += objective.value(t);
                 mdet = std::min(detA, mdet);
             }
@@ -752,6 +1090,359 @@ inline void sweep_colour_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X,
         // 5. Scatter. In-place (colored-GS) writes X; double-buffered Jacobi
         //    writes the separate X_out snapshot. Race-free: distinct DOFs are
         //    distinct nodes, so the scatter never collides.
+        store_pt<D>(out, dof, cur);
+    });
+}
+
+/// @brief Kernel B — metric eval (§4.3). For each DOF in @p g, run `patch_eval`
+///        and scatter (grad, hess, energy) into the per-node USM buffers, keyed by
+///        **global node id** (`dof_idx[d]`, §5) so the same buffers serve both the
+///        interior subrange launch and the per-partition boundary launches.
+///
+/// This is exactly the metric half of @ref sweep_colour_kernel hoisted into its
+/// own kernel: bit-identical `patch_eval`, no Newton step, no projection, no
+/// `with_entity`. Splitting it out lets the heavy metric grad+jhj working set live
+/// in a kernel of its own (interior 144 → ~88 metric here + ~80 solve in Kernel C,
+/// both under the gfx1030 128-VGPR 2-wave tier). Entity-agnostic: one launch over
+/// the whole subrange regardless of entity type.
+///
+/// @param grad_buf  [num_nodes * D]     dE/dpos per node.
+/// @param hess_buf  [num_nodes * D*D]   contracted Hessian per node (row-major).
+/// @param e0_buf    [num_nodes]         baseline patch energy per node.
+template <int D, class Obj>
+inline void metric_kernel(sycl::queue& q, const GroupViewT<D>& g, const real* X, real* grad_buf,
+                          real* hess_buf, real* e0_buf, Obj objective)
+{
+    if (g.ndof == 0) { return; }
+    q.parallel_for(sycl::range<1>(g.ndof), [=](sycl::id<1> idx) {
+        const std::size_t d = idx[0];
+        const PatchViewT<D> pv = g.patch(d);
+        const int dof = g.dof_idx[d];
+        const PatchResultT<D> r = patch_eval<D>(pv, X, objective);
+        const std::size_t base = static_cast<std::size_t>(dof);
+        real* gslot = grad_buf + (base * D);
+        for (int k = 0; k < D; ++k) { gslot[k] = r.grad[k]; }
+        real* hslot = hess_buf + (base * D * D);
+        for (int k = 0; k < D * D; ++k) { hslot[k] = r.hess[k]; }
+        e0_buf[base] = r.energy;
+    });
+}
+
+/// @brief Kernel C (interior / `FreeOnly`) — Newton solve + backtracking + scatter
+///        (§4.4, §4.5), reading the metric (grad, hess, e0) precomputed by
+///        @ref metric_kernel from the per-node buffers. No entity, no projection:
+///        the interior Newton step is the plain `solveNxN<D>` and the line-search
+///        trial is the raw step — structurally the existing interior kernel with
+///        the metric hoisted out. The trial energy recompute reads neighbour
+///        positions from @p X (the frozen snapshot for block-Jacobi).
+///
+/// @param X      Read buffer (block-Jacobi: frozen x_in; colored-GS: in-place X).
+/// @param X_out  Write buffer (null → in-place, X_out == X).
+/// @param omega  Relaxation weight (1.0 = undamped).
+template <int D, class Obj>
+inline void interior_update_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, real* X_out,
+                                   real omega, const real* grad_buf, const real* hess_buf,
+                                   const real* e0_buf, Obj objective)
+{
+    if (g.ndof == 0) { return; }
+    real* out = X_out ? X_out : X;
+    q.parallel_for(sycl::range<1>(g.ndof), [=](sycl::id<1> idx) {
+        const std::size_t d = idx[0];
+        const int dof = g.dof_idx[d];
+        const PtN<D> pos = load_pt<D>(X, dof);
+        const std::size_t base = static_cast<std::size_t>(dof);
+
+        // Load the precomputed metric for this node.
+        VecN<D> grad {};
+        MatN<D> hess {};
+        const real* gslot = grad_buf + (base * D);
+        for (int k = 0; k < D; ++k) { grad[k] = gslot[k]; }
+        const real* hslot = hess_buf + (base * D * D);
+        for (int k = 0; k < D * D; ++k) { hess[k] = hslot[k]; }
+        const real e0 = e0_buf[base];
+
+        // Interior DOF: plain d×d Newton solve (no entity geometry).
+        const VecN<D> delta = solveNxN<D>(hess, grad);
+
+        // The trial-energy recompute reads the patch the same way the metric did:
+        // synthesized from the block layout for interior-eligible DOFs (no stored
+        // gc/gn/s reads), or from the stored arrays otherwise.
+        int block;
+        int logical[D];
+        const bool synth = g.interior(d, block, logical);
+        const PatchViewT<D> pv = synth ? PatchViewT<D> {} : g.patch(d);
+
+        // Backtracking: halve alpha up to 10×; trial == raw (interior projects to
+        // identity). Accept on finite(e) && e <= e0 + tol && accept_mindet.
+        real alpha = 1.0_r;
+        PtN<D> cur = pos;
+        bool accepted = false;
+        for (int it = 0; it < 10 && !accepted; ++it) {
+            PtN<D> trial;
+            for (int k = 0; k < D; ++k) { trial[k] = pos[k] + (alpha * delta[k]); }
+            real e_new = 0.0_r;
+            real mdet = std::numeric_limits<real>::infinity();
+            if (synth) {
+                synth_trial_energy_mindet<D>(g.block_off, g.nstride, block, logical, X, dof, trial,
+                                             objective, e_new, mdet);
+            } else {
+                for (int p = 0; p < pv.P; ++p) {
+                    auto node = [&](int ni) -> PtN<D> {
+                        return ni == dof ? trial : load_pt<D>(X, ni);
+                    };
+                    const int sid = pv.sample_id[p];  // shared-table index of occurrence p
+                    PtN<D> corner = node(pv.gc[sid]);
+                    std::array<PtN<D>, D> nbr;
+                    std::array<real, D> sc;
+                    for (int k = 0; k < D; ++k) {
+                        nbr[k] = node(pv.gn[k][sid]);
+                        sc[k] = pv.s[k][sid];
+                    }
+                    real detA;
+                    const VecTN<D> t =
+                      assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
+                    e_new += objective.value(t);
+                    mdet = std::min(detA, mdet);
+                }
+            }
+            const bool ok = std::isfinite(e_new) && (e_new <= e0 + tol::energy) &&
+                            objective.accept_mindet(mdet);
+            if (ok) {
+                cur = trial;
+                accepted = true;
+            } else {
+                alpha *= 0.5_r;
+            }
+        }
+        if (omega != 1.0_r) {
+            for (int k = 0; k < D; ++k) { cur[k] = pos[k] + (omega * (cur[k] - pos[k])); }
+        }
+        store_pt<D>(out, dof, cur);
+    });
+}
+
+/// @brief Plain SPD solve `M x = b` (K = 1 or 2), no Newton negation/fallback.
+///        Used for the param-space reduction `Δq = (JᵀJ)⁻¹ Jᵀδ` (§4.1), where
+///        `JᵀJ` is SPD; a near-singular Gram matrix (degenerate frame at a trim
+///        corner) returns 0 so the line search simply does not move that sweep.
+template <int K> inline VecN<K> spd_solve(const MatN<K>& M, const VecN<K>& b)
+{
+    if constexpr (K == 1) {
+        return VecN<1> {(std::fabs(M[0]) > tol::tiny) ? (b[0] / M[0]) : 0.0_r};
+    } else {
+        const real det = (M[0] * M[3]) - (M[1] * M[2]);
+        if (std::fabs(det) < tol::tiny) { return VecN<2> {0.0_r, 0.0_r}; }
+        const real inv = 1.0_r / det;
+        return VecN<2> {inv * ((M[3] * b[0]) - (M[1] * b[1])),
+                        inv * ((-M[2] * b[0]) + (M[0] * b[1]))};
+    }
+}
+
+/// @brief The converged foot parameter `q*` of @p p on @p param, warm-started from
+///        @p seed when the parametrization is iterative (B-spline `invert_seeded`),
+///        else the closed-form `invert`. Mirrors @ref project_with_seed but returns
+///        the **parameter** (not the projected point) — the param-space LS needs
+///        `q*` itself to backtrack in (u,v).
+template <int K, class P>
+inline Param<K> foot_param_seeded(const P& param, const PtN<P::edim>& p, const Param<K>& seed,
+                                  bool has_seed)
+{
+    if constexpr (requires { param.template invert_seeded<true>(p, seed, has_seed); }) {
+        return param.template invert_seeded<true>(p, seed, has_seed);
+    } else {
+        static_cast<void>(seed);
+        static_cast<void>(has_seed);
+        return param.invert(p);
+    }
+}
+
+/// @brief The converged foot `q*` **and** the raw tangent frame `J` at `q*`.
+///
+/// For an iterative B-spline foot, the frame is harvested from the last
+/// `newton_foot` `ders(nd=1)` (F2 Lever C) — saving the redundant `frame(q*)`
+/// re-evaluation in the param-LS kernel. For closed-form entities (no warm
+/// `invert_seeded` frame out-param) it falls back to `invert` + `frame(q*)`.
+template <int K, int D, class P>
+inline std::pair<Param<K>, std::array<VecN<D>, K>>
+  foot_and_frame_seeded(const P& param, const PtN<P::edim>& p, const Param<K>& seed, bool has_seed)
+{
+    std::array<VecN<D>, K> J {};
+    if constexpr (requires { param.template invert_seeded<true>(p, seed, has_seed, &J); }) {
+        const Param<K> q = param.template invert_seeded<true>(p, seed, has_seed, &J);
+        return {q, J};
+    } else {
+        const Param<K> q = foot_param_seeded<K>(param, p, seed, has_seed);
+        return {q, param.frame(q)};
+    }
+}
+
+/// @brief Warm boundary sweep kernel with **param-space line search** (§4.1 / S3).
+///
+/// Replaces the per-trial 3D reprojection of @ref sweep_colour_kernel's warm
+/// boundary path with: project ONCE to the foot parameter `q*`, reduce the
+/// tangent-space Newton step `δ_world = B y` to a parametric step
+/// `Δq = (JᵀJ)⁻¹ Jᵀ δ_world` (J = raw frame at `q*`, B = orthonormalize(J)), then
+/// backtrack `q_trial = trim.clamp(q* + αΔq)` with a **value-only** `param.eval`
+/// (de Boor nd=0). The heavy de Boor **derivative** rows (nd=1) are evaluated once
+/// (in `frame`/`invert_seeded`) instead of ≤10× per DOF in the backtracking loop.
+///
+/// Numerically this preserves the constraint exactly (every trial lands on the
+/// geometry via `eval`) and the Δq reduction is exact (`δ_world ∈ span(J)`); the
+/// only difference vs world-space LS is curvature at finite α — gated by the
+/// energy/sph_dev parity check (§7 step 3). Block-Jacobi warm path only (the cold
+/// s==0 pass stays the world-space @ref sweep_colour_kernel that seeds `q*`).
+template <int D, class Obj>
+inline void sweep_boundary_paramls_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X,
+                                          Obj objective, real* X_out, real omega, real* seeds)
+{
+    if (g.ndof == 0) { return; }
+    constexpr std::size_t kSeedStride = (D > 1) ? (D - 1) : 1;
+    const PartitionView* parts = g.partitions;
+    real* out = X_out ? X_out : X;
+    q.parallel_for(sycl::range<1>(g.ndof), [=](sycl::id<1> idx) {
+        const std::size_t d = idx[0];
+        const PatchViewT<D> pv = g.patch(d);
+        const int dof = g.dof_idx[d];
+        const PatchResultT<D> r = patch_eval<D>(pv, X, objective);
+        const PtN<D> pos = load_pt<D>(X, dof);
+        const PartitionView& part = parts[g.part_of[d]];
+        const auto row = static_cast<std::size_t>(g.row_of[d]);
+        real* seed_slot =
+          (seeds != nullptr) ? (seeds + (static_cast<std::size_t>(dof) * kSeedStride)) : nullptr;
+
+        PtN<D> cur = pos;
+        with_entity<D>(part.tag, part.soa_view, part.seg, row, [&](const auto& ent) {
+            using E = std::decay_t<decltype(ent)>;
+            if constexpr (requires {
+                              ent.param;
+                              ent.trim;
+                              E::tdim;
+                          }) {
+                constexpr int K = E::tdim;
+                // 1. Project once → foot q* AND the raw frame J at q*. The frame
+                //    is harvested from the projection's last de Boor nd=1 (F2
+                //    Lever C) instead of a redundant frame(q*) re-evaluation. q*
+                //    is written back to the seed slot (foot of the *old* position,
+                //    as today); the accepted trial is NOT written back.
+                Param<K> seed {};
+                const bool has = (seed_slot != nullptr) && std::isfinite(seed_slot[0]);
+                if (has) {
+                    for (int a = 0; a < K; ++a) { seed[a] = seed_slot[a]; }
+                }
+                const auto [qstar, J] = foot_and_frame_seeded<K, D>(ent.param, pos, seed, has);
+                if (seed_slot != nullptr) {
+                    for (int a = 0; a < K; ++a) { seed_slot[a] = qstar[a]; }
+                }
+                const std::array<VecN<D>, K> B = orthonormalize<D, K>(J);
+
+                // 3. Tangent-reduced Newton step δ_world = B y.
+                const VecN<D> delta = newton_step_from_basis<D, K>(r.grad, r.hess, B);
+
+                // 4. Reduce to a parametric step Δq = (JᵀJ)⁻¹ Jᵀ δ_world (exact,
+                //    since δ_world ∈ span(J)).
+                MatN<K> JtJ {};
+                VecN<K> Jtd {};
+                for (int a = 0; a < K; ++a) {
+                    for (int b = 0; b < K; ++b) {
+                        real s = 0.0_r;
+                        for (int i = 0; i < D; ++i) { s += J[a][i] * J[b][i]; }
+                        JtJ[(a * K) + b] = s;
+                    }
+                    real s2 = 0.0_r;
+                    for (int i = 0; i < D; ++i) { s2 += J[a][i] * delta[i]; }
+                    Jtd[a] = s2;
+                }
+                const VecN<K> dq = spd_solve<K>(JtJ, Jtd);
+
+                // 5. Param-space backtracking: q_trial = clamp(q* + αΔq), trial =
+                //    eval(q_trial) — a value-only (nd=0) de Boor, no reprojection.
+                real alpha = 1.0_r;
+                bool accepted = false;
+                for (int it = 0; it < 10 && !accepted; ++it) {
+                    Param<K> qt;
+                    for (int a = 0; a < K; ++a) { qt[a] = qstar[a] + (alpha * dq[a]); }
+                    qt = ent.trim.clamp(qt);
+                    const PtN<D> trial = ent.param.eval(qt);
+                    real e_new = 0.0_r;
+                    real mdet = std::numeric_limits<real>::infinity();
+                    for (int p = 0; p < pv.P; ++p) {
+                        auto node = [&](int ni) -> PtN<D> {
+                            return ni == dof ? trial : load_pt<D>(X, ni);
+                        };
+                        const int sid = pv.sample_id[p];  // shared-table index
+                        PtN<D> corner = node(pv.gc[sid]);
+                        std::array<PtN<D>, D> nbr;
+                        std::array<real, D> sc;
+                        for (int k = 0; k < D; ++k) {
+                            nbr[k] = node(pv.gn[k][sid]);
+                            sc[k] = pv.s[k][sid];
+                        }
+                        real detA;
+                        const VecTN<D> t =
+                          assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
+                        e_new += objective.value(t);
+                        mdet = std::min(detA, mdet);
+                    }
+                    const bool ok = std::isfinite(e_new) && (e_new <= r.energy + tol::energy) &&
+                                    objective.accept_mindet(mdet);
+                    if (ok) {
+                        cur = trial;
+                        accepted = true;
+                    } else {
+                        alpha *= 0.5_r;
+                    }
+                }
+            } else if constexpr (requires { ent.project(pos); }) {
+                // Bespoke closed-form entities (circle / line / arc / ellipse) have
+                // no param/trim parametric pipeline, so the param-space arm above
+                // skips them — which would freeze these boundary DOFs. Relax them
+                // with the world-space reprojection line search instead: a Newton
+                // step along the tangent, backtracking in world space with a cheap
+                // analytic reprojection per trial. (The free/interior entity's
+                // identity `project` also matches here, but free DOFs never enter
+                // this boundary group — they are relaxed by the dedicated kernel.)
+                const VecN<D> delta =
+                  newton_delta_with_seed<D, true>(r.grad, r.hess, pos, ent, seed_slot);
+                real alpha = 1.0_r;
+                bool accepted = false;
+                for (int it = 0; it < 10 && !accepted; ++it) {
+                    PtN<D> raw;
+                    for (int k = 0; k < D; ++k) { raw[k] = pos[k] + (alpha * delta[k]); }
+                    const PtN<D> trial = project_with_seed<D, true>(ent, raw, seed_slot);
+                    real e_new = 0.0_r;
+                    real mdet = std::numeric_limits<real>::infinity();
+                    for (int p = 0; p < pv.P; ++p) {
+                        auto node = [&](int ni) -> PtN<D> {
+                            return ni == dof ? trial : load_pt<D>(X, ni);
+                        };
+                        const int sid = pv.sample_id[p];  // shared-table index
+                        PtN<D> corner = node(pv.gc[sid]);
+                        std::array<PtN<D>, D> nbr;
+                        std::array<real, D> sc;
+                        for (int k = 0; k < D; ++k) {
+                            nbr[k] = node(pv.gn[k][sid]);
+                            sc[k] = pv.s[k][sid];
+                        }
+                        real detA;
+                        const VecTN<D> t = assemble_vecT<D>(
+                          corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
+                        e_new += objective.value(t);
+                        mdet = std::min(detA, mdet);
+                    }
+                    const bool ok = std::isfinite(e_new) && (e_new <= r.energy + tol::energy) &&
+                                    objective.accept_mindet(mdet);
+                    if (ok) {
+                        cur = trial;
+                        accepted = true;
+                    } else {
+                        alpha *= 0.5_r;
+                    }
+                }
+            }
+        });
+        if (omega != 1.0_r) {
+            for (int k = 0; k < D; ++k) { cur[k] = pos[k] + (omega * (cur[k] - pos[k])); }
+        }
         store_pt<D>(out, dof, cur);
     });
 }
@@ -825,18 +1516,37 @@ inline std::pair<std::vector<real>, std::vector<real>>
       static_cast<std::size_t>((n_sweeps + k - 1) / k);
     UsmBuffer<real> d_e(q, report_count);
     UsmBuffer<real> d_m(q, report_count);
+    // Colored-GS reads ctx.group_views(), which alias the per-group per-sample
+    // buffers. Building the merged block-Jacobi view frees those, so colored-GS
+    // must not follow block-Jacobi on the same executor instance.
+    assert(!ctx.per_group_released() &&
+           "colored-GS cannot run after block-Jacobi on the same executor (group_views_ was freed)");
     real* X = ctx.X();
+
+    // Per-node metric scratch for the interior B/C split (§4.5), keyed by global
+    // node id and reused across colours/sweeps (Kernel B overwrites before Kernel
+    // C reads). Only the interior split is mirrored to colored-GS — the boundary
+    // monomorphization stays block-Jacobi-only (§6: per-colour×per-type launches
+    // are the documented regression).
+    const std::size_t nn = ctx.num_nodes();
+    UsmBuffer<real> grad_buf(q, nn * D);
+    UsmBuffer<real> hess_buf(q, nn * D * D);
+    UsmBuffer<real> e0_buf(q, nn);
 
     constexpr int kSyncEvery = 32;
     std::size_t report_idx = 0;
     for (int s = 0; s < n_sweeps; ++s) {
         before_sweep(q, X);
-        // Per colour: lean interior launch over [0, n_free) then the full
-        // boundary launch over the tail. Within a colour all DOFs are distinct
-        // nodes, so the two launches over disjoint subsets are race-free
-        // (serialized by the in-order queue). Plan #1 step 4.
+        // Per colour: interior B/C split over [0, n_free) then the full boundary
+        // launch over the tail. Within a colour all DOFs are distinct nodes, so
+        // the launches over disjoint subsets are race-free (serialized by the
+        // in-order queue). Plan #1 step 4 + fission §4.5.
         for (const auto& gv : ctx.group_views()) {
-            sweep_colour_kernel<D, Obj, true>(q, gv.dof_subrange(0, gv.n_free), X, objective);
+            const GroupViewT<D> interior = gv.dof_subrange(0, gv.n_free);
+            metric_kernel<D, Obj>(q, interior, X, grad_buf.data(), hess_buf.data(), e0_buf.data(),
+                                  objective);
+            interior_update_kernel<D, Obj>(q, interior, X, nullptr, 1.0_r, grad_buf.data(),
+                                           hess_buf.data(), e0_buf.data(), objective);
             sweep_colour_kernel<D, Obj, false>(
               q, gv.dof_subrange(gv.n_free, gv.ndof - gv.n_free), X, objective);
         }
@@ -885,6 +1595,15 @@ inline std::pair<std::vector<real>, std::vector<real>>
     const std::size_t nbuf = ctx.x_size();
     UsmBuffer<real> x_new_buf(q, nbuf);
 
+    // Per-node metric scratch for the interior B/C split (§5). Sized to num_nodes
+    // and keyed by global node id so the same buffers serve the boundary launches
+    // too; written by Kernel B before Kernel C reads them every sweep, so no
+    // per-sweep memset is needed (stale slots are never read).
+    const std::size_t nn = ctx.num_nodes();
+    UsmBuffer<real> grad_buf(q, nn * D);
+    UsmBuffer<real> hess_buf(q, nn * D * D);
+    UsmBuffer<real> e0_buf(q, nn);
+
     real* canonical = ctx.X();
     real* x_in = canonical;
     real* x_out = x_new_buf.data();
@@ -896,24 +1615,35 @@ inline std::pair<std::vector<real>, std::vector<real>>
     std::size_t report_idx = 0;
     for (int s = 0; s < n_sweeps; ++s) {
         before_sweep(q, x_in);  // refresh ghosts + shared-node copies on the read buffer
-        // Interior/boundary split: the lean FreeOnly kernel over [0, n_free)
-        // (no projection, no seeds) and the full geometry kernel over the
-        // boundary tail. Both read the frozen x_in and write disjoint x_out
-        // slots, so block-Jacobi correctness is preserved. Plan #1 step 4.
-        sweep_colour_kernel<D, Obj, true>(
-          q, mg.dof_subrange(0, mg.n_free), x_in, objective, x_out, omega, nullptr);
+        // Interior B/C split (§4.5): Kernel B writes (grad, hess, e0) per node,
+        // Kernel C reads them back and does the Newton solve + backtracking. Both
+        // run over [0, n_free) and read the frozen x_in; C writes disjoint x_out
+        // slots, so block-Jacobi correctness is preserved. The metric and solve
+        // working sets now live in separate kernels (144 → ~88 + ~80 VGPR).
+        const GroupViewT<D> interior = mg.dof_subrange(0, mg.n_free);
+        metric_kernel<D, Obj>(q, interior, x_in, grad_buf.data(), hess_buf.data(), e0_buf.data(),
+                              objective);
+        interior_update_kernel<D, Obj>(q, interior, x_in, x_out, omega, grad_buf.data(),
+                                       hess_buf.data(), e0_buf.data(), objective);
         // Boundary cold/warm split: the first sweep runs the robust cold kernel
         // (8×8 grid + exact Newton nd=2) to project the topologically-placed nodes
         // onto the geometry and populate the warm-seed cache; every subsequent
         // sweep runs the lean warm kernel (GN nd=1, no grid / no nd=2 → the heavy
-        // de Boor second-order rows stay out of the hot kernel).
+        // de Boor second-order rows stay out of the hot kernel). NB: per-entity
+        // monomorphization of this boundary kernel was measured to REGRESS it (the
+        // BSpline arm alone is 208 VGPR vs the union's 184 — the runtime switch is
+        // actually more register-efficient than the isolated heavy arm — plus a
+        // per-colour launch explosion), so the boundary stays one union kernel.
         const GroupViewT<D> bndry = mg.dof_subrange(mg.n_free, mg.ndof - mg.n_free);
         if (s == 0) {
             sweep_colour_kernel<D, Obj, false, false>(q, bndry, x_in, objective, x_out, omega,
                                                       ctx.seeds());
         } else {
-            sweep_colour_kernel<D, Obj, false, true>(q, bndry, x_in, objective, x_out, omega,
-                                                     ctx.seeds());
+            // Warm path: param-space line search (§4.1 / S3) — project once to the
+            // foot q*, backtrack in (u,v) with value-only de Boor instead of
+            // reprojecting every trial.
+            sweep_boundary_paramls_kernel<D, Obj>(q, bndry, x_in, objective, x_out, omega,
+                                                  ctx.seeds());
         }
         if ((s + 1) % k == 0 || s == n_sweeps - 1) {
             reduce_energy_mindet<D>(q, ctx.stencil_view(), x_out,
