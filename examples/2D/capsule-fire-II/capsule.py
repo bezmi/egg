@@ -56,24 +56,28 @@ def build_paths():
     return outer, body, south, north
 
 
-def build_capsule(res_i=20, res_j=20, bl_first_height=0.0, bl_growth=1.3,
-                  n_fixed=0):
+def build_capsule(res_i=20, res_j=20, bl_first_height=0.0, bl_growth=1.3, n_fixed=0):
     """3 x 12 block array between the capsule body and the outer arc."""
     outer, body, south, north = build_paths()
 
     # Grid edges (axis 0 = inflow -> wall, axis 1 = along the body).
-    inflow = Edge(outer)                       # west, symmetry -> outflow
-    wall = Edge(body, arc_length=True)         # east, symmetry -> outflow
-    symmetry = Edge(south)                     # south, inflow -> wall
-    outflow = Edge(north)                      # north, inflow -> wall
+    inflow = Edge(outer)  # west, symmetry -> outflow
+    wall = Edge(body, arc_length=True)  # east, symmetry -> outflow
+    symmetry = Edge(south)  # south, inflow -> wall
+    outflow = Edge(north)  # north, inflow -> wall
 
     nib, njb = 3, 12
     b = TopologyBuilder(d=2)
     # Sub-block corners on the bounding paths (TFI inside), blocks from the
     # shared corner objects, boundary faces associated with their edges.
     _corner, names = b.add_block_array(
-        south=symmetry, north=outflow, west=inflow, east=wall,
-        nib=nib, njb=njb, res=(nib * res_i, njb * res_j),
+        south=symmetry,
+        north=outflow,
+        west=inflow,
+        east=wall,
+        nib=nib,
+        njb=njb,
+        res=(nib * res_i, njb * res_j),
     )
     for j in range(njb):
         b.tag_boundary("inflow", names[0][j], 0, 0)
@@ -88,8 +92,11 @@ def build_capsule(res_i=20, res_j=20, bl_first_height=0.0, bl_growth=1.3,
         # (and so a slanted outflow, as in the gdtk original, keeps its
         # layer heights).
         b.set_boundary_layer(
-            wall, first_height=bl_first_height, growth=bl_growth,
-            n_fixed=n_fixed, relax_orthogonality=(outflow,),
+            wall,
+            first_height=bl_first_height,
+            growth=bl_growth,
+            n_fixed=n_fixed,
+            relax_orthogonality=(outflow,),
         )
 
     topology = b.build()
@@ -138,8 +145,15 @@ def main():
     )
     steps = generate_steps(grid, target, cfg, untangle_direct=not a.plot_live)
 
-    finish(grid, topo, ents, steps, a, title="FIRE II capsule",
-           mindet_title="min det A (TMOP only)")
+    finish(
+        grid,
+        topo,
+        ents,
+        steps,
+        a,
+        title="FIRE II capsule",
+        mindet_title="min det A (TMOP only)",
+    )
 
 
 if __name__ == "__main__":

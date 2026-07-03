@@ -28,7 +28,7 @@ template <int D> struct PatchViewT {
     const int* gc;         // shared-table base; read gc[sample_id[p]]
     const int* gn[D];
     const std::int8_t* s[D];  // per-axis sign ±1; stored as int8, widened on read
-    const real* W_inv;  // shared-table base; row sample_id[p] is dim::wInv(D) wide
+    const real* W_inv;        // shared-table base; row sample_id[p] is dim::wInv(D) wide
     // Row stride into W_inv (dim::wInv(D) normally). A uniform W_inv table (every
     // sample shares one row, e.g. an identity target) is stored as a single row
     // with stride 0, so every sample reads row 0; the read site multiplies the
@@ -101,8 +101,7 @@ template <class V> inline int table_index(const V& sv, int p)
 
 /// vec(T) and det(A) for sample p, read from the flat node array through the
 /// view's gc/gn[] indices. Generic over any view exposing gc/gn[]/s[]/W_inv.
-template <int D, class V>
-inline VecTN<D> sample_vecT(const V& sv, const real* X, int p, real& detA)
+template <int D, class V> inline VecTN<D> sample_vecT(const V& sv, const real* X, int p, real& detA)
 {
     const PtN<D> corner = load_pt<D>(X, sv.gc[p]);
     std::array<PtN<D>, D> nbr;
@@ -123,8 +122,8 @@ inline VecTN<D> sample_vecT(const V& sv, const real* X, int p, real& detA)
 /// Patch energy (Σμ) and min det(A) — the cheap trial path (mirrors
 /// batch.energy_and_mindet).
 template <int D, class V, ObjectiveD<D> M = ShapeObjectiveT<D>>
-inline void patch_energy_mindet(
-  const V& sv, const real* X, real& energy, real& mindet, M objective = {})
+inline void
+  patch_energy_mindet(const V& sv, const real* X, real& energy, real& mindet, M objective = {})
 {
     energy = 0.0_r;
     mindet = std::numeric_limits<real>::infinity();

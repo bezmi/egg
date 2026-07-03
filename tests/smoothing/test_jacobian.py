@@ -43,9 +43,7 @@ class TestJacobian:
                     nodes[i, j, k, 1] = 0.3 * i + 1.5 * j + 0.1 * k
                     nodes[i, j, k, 2] = -0.1 * i + 0.2 * j + 2.0 * k
 
-        A_analytic = np.array(
-            [[2.0, 0.5, -0.2], [0.3, 1.5, 0.1], [-0.1, 0.2, 2.0]]
-        )
+        A_analytic = np.array([[2.0, 0.5, -0.2], [0.3, 1.5, 0.1], [-0.1, 0.2, 2.0]])
 
         for i in range(ni - 1):
             for j in range(nj - 1):

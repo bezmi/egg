@@ -102,8 +102,7 @@ template <class T> struct SegmentedView {
 
 /// Non-owning (count, kFields) mdspan over packed per-entity records; device-
 /// safe and trivially copyable. Row i = entity i's kFields contiguous reals.
-template <class T>
-using SoAView = stdex::mdspan<T, stdex::dextents<std::size_t, 2>>;
+template <class T> using SoAView = stdex::mdspan<T, stdex::dextents<std::size_t, 2>>;
 
 /// Max segmented (CSR) fields any EntitySoA<E> uses — sized for
 /// BSplineSurfaceParam (knots_u, knots_v, ctrl, weights).

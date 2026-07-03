@@ -85,16 +85,25 @@ def build_phoebus(grid_level: int = 1, n_fixed: int = 1):
     # Sub-block corners on the bounding edges (TFI inside), blocks from the
     # shared corner objects, boundary faces associated with their edges.
     bld.add_block_array(
-        south=symm, north=outflow, west=inflow, east=wall,
-        nib=2, njb=4, res=(n_wall_normal, n_along_wall),
+        south=symm,
+        north=outflow,
+        west=inflow,
+        east=wall,
+        nib=2,
+        njb=4,
+        res=(n_wall_normal, n_along_wall),
     )
 
     # The outflow meets the wall obliquely; relaxing orthogonality towards it
     # lets the clustering target follow it with sheared cells instead of
     # trading away the near-wall layer heights.
     bld.set_boundary_layer(
-        wall, first_height=H_WALL, growth=BL_GROWTH, n_fixed=n_fixed,
-        relax_orthogonality=(outflow,))
+        wall,
+        first_height=H_WALL,
+        growth=BL_GROWTH,
+        n_fixed=n_fixed,
+        relax_orthogonality=(outflow,),
+    )
 
     topology = bld.build()
     entities = {

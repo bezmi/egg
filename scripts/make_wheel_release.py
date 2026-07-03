@@ -117,8 +117,17 @@ def repair_wheel(wheel: Path, out_dir: Path, excludes: list[str]) -> Path:
     ``linux_x86_64``-tagged) wheel is removed, leaving only the portable one.
     """
     before = set(out_dir.glob("*.whl"))
-    cmd = ["uv", "tool", "run", "--with", "patchelf", "auditwheel", "repair",
-           "--wheel-dir", str(out_dir)]
+    cmd = [
+        "uv",
+        "tool",
+        "run",
+        "--with",
+        "patchelf",
+        "auditwheel",
+        "repair",
+        "--wheel-dir",
+        str(out_dir),
+    ]
     for lib in excludes:
         cmd += ["--exclude", lib]
     cmd.append(str(wheel))
@@ -176,9 +185,10 @@ def inject_countdown(wheel: Path, notice: str) -> str:
     # Rewrite the archive: copy every entry except RECORD/our file, then append
     # our file and the updated RECORD (RECORD must come last by convention).
     tmp = wheel.with_name(wheel.name + ".tmp")
-    with zipfile.ZipFile(wheel) as zin, zipfile.ZipFile(
-        tmp, "w", zipfile.ZIP_DEFLATED
-    ) as zout:
+    with (
+        zipfile.ZipFile(wheel) as zin,
+        zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
         for item in zin.infolist():
             if item.filename in (record_name, arcname):
                 continue
@@ -194,15 +204,39 @@ def inject_countdown(wheel: Path, notice: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--years", type=int, default=4, help="years until AGPL conversion (default: 4)")
-    parser.add_argument("--components", default="core;cuda;hip", help="acpp deploy components (default: core;cuda;hip)")
-    parser.add_argument("--acpp-dir", default=None, help="AdaptiveCpp CMake config dir (default: autodetect)")
-    parser.add_argument("--out-dir", default="dist/wheel", help="output directory (default: dist/wheel)")
-    parser.add_argument("--skip-repair", action="store_true",
-                        help="skip the auditwheel repair step (produces a non-portable linux_x86_64 wheel)")
-    parser.add_argument("--exclude", action="append", default=None, metavar="LIB",
-                        help=f"library to leave host-provided instead of bundling (repeatable; default: {' '.join(DEFAULT_EXCLUDES)})")
-    parser.add_argument("--ref", default="HEAD", help="git ref whose date sets the Countdown clock (default: HEAD)")
+    parser.add_argument(
+        "--years", type=int, default=4, help="years until AGPL conversion (default: 4)"
+    )
+    parser.add_argument(
+        "--components",
+        default="core;cuda;hip",
+        help="acpp deploy components (default: core;cuda;hip)",
+    )
+    parser.add_argument(
+        "--acpp-dir",
+        default=None,
+        help="AdaptiveCpp CMake config dir (default: autodetect)",
+    )
+    parser.add_argument(
+        "--out-dir", default="dist/wheel", help="output directory (default: dist/wheel)"
+    )
+    parser.add_argument(
+        "--skip-repair",
+        action="store_true",
+        help="skip the auditwheel repair step (produces a non-portable linux_x86_64 wheel)",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=None,
+        metavar="LIB",
+        help=f"library to leave host-provided instead of bundling (repeatable; default: {' '.join(DEFAULT_EXCLUDES)})",
+    )
+    parser.add_argument(
+        "--ref",
+        default="HEAD",
+        help="git ref whose date sets the Countdown clock (default: HEAD)",
+    )
     args = parser.parse_args()
 
     os.chdir(Path(git("rev-parse", "--show-toplevel")))
@@ -213,14 +247,23 @@ def main() -> None:
     start_date = add_years(release_date, args.years)
     notice = build_countdown_notice(start_date)
 
-    if args.ref == "HEAD" and subprocess.run(["git", "diff", "--quiet", "HEAD"]).returncode:
-        print("warning: working tree is dirty; the wheel is built from it but the "
-              "Countdown date uses HEAD's commit date", file=sys.stderr)
+    if (
+        args.ref == "HEAD"
+        and subprocess.run(["git", "diff", "--quiet", "HEAD"]).returncode
+    ):
+        print(
+            "warning: working tree is dirty; the wheel is built from it but the "
+            "Countdown date uses HEAD's commit date",
+            file=sys.stderr,
+        )
 
     out_dir = Path(args.out_dir)
     acpp_dir = detect_acpp_dir(args.acpp_dir)
     if acpp_dir is None:
-        print("note: AdaptiveCpp_DIR not set; relying on CMAKE_PREFIX_PATH", file=sys.stderr)
+        print(
+            "note: AdaptiveCpp_DIR not set; relying on CMAKE_PREFIX_PATH",
+            file=sys.stderr,
+        )
 
     wheel = build_wheel(out_dir, args.components, acpp_dir)
     if not args.skip_repair:
@@ -234,7 +277,9 @@ def main() -> None:
     print(f"  wheel:         {wheel}")
     print(f"  checksum:      {wheel}.sha256")
     print(f"  components:    {args.components}")
-    print(f"  repaired:      {'no (--skip-repair)' if args.skip_repair else 'yes (auditwheel)'}")
+    print(
+        f"  repaired:      {'no (--skip-repair)' if args.skip_repair else 'yes (auditwheel)'}"
+    )
     print(f"  countdown:     {arcname}")
     print(f"  release date:  {release_date.isoformat()}")
     print(f"  AGPL-3.0 from: {start_date.isoformat()} (release date + {args.years}y)")

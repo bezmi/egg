@@ -58,7 +58,8 @@ template <int D> class BlockTopologyDevice
     ///                     double offsets (singular-fan neighbours mirrored into
     ///                     spare ghost-ring slots; appended to the ghost halo).
     /// @param fan_dst_off  (F,) destination ghost double offsets for the above.
-    BlockTopologyDevice(sycl::queue q, const BlockLayout<D>& layout,
+    BlockTopologyDevice(sycl::queue q,
+                        const BlockLayout<D>& layout,
                         const std::vector<int>& src_block,
                         const std::vector<Index>& src_padded,
                         const std::vector<int>& dst_block,
@@ -74,10 +75,10 @@ template <int D> class BlockTopologyDevice
     {
         std::vector<std::size_t> hsrc(n_entries_), hdst(n_entries_);
         for (std::size_t e = 0; e < src_block.size(); ++e) {
-            hsrc[e] = layout.padded_node_offset(static_cast<std::size_t>(src_block[e]),
-                                                src_padded[e]);
-            hdst[e] = layout.padded_node_offset(static_cast<std::size_t>(dst_block[e]),
-                                                dst_padded[e]);
+            hsrc[e] =
+              layout.padded_node_offset(static_cast<std::size_t>(src_block[e]), src_padded[e]);
+            hdst[e] =
+              layout.padded_node_offset(static_cast<std::size_t>(dst_block[e]), dst_padded[e]);
         }
         // Singular-fan mirrors come pre-resolved to offsets (the host allocated
         // their spare ghost slots), so they simply extend the ghost halo table.
@@ -96,8 +97,8 @@ template <int D> class BlockTopologyDevice
 
         std::vector<std::size_t> hsing(n_sing_);
         for (std::size_t s = 0; s < n_sing_; ++s) {
-            hsing[s] = layout.interior_node_offset(static_cast<std::size_t>(sing_block[s]),
-                                                   sing_logical[s]);
+            hsing[s] =
+              layout.interior_node_offset(static_cast<std::size_t>(sing_block[s]), sing_logical[s]);
         }
         sing_off_ = UsmBuffer<std::size_t> {q, hsing};
     }
@@ -129,8 +130,8 @@ template <int D> class BlockTopologyDevice
 /// halo and the shared-node broadcast — they differ only in which offset tables
 /// they pass. Returns the launch event (empty if `count == 0`).
 template <int D>
-inline sycl::event copy_nodes(sycl::queue& q, real* buf, const std::size_t* src,
-                              const std::size_t* dst, std::size_t count)
+inline sycl::event copy_nodes(
+  sycl::queue& q, real* buf, const std::size_t* src, const std::size_t* dst, std::size_t count)
 {
     if (count == 0) { return {}; }
     return q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> idx) {
@@ -144,22 +145,16 @@ inline sycl::event copy_nodes(sycl::queue& q, real* buf, const std::size_t* src,
 /// Fill every destination ghost slot with its source interior node's D
 /// coordinates (the cross-block halo, interior -> ghost).
 template <int D>
-inline sycl::event halo_exchange(sycl::queue& q, real* buf,
-                                 const BlockTopologyDevice<D>& topo)
-{
-    return copy_nodes<D>(q, buf, topo.src_off(), topo.dst_off(), topo.num_entries());
-}
+inline sycl::event halo_exchange(sycl::queue& q, real* buf, const BlockTopologyDevice<D>& topo)
+{ return copy_nodes<D>(q, buf, topo.src_off(), topo.dst_off(), topo.num_entries()); }
 
 /// Refresh every non-owner copy of a shared interface node from its owner block
 /// (interior -> interior). Runs alongside @ref halo_exchange before each sweep;
 /// the two write disjoint slots (ghost shell vs. non-owner interior) and read
 /// genuinely-interior sources, so their order is immaterial.
 template <int D>
-inline sycl::event broadcast_shared(sycl::queue& q, real* buf,
-                                    const BlockTopologyDevice<D>& topo)
-{
-    return copy_nodes<D>(q, buf, topo.share_src_off(), topo.share_dst_off(), topo.num_share());
-}
+inline sycl::event broadcast_shared(sycl::queue& q, real* buf, const BlockTopologyDevice<D>& topo)
+{ return copy_nodes<D>(q, buf, topo.share_src_off(), topo.share_dst_off(), topo.num_share()); }
 
 /// Fused halo exchange + shared-node broadcast in one launch (saves a launch
 /// per sweep). Behaviour-preserving per the disjointness argument on
@@ -167,8 +162,8 @@ inline sycl::event broadcast_shared(sycl::queue& q, real* buf,
 /// all-halo and all-share work-groups run straight paths, at most one
 /// work-group straddles the boundary.
 template <int D>
-inline sycl::event fused_halo_broadcast(sycl::queue& q, real* buf,
-                                        const BlockTopologyDevice<D>& topo)
+inline sycl::event
+  fused_halo_broadcast(sycl::queue& q, real* buf, const BlockTopologyDevice<D>& topo)
 {
     const std::size_t n_halo = topo.num_entries();
     const std::size_t n_share = topo.num_share();

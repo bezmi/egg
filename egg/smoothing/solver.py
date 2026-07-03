@@ -148,27 +148,38 @@ def build_sweep_context(
         sids = m_sid[lo:hi]
         P = int(sids.shape[0])
         patch = {
-            "gc": en_gc[sids], "gn0": en_gn0[sids], "gn1": en_gn1[sids],
-            "s0": en_s0[sids], "s1": en_s1[sids],
+            "gc": en_gc[sids],
+            "gn0": en_gn0[sids],
+            "gn1": en_gn1[sids],
+            "s0": en_s0[sids],
+            "s1": en_s1[sids],
             "W_inv": samp_w_inv[sids] if P else np.zeros((0, 2, 2)),
             "role": m_role[lo:hi],
         }
-        patch["J"] = _batch.make_chain_J(
-            patch["s0"], patch["s1"], patch["W_inv"],
-        ) if P > 0 else np.zeros((0, 4, 6))
+        patch["J"] = (
+            _batch.make_chain_J(
+                patch["s0"],
+                patch["s1"],
+                patch["W_inv"],
+            )
+            if P > 0
+            else np.zeros((0, 4, 6))
+        )
         dof_patches.append(patch)
 
     energy_stencil = {
-        "gc": en_gc, "gn0": en_gn0, "gn1": en_gn1,
-        "s0": en_s0, "s1": en_s1,
+        "gc": en_gc,
+        "gn0": en_gn0,
+        "gn1": en_gn1,
+        "s0": en_s0,
+        "s1": en_s1,
         "W_inv": samp_w_inv if ns else np.zeros((0, 2, 2)),
     }
 
     dof_patch_sizes = [dof_patches[dof]["gc"].shape[0] for dof in range(M)]
     # The single block-Jacobi group: every moving DOF that owns a cell.
     free_dofs = np.array(
-        [dof for dof in range(M)
-         if grid.free_mask[dof] and dof_patch_sizes[dof] > 0],
+        [dof for dof in range(M) if grid.free_mask[dof] and dof_patch_sizes[dof] > 0],
         dtype=np.int64,
     )
 
@@ -186,16 +197,29 @@ def build_sweep_context(
     # The C++ wire comes from the single dimension-generic builder, fed the same
     # per-sample target inverse (samp_w_inv) this function already computed.
     from egg.smoothing.flat_context import build_flat_context
+
     wire = build_flat_context(
         [np.asarray(dm) for dm in grid.block_dof_maps],
-        grid.free_mask, dict(grid.dof_constraints), d, w_inv=samp_w_inv)
+        grid.free_mask,
+        dict(grid.dof_constraints),
+        d,
+        w_inv=samp_w_inv,
+    )
 
     return SweepContext(
-        dof_to_cells, dof_to_locals, w_inv, dof_patches, energy_stencil,
-        dof_patch_sizes, free_dofs,
-        dof_constraint_tags, dof_constraint_params,
+        dof_to_cells,
+        dof_to_locals,
+        w_inv,
+        dof_patches,
+        energy_stencil,
+        dof_patch_sizes,
+        free_dofs,
+        dof_constraint_tags,
+        dof_constraint_params,
         np.asarray(arena, dtype=np.float64),
-        dict(grid.dof_constraints), d=d, wire=wire,
+        dict(grid.dof_constraints),
+        d=d,
+        wire=wire,
     )
 
 
@@ -213,8 +237,13 @@ def _patch_grad_hess(
     patch = ctx.dof_patches[dof_idx]
     return _batch.dof_grad_hess(
         grid.global_nodes,
-        patch["gc"], patch["gn0"], patch["gn1"],
-        patch["s0"], patch["s1"], patch["W_inv"], patch["role"],
+        patch["gc"],
+        patch["gn0"],
+        patch["gn1"],
+        patch["s0"],
+        patch["s1"],
+        patch["W_inv"],
+        patch["role"],
         patch["J"],
     )
 
@@ -232,6 +261,10 @@ def _patch_energy_and_mindet(
     patch = ctx.dof_patches[dof_idx]
     return _batch.energy_and_mindet(
         grid.global_nodes,
-        patch["gc"], patch["gn0"], patch["gn1"],
-        patch["s0"], patch["s1"], patch["W_inv"],
+        patch["gc"],
+        patch["gn0"],
+        patch["gn1"],
+        patch["s0"],
+        patch["s1"],
+        patch["W_inv"],
     )

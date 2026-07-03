@@ -26,17 +26,17 @@ namespace egg
 /// multiple of D — so `patch_eval(buf, …)` reading `buf[D*i + k]` lands exactly
 /// on that node's coordinates.
 template <int D>
-[[nodiscard]] inline int padded_node_index(const BlockLayout<D>& layout, std::size_t b,
+[[nodiscard]] inline int padded_node_index(const BlockLayout<D>& layout,
+                                           std::size_t b,
                                            const std::array<std::size_t, D>& padded_idx)
-{
-    return static_cast<int>(layout.padded_node_offset(b, padded_idx) / static_cast<std::size_t>(D));
-}
+{ return static_cast<int>(layout.padded_node_offset(b, padded_idx) / static_cast<std::size_t>(D)); }
 
 /// Flat node index of an INTERIOR node (logical index in `[0, n_k)`), shifted
 /// +1 per axis into the padded array. The structured analogue of a global DOF id
 /// for patch_eval's gc/gn over a BlockField buffer.
 template <int D>
-[[nodiscard]] inline int interior_node_index(const BlockLayout<D>& layout, std::size_t b,
+[[nodiscard]] inline int interior_node_index(const BlockLayout<D>& layout,
+                                             std::size_t b,
                                              const std::array<std::size_t, D>& logical_idx)
 {
     return static_cast<int>(layout.interior_node_offset(b, logical_idx) /
@@ -79,8 +79,13 @@ template <int D> struct InteriorOccurrence {
 /// This is the single source the host (BlockLayout) and device (flat stride
 /// arrays) callers share; only `idx` differs. Pure integer/sign math, no reads.
 template <int D, class IdxFn>
-inline void interior_occurrence_raw(int occ, const int (&logical)[D], const IdxFn& idx, int& gc,
-                                    int (&gn)[D], real (&s)[D], int& role)
+inline void interior_occurrence_raw(int occ,
+                                    const int (&logical)[D],
+                                    const IdxFn& idx,
+                                    int& gc,
+                                    int (&gn)[D],
+                                    real (&s)[D],
+                                    int& role)
 {
     constexpr int kC = 1 << D;  // corners(D)
     const int cell_bits = occ / kC;
@@ -121,15 +126,16 @@ inline void interior_occurrence_raw(int occ, const int (&logical)[D], const IdxF
 /// Valid when `logical`'s whole 4^D patch stays inside block `b` (each axis index
 /// in `[1, interior_shape - 2]`, so every corner resolves without a ghost slot).
 template <int D>
-[[nodiscard]] inline InteriorOccurrence<D>
-  interior_patch_occurrence(const BlockLayout<D>& layout, std::size_t b,
-                            const std::array<std::size_t, D>& logical, int occ)
+[[nodiscard]] inline InteriorOccurrence<D> interior_patch_occurrence(
+  const BlockLayout<D>& layout, std::size_t b, const std::array<std::size_t, D>& logical, int occ)
 {
     int li[D];
     for (int k = 0; k < D; ++k) { li[k] = static_cast<int>(logical[static_cast<std::size_t>(k)]); }
     const auto idx = [&](const int (&l)[D]) {
         std::array<std::size_t, D> a;
-        for (int k = 0; k < D; ++k) { a[static_cast<std::size_t>(k)] = static_cast<std::size_t>(l[k]); }
+        for (int k = 0; k < D; ++k) {
+            a[static_cast<std::size_t>(k)] = static_cast<std::size_t>(l[k]);
+        }
         return interior_node_index<D>(layout, b, a);
     };
     InteriorOccurrence<D> out {};
@@ -143,8 +149,8 @@ template <int D>
 /// `block_off` the per-block node base, both packed per block. Lets a kernel
 /// resolve a synthesized stencil node without a host BlockLayout.
 template <int D>
-[[nodiscard]] inline int dev_node_index(const int* block_off, const int* nstride, int b,
-                                       const int (&logical)[D])
+[[nodiscard]] inline int
+  dev_node_index(const int* block_off, const int* nstride, int b, const int (&logical)[D])
 {
     int idx = block_off[b];
     for (int k = 0; k < D; ++k) { idx += (logical[k] + 1) * nstride[(b * D) + k]; }
@@ -159,8 +165,12 @@ template <int D>
 /// Valid only for DOFs the structured build flagged interior-eligible: their
 /// stored patch reproduces this occurrence for occurrence with identity W_inv.
 template <int D, ObjectiveD<D> M = ShapeObjectiveT<D>>
-inline PatchResultT<D> patch_eval_synth(const int* block_off, const int* nstride, int b,
-                                        const int (&logical)[D], const real* X, M objective = {})
+inline PatchResultT<D> patch_eval_synth(const int* block_off,
+                                        const int* nstride,
+                                        int b,
+                                        const int (&logical)[D],
+                                        const real* X,
+                                        M objective = {})
 {
     real wI[D * D];
     for (int i = 0; i < D * D; ++i) { wI[i] = 0.0_r; }
@@ -200,9 +210,16 @@ inline PatchResultT<D> patch_eval_synth(const int* block_off, const int* nstride
 /// only the scalar energy and det are needed, so the role/grad/hess work is
 /// skipped. Mirrors the stored trial loop in the interior update kernel.
 template <int D, class Obj>
-inline void synth_trial_energy_mindet(const int* block_off, const int* nstride, int b,
-                                      const int (&logical)[D], const real* X, int dof,
-                                      const PtN<D>& trial, Obj& objective, real& e_new, real& mdet)
+inline void synth_trial_energy_mindet(const int* block_off,
+                                      const int* nstride,
+                                      int b,
+                                      const int (&logical)[D],
+                                      const real* X,
+                                      int dof,
+                                      const PtN<D>& trial,
+                                      Obj& objective,
+                                      real& e_new,
+                                      real& mdet)
 {
     real wI[D * D];
     for (int i = 0; i < D * D; ++i) { wI[i] = 0.0_r; }

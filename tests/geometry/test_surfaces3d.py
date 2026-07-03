@@ -22,8 +22,9 @@ class TestPlane:
         np.testing.assert_allclose(ts.T @ ts, np.eye(2), atol=1e-14)
 
     def test_normal_is_az(self, plane):
-        np.testing.assert_allclose(plane.normal(np.array([1.0, 1.0, 0.0])),
-                                   [0.0, 0.0, 1.0], atol=1e-14)
+        np.testing.assert_allclose(
+            plane.normal(np.array([1.0, 1.0, 0.0])), [0.0, 0.0, 1.0], atol=1e-14
+        )
 
     def test_arbitrary_frame_is_orthonormalized(self):
         pl = Plane((1, 1, 1), (1, 1, 0), (0, 1, 1))
@@ -35,8 +36,9 @@ class TestPlane:
 class TestSphere:
     @pytest.fixture
     def sphere(self):
-        return Sphere(center=(0.0, 0.0, 0.0), radius=1.0,
-                      ax=(1.0, 0.0, 0.0), ay=(0.0, 1.0, 0.0))
+        return Sphere(
+            center=(0.0, 0.0, 0.0), radius=1.0, ax=(1.0, 0.0, 0.0), ay=(0.0, 1.0, 0.0)
+        )
 
     def test_project_is_radial(self, sphere):
         pr = sphere.project(np.array([4.0, 4.0, 5.0]))
@@ -60,8 +62,9 @@ class TestSphere:
 class TestCylinder:
     @pytest.fixture
     def cylinder(self):
-        return Cylinder(origin=(0.0, 0.0, 0.0), ax=(1.0, 0.0, 0.0),
-                        ay=(0.0, 1.0, 0.0), radius=1.0)
+        return Cylinder(
+            origin=(0.0, 0.0, 0.0), ax=(1.0, 0.0, 0.0), ay=(0.0, 1.0, 0.0), radius=1.0
+        )
 
     def test_project_onto_surface(self, cylinder):
         pr = cylinder.project(np.array([4.0, 0.0, 5.0]))
@@ -93,8 +96,9 @@ class TestLine3:
     def test_tangent_space(self, line):
         ts = line.tangent_space(np.array([0.0, 0.0, 0.0]))
         assert ts.shape == (3, 1)
-        np.testing.assert_allclose(ts, [[1/np.sqrt(2)], [1/np.sqrt(2)], [0.0]],
-                                   atol=1e-14)
+        np.testing.assert_allclose(
+            ts, [[1 / np.sqrt(2)], [1 / np.sqrt(2)], [0.0]], atol=1e-14
+        )
 
 
 class TestBSplineSurfacePolynomial:
@@ -102,10 +106,12 @@ class TestBSplineSurfacePolynomial:
     def bilinear(self):
         ku = np.array([0, 0, 1, 1])
         kv = np.array([0, 0, 1, 1])
-        ctrl = np.array([
-            [[0, 0, 0], [0, 1, 0]],
-            [[2, 0, 0], [2, 1, 0]],
-        ])
+        ctrl = np.array(
+            [
+                [[0, 0, 0], [0, 1, 0]],
+                [[2, 0, 0], [2, 1, 0]],
+            ]
+        )
         return BSplineSurface(1, 1, ku, kv, ctrl)
 
     def test_eval_bilinear(self, bilinear):
@@ -137,12 +143,14 @@ class TestBSplineSurfaceNURBS:
         """Rational quadratic NURBS quarter-cylinder: radius 2, axis z, 0≤z≤1."""
         ku = np.array([0, 0, 0, 1, 1, 1])
         kv = np.array([0, 0, 1, 1])
-        ctrl = np.array([
-            [[2, 0, 0], [2, 0, 1]],
-            [[2, 2, 0], [2, 2, 1]],
-            [[0, 2, 0], [0, 2, 1]],
-        ])
-        w = np.array([[1, 1], [1/np.sqrt(2), 1/np.sqrt(2)], [1, 1]])
+        ctrl = np.array(
+            [
+                [[2, 0, 0], [2, 0, 1]],
+                [[2, 2, 0], [2, 2, 1]],
+                [[0, 2, 0], [0, 2, 1]],
+            ]
+        )
+        w = np.array([[1, 1], [1 / np.sqrt(2), 1 / np.sqrt(2)], [1, 1]])
         return BSplineSurface(2, 1, ku, kv, ctrl, weights=w)
 
     def test_lies_exactly_on_the_cylinder(self, quarter_cylinder):
@@ -154,8 +162,9 @@ class TestBSplineSurfaceNURBS:
     def test_clamped_ends_interpolate_control_points(self, quarter_cylinder):
         np.testing.assert_allclose(quarter_cylinder.eval(0.0, 0.0), [2, 0, 0])
         np.testing.assert_allclose(quarter_cylinder.eval(1.0, 0.0), [0, 2, 0])
-        np.testing.assert_allclose(quarter_cylinder.eval(0.5, 1.0),
-                                   [np.sqrt(2), np.sqrt(2), 1.0])
+        np.testing.assert_allclose(
+            quarter_cylinder.eval(0.5, 1.0), [np.sqrt(2), np.sqrt(2), 1.0]
+        )
 
     def test_projection_onto_surface(self, quarter_cylinder):
         q = np.array([np.sqrt(2), np.sqrt(2), 0.5])
@@ -171,10 +180,12 @@ class TestBSplineSurfaceNURBS:
     def test_rational_derivatives_match_finite_differences(self, quarter_cylinder):
         h = 1e-6
         for u, v in [(0.3, 0.5), (0.5, 0.2)]:
-            Su_fd = (quarter_cylinder.eval(u + h, v)
-                     - quarter_cylinder.eval(u - h, v)) / (2 * h)
-            Sv_fd = (quarter_cylinder.eval(u, v + h)
-                     - quarter_cylinder.eval(u, v - h)) / (2 * h)
+            Su_fd = (
+                quarter_cylinder.eval(u + h, v) - quarter_cylinder.eval(u - h, v)
+            ) / (2 * h)
+            Sv_fd = (
+                quarter_cylinder.eval(u, v + h) - quarter_cylinder.eval(u, v - h)
+            ) / (2 * h)
             Su, Sv = quarter_cylinder.frame(u, v)
             np.testing.assert_allclose(Su, Su_fd, atol=1e-5)
             np.testing.assert_allclose(Sv, Sv_fd, atol=1e-5)
@@ -182,11 +193,13 @@ class TestBSplineSurfaceNURBS:
     def test_all_ones_weights_equal_polynomial(self):
         ku = np.array([0, 0, 0, 1, 1, 1])
         kv = np.array([0, 0, 1, 1])
-        ctrl = np.array([
-            [[0, 0, 0], [0, 0, 1]],
-            [[1, 0, 0], [1, 0, 1]],
-            [[2, 0, 0], [2, 0, 1]],
-        ])
+        ctrl = np.array(
+            [
+                [[0, 0, 0], [0, 0, 1]],
+                [[1, 0, 0], [1, 0, 1]],
+                [[2, 0, 0], [2, 0, 1]],
+            ]
+        )
         poly = BSplineSurface(2, 1, ku, kv, ctrl)
         rat = BSplineSurface(2, 1, ku, kv, ctrl, weights=np.ones((3, 2)))
         for u in [0.3, 0.5, 0.7]:

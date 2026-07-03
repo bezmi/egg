@@ -45,8 +45,6 @@ class BSplineSurface(GeometryEntity):
     """
 
     def __init__(self, pu: int, pv: int, knots_u, knots_v, ctrl, weights=None):
-        from scipy.interpolate import BSpline as _SciBSpline
-
         self.pu = int(pu)
         self.pv = int(pv)
         self.knots_u = np.asarray(knots_u, dtype=float)
@@ -83,12 +81,12 @@ class BSplineSurface(GeometryEntity):
         zero-valued callable, matching C++ bspline_basis_ders).
         """
         from scipy.interpolate import BSpline as _SciBSpline
+
         if self.weights is None:
             coeffs = self.ctrl  # (nu, nv, 3)
         else:
             coeffs = np.concatenate(
-                [self.weights[:, :, None] * self.ctrl,
-                 self.weights[:, :, None]],
+                [self.weights[:, :, None] * self.ctrl, self.weights[:, :, None]],
                 axis=2,
             )  # (nu, nv, 4)
         edim = coeffs.shape[-1]
@@ -149,8 +147,12 @@ class BSplineSurface(GeometryEntity):
         if nd >= 1:
             out[1, 0] = iw * (A[1, 0] - w[1, 0] * out[0, 0])
             out[0, 1] = iw * (A[0, 1] - w[0, 1] * out[0, 0])
-            out[1, 1] = iw * (A[1, 1] - w[1, 0] * out[0, 1]
-                              - w[0, 1] * out[1, 0] - w[1, 1] * out[0, 0])
+            out[1, 1] = iw * (
+                A[1, 1]
+                - w[1, 0] * out[0, 1]
+                - w[0, 1] * out[1, 0]
+                - w[1, 1] * out[0, 0]
+            )
         if nd >= 2:
             out[2, 0] = iw * (A[2, 0] - 2.0 * w[1, 0] * out[1, 0] - w[2, 0] * out[0, 0])
             out[0, 2] = iw * (A[0, 2] - 2.0 * w[0, 1] * out[0, 1] - w[0, 2] * out[0, 0])

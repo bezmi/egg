@@ -137,9 +137,7 @@ def build_twin_circle(rough: bool = False, bl=None, R: int = 1):
 
     # O-ring corners around each circle.
     msw, mse, mne, mnw = (Vector3(*p) for p in [(1, 1), (3, 1), (3, 3), (1, 3)])
-    m2sw, m2se, m2ne, m2nw = (
-        Vector3(*p) for p in [(4, 1), (6, 1), (6, 3), (4, 3)]
-    )
+    m2sw, m2se, m2ne, m2nw = (Vector3(*p) for p in [(4, 1), (6, 1), (6, 3), (4, 3)])
     inner = _ROUGH_TWIN if rough else _PROPER_TWIN
     isw, ise, ine, inw = (Vector3(*p) for p in inner["c1"])
     i2sw, i2se, i2ne, i2nw = (Vector3(*p) for p in inner["c2"])

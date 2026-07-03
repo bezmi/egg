@@ -48,8 +48,7 @@ template <int D> class BlockLayout
     /// Build the packed layout from every block's interior (node-count) shape.
     /// Blocks are laid out in the given order; block `b` occupies the doubles
     /// `[block_offset(b), block_offset(b+1))`.
-    explicit BlockLayout(std::vector<Shape> interior_shapes) :
-        interior_(std::move(interior_shapes))
+    explicit BlockLayout(std::vector<Shape> interior_shapes) : interior_(std::move(interior_shapes))
     {
         offsets_.reserve(interior_.size() + 1);
         std::size_t acc = 0;
@@ -64,9 +63,7 @@ template <int D> class BlockLayout
 
     /// Size (doubles) of the packed coordinate buffer for all blocks together.
     [[nodiscard]] std::size_t total_doubles() const
-    {
-        return offsets_.empty() ? 0 : offsets_.back();
-    }
+    { return offsets_.empty() ? 0 : offsets_.back(); }
 
     /// Interior (node-count) shape of block `b`.
     [[nodiscard]] const Shape& interior_shape(std::size_t b) const { return interior_[b]; }
@@ -131,9 +128,7 @@ template <int D> class BlockLayout
     /// Offset (doubles) of block `b`'s interior origin — logical (0,…,0), i.e.
     /// padded (1,…,1). The base of the centred interior view.
     [[nodiscard]] std::size_t interior_origin_offset(std::size_t b) const
-    {
-        return interior_node_offset(b, Shape {});
-    }
+    { return interior_node_offset(b, Shape {}); }
 
   private:
     /// Doubles occupied by one block's padded array: D coords × ∏(n_k + 2).
@@ -165,15 +160,16 @@ using InteriorView = stdex::mdspan<real, stdex::dextents<std::size_t, D + 1>, st
 namespace detail
 {
 template <int D, std::size_t... I>
-HaloView<D> make_halo_view(real* p, const std::array<std::size_t, D>& padded,
-                           std::index_sequence<I...>)
+HaloView<D>
+  make_halo_view(real* p, const std::array<std::size_t, D>& padded, std::index_sequence<I...>)
 {
     // (padded[0], …, padded[D-1], D) integral extents for the rank-(D+1) view.
     return HaloView<D> {p, padded[I]..., static_cast<std::size_t>(D)};
 }
 
 template <int D, std::size_t... I>
-InteriorView<D> make_interior_view(real* p, const std::array<std::size_t, D>& interior,
+InteriorView<D> make_interior_view(real* p,
+                                   const std::array<std::size_t, D>& interior,
                                    const std::array<std::size_t, D>& node_strides,
                                    std::index_sequence<I...>)
 {
@@ -190,17 +186,18 @@ InteriorView<D> make_interior_view(real* p, const std::array<std::size_t, D>& in
 template <int D>
 [[nodiscard]] HaloView<D> halo_view(real* base, const BlockLayout<D>& layout, std::size_t b)
 {
-    return detail::make_halo_view<D>(base + layout.block_offset(b), layout.padded_shape(b),
+    return detail::make_halo_view<D>(base + layout.block_offset(b),
+                                     layout.padded_shape(b),
                                      std::make_index_sequence<D> {});
 }
 
 /// Interior (ghost-excluded) view of block `b` over `base` (doubles).
 template <int D>
-[[nodiscard]] InteriorView<D> interior_view(real* base, const BlockLayout<D>& layout,
-                                            std::size_t b)
+[[nodiscard]] InteriorView<D> interior_view(real* base, const BlockLayout<D>& layout, std::size_t b)
 {
     return detail::make_interior_view<D>(base + layout.interior_origin_offset(b),
-                                         layout.interior_shape(b), layout.node_strides(b),
+                                         layout.interior_shape(b),
+                                         layout.node_strides(b),
                                          std::make_index_sequence<D> {});
 }
 

@@ -8,10 +8,10 @@
 /// double<->real seam; T needs the usual arithmetic plus sycl::sqrt.
 #pragma once
 
+#include "core.hpp"
+
 #include <array>
 #include <cmath>
-
-#include "core.hpp"
 
 namespace egg
 {
@@ -113,7 +113,8 @@ template <int N, class T = real> struct Dual2 {
 
 /// @name Dual2 arithmetic (value + gradient + Hessian chain rules)
 /// @{
-template <int N, class T> constexpr Dual2<N, T> operator+(const Dual2<N, T>& a, const Dual2<N, T>& b)
+template <int N, class T>
+constexpr Dual2<N, T> operator+(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
     Dual2<N, T> r;
     r.v = a.v + b.v;
@@ -124,7 +125,8 @@ template <int N, class T> constexpr Dual2<N, T> operator+(const Dual2<N, T>& a, 
     return r;
 }
 
-template <int N, class T> constexpr Dual2<N, T> operator-(const Dual2<N, T>& a, const Dual2<N, T>& b)
+template <int N, class T>
+constexpr Dual2<N, T> operator-(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
     Dual2<N, T> r;
     r.v = a.v - b.v;
@@ -146,7 +148,8 @@ template <int N, class T> constexpr Dual2<N, T> operator-(const Dual2<N, T>& a)
     return r;
 }
 
-template <int N, class T> constexpr Dual2<N, T> operator*(const Dual2<N, T>& a, const Dual2<N, T>& b)
+template <int N, class T>
+constexpr Dual2<N, T> operator*(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
     Dual2<N, T> r;
     r.v = a.v * b.v;
@@ -160,7 +163,8 @@ template <int N, class T> constexpr Dual2<N, T> operator*(const Dual2<N, T>& a, 
     return r;
 }
 
-template <int N, class T> constexpr Dual2<N, T> operator/(const Dual2<N, T>& a, const Dual2<N, T>& b)
+template <int N, class T>
+constexpr Dual2<N, T> operator/(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
     // q = a / b, from a = q b: q' = (a' - q b')/b; q'' = (a'' - 2 q' b' - q b'')/b
     Dual2<N, T> r;

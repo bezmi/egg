@@ -5,7 +5,12 @@ from __future__ import annotations
 from itertools import product
 from typing import Any, Iterator
 
+from typing import TYPE_CHECKING
+
 import numpy as np
+
+if TYPE_CHECKING:
+    from egg.topology.block_topology import BlockTopology
 
 __all__ = ["Block", "MultiBlockGrid"]
 
@@ -132,6 +137,7 @@ class MultiBlockGrid:
         implementation).
         """
         from egg.smoothing.objective import pack_x
+
         return pack_x(self)
 
     def unpack(self, x: np.ndarray) -> None:
@@ -140,4 +146,5 @@ class MultiBlockGrid:
         Delegates to :func:`egg.smoothing.objective.unpack_x`.
         """
         from egg.smoothing.objective import unpack_x
+
         unpack_x(x, self)

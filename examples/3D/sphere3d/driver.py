@@ -13,17 +13,26 @@ from egg.geometry.entity_soa import TAG_LINE3
 
 def _add_run_args(p, *, sweeps):
     p.add_argument("--sweeps", type=int, default=sweeps)
-    p.add_argument("--chunk", type=int, default=10,
-                   help="sweeps per device-resident chunk")
+    p.add_argument(
+        "--chunk", type=int, default=10, help="sweeps per device-resident chunk"
+    )
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
-    p.add_argument("--omega", type=float, default=0.8,
-                   help="block-Jacobi SOR/damping weight (1.0 = undamped)")
-    p.add_argument("--report-every", type=int, default=0,
-                   help="report (energy, min_det) every N sweeps: 0 (default) "
-                        "reports once per chunk (chunk-end, minimal reduction "
-                        "launches — the small-n GPU regime); 1 reports every "
-                        "sweep (legacy full per-sweep history for --plot-energy); "
-                        "k > 1 reports every k-th sweep plus the final one.")
+    p.add_argument(
+        "--omega",
+        type=float,
+        default=0.8,
+        help="block-Jacobi SOR/damping weight (1.0 = undamped)",
+    )
+    p.add_argument(
+        "--report-every",
+        type=int,
+        default=0,
+        help="report (energy, min_det) every N sweeps: 0 (default) "
+        "reports once per chunk (chunk-end, minimal reduction "
+        "launches — the small-n GPU regime); 1 reports every "
+        "sweep (legacy full per-sweep history for --plot-energy); "
+        "k > 1 reports every k-th sweep plus the final one.",
+    )
 
 
 def _drive(session, a, on_chunk=None):
@@ -36,13 +45,13 @@ def _drive(session, a, on_chunk=None):
     done = 0
     while done < a.sweeps:
         step = min(a.chunk, a.sweeps - done)
-        e, m = session.run(step, phase="barrier", delta=0.0,
-                           report_every=a.report_every, omega=a.omega)
+        e, m = session.run(
+            step, phase="barrier", delta=0.0, report_every=a.report_every, omega=a.omega
+        )
         energies.extend(np.asarray(e))
         mindets.extend(np.asarray(m))
         done += step
-        print(f"  sweeps={done:4d} energy={energies[-1]:.4e} "
-              f"min_det={mindets[-1]:.4e}")
+        print(f"  sweeps={done:4d} energy={energies[-1]:.4e} min_det={mindets[-1]:.4e}")
         if on_chunk is not None:
             on_chunk(done)
     return energies, mindets
@@ -62,6 +71,7 @@ def _plot_energy(energies, mindets):
 
 
 # --- dome: matplotlib 3D wireframe -----------------------------------------
+
 
 def _grid_polylines(X, n):
     """The structured grid's wireframe as a list of (n, 3) polylines."""
@@ -93,10 +103,12 @@ def grid_edges(blocks):
     edges = set()
     for ids in blocks:
         for axis in range(3):
-            lo = ids[tuple(slice(None, -1) if ax == axis else slice(None)
-                           for ax in range(3))]
-            hi = ids[tuple(slice(1, None) if ax == axis else slice(None)
-                           for ax in range(3))]
+            lo = ids[
+                tuple(slice(None, -1) if ax == axis else slice(None) for ax in range(3))
+            ]
+            hi = ids[
+                tuple(slice(1, None) if ax == axis else slice(None) for ax in range(3))
+            ]
             for u, v in zip(lo.ravel(), hi.ravel()):
                 edges.add((min(int(u), int(v)), max(int(u), int(v))))
     return sorted(edges)
@@ -111,8 +123,13 @@ def section_edges(X0, edges, tol=1e-6):
     """
     out = []
     for plane_ax, _keep, _name in _SECTIONS:
-        out.append([(u, v) for u, v in edges
-                    if abs(X0[u][plane_ax]) < tol and abs(X0[v][plane_ax]) < tol])
+        out.append(
+            [
+                (u, v)
+                for u, v in edges
+                if abs(X0[u][plane_ax]) < tol and abs(X0[v][plane_ax]) < tol
+            ]
+        )
     return out
 
 
@@ -129,22 +146,31 @@ def plot_topology(X, blocks, r0):
     cmap = colormaps["tab20"]
     pl = pv.Plotter()
     for bi, ids in enumerate(blocks):
-        corners = {(i, j, k): X[ids[-(i == 1), -(j == 1), -(k == 1)]]
-                   for i, j, k in product((0, 1), repeat=3)}
+        corners = {
+            (i, j, k): X[ids[-(i == 1), -(j == 1), -(k == 1)]]
+            for i, j, k in product((0, 1), repeat=3)
+        }
         pts, cells = [], []
-        for a, b in [((0, 0, 0), (1, 0, 0)), ((0, 1, 0), (1, 1, 0)),
-                     ((0, 0, 1), (1, 0, 1)), ((0, 1, 1), (1, 1, 1)),
-                     ((0, 0, 0), (0, 1, 0)), ((1, 0, 0), (1, 1, 0)),
-                     ((0, 0, 1), (0, 1, 1)), ((1, 0, 1), (1, 1, 1)),
-                     ((0, 0, 0), (0, 0, 1)), ((1, 0, 0), (1, 0, 1)),
-                     ((0, 1, 0), (0, 1, 1)), ((1, 1, 0), (1, 1, 1))]:
+        for a, b in [
+            ((0, 0, 0), (1, 0, 0)),
+            ((0, 1, 0), (1, 1, 0)),
+            ((0, 0, 1), (1, 0, 1)),
+            ((0, 1, 1), (1, 1, 1)),
+            ((0, 0, 0), (0, 1, 0)),
+            ((1, 0, 0), (1, 1, 0)),
+            ((0, 0, 1), (0, 1, 1)),
+            ((1, 0, 1), (1, 1, 1)),
+            ((0, 0, 0), (0, 0, 1)),
+            ((1, 0, 0), (1, 0, 1)),
+            ((0, 1, 0), (0, 1, 1)),
+            ((1, 1, 0), (1, 1, 1)),
+        ]:
             cells.extend([2, len(pts), len(pts) + 1])
             pts.extend([corners[a], corners[b]])
         mesh = pv.PolyData(np.asarray(pts), lines=np.asarray(cells))
         pl.add_mesh(mesh, color=cmap(bi % 20), line_width=3)
     pl.add_mesh(pv.Sphere(radius=r0), color="lightgray", opacity=0.4)
-    pl.add_text(f"{len(blocks)} blocks (6 O-shell + {len(blocks) - 6} H)",
-                font_size=10)
+    pl.add_text(f"{len(blocks)} blocks (6 O-shell + {len(blocks) - 6} H)", font_size=10)
     pl.show()
 
 
@@ -161,11 +187,13 @@ class GridPlots:
 
         self._pv = pv
         n_panes = 3 if plot3d else 2
-        self.plotter = pv.Plotter(shape=(1, n_panes), off_screen=off_screen,
-                                  window_size=(520 * n_panes, 520))
+        self.plotter = pv.Plotter(
+            shape=(1, n_panes), off_screen=off_screen, window_size=(520 * n_panes, 520)
+        )
         self.meshes = []
         for i, (sel, (_plane_ax, _keep, name), view) in enumerate(
-                zip(sections, _SECTIONS, ("xy", "yz"))):
+            zip(sections, _SECTIONS, ("xy", "yz"))
+        ):
             self.plotter.subplot(0, i)
             mesh = self._lines(X, sel)
             self.plotter.add_mesh(mesh, color="blue", line_width=1)
@@ -183,8 +211,7 @@ class GridPlots:
     def _lines(self, X, edge_list):
         e = np.asarray(edge_list, dtype=np.int64)
         cells = np.column_stack([np.full(e.shape[0], 2, dtype=np.int64), e])
-        return self._pv.PolyData(np.asarray(X, dtype=float).copy(),
-                                 lines=cells.ravel())
+        return self._pv.PolyData(np.asarray(X, dtype=float).copy(), lines=cells.ravel())
 
     def open_live(self):
         self.plotter.show(interactive_update=True, auto_close=False)
@@ -203,18 +230,26 @@ class GridPlots:
 
 # --- entry points ------------------------------------------------------------
 
+
 def main_dome():
     import dome
 
     p = argparse.ArgumentParser(description="3D dome-on-a-cube smoothing demo.")
     p.add_argument("--n", type=int, default=7, help="nodes per edge")
     _add_run_args(p, sweeps=30)
-    p.add_argument("--plot-live", action="store_true",
-                   help="matplotlib animated 3D wireframe (one frame per chunk)")
-    p.add_argument("--plot-grid", action="store_true",
-                   help="matplotlib final 3D wireframe grid")
-    p.add_argument("--plot-energy", action="store_true",
-                   help="matplotlib energy + min-det convergence curves")
+    p.add_argument(
+        "--plot-live",
+        action="store_true",
+        help="matplotlib animated 3D wireframe (one frame per chunk)",
+    )
+    p.add_argument(
+        "--plot-grid", action="store_true", help="matplotlib final 3D wireframe grid"
+    )
+    p.add_argument(
+        "--plot-energy",
+        action="store_true",
+        help="matplotlib energy + min-det convergence curves",
+    )
     a = p.parse_args()
 
     print("=" * 56)
@@ -234,11 +269,15 @@ def main_dome():
     # The dome lattice is a single n^3 block (C-order node ids), so the
     # structured store has an empty halo; the sweep relaxes block-Jacobi.
     from egg.smoothing.cpp_backend import (
-        build_structured_context_from_block_maps, structured_arrays)
-    blocks = [np.arange(n ** 3).reshape(n, n, n)]
+        build_structured_context_from_block_maps,
+        structured_arrays,
+    )
+
+    blocks = [np.arange(n**3).reshape(n, n, n)]
     bsc = build_structured_context_from_block_maps(3, blocks)
     session = cpp_core.CppStructuredSweepSession(
-        ctx, structured_arrays(bsc), X.ravel(), device=a.device, dim=3)
+        ctx, structured_arrays(bsc), X.ravel(), device=a.device, dim=3
+    )
     print(f"structured: blocks={bsc.num_blocks} omega={a.omega}")
 
     live = None
@@ -273,8 +312,10 @@ def main_dome():
 
     # The constrained top-face nodes must still sit on the sphere.
     radii = np.linalg.norm(X_out[top] - c, axis=1)
-    print(f"top-face |x - c|: max deviation from r = "
-          f"{np.abs(radii - r).max():.2e} (r = {r})")
+    print(
+        f"top-face |x - c|: max deviation from r = "
+        f"{np.abs(radii - r).max():.2e} (r = {r})"
+    )
     assert mindets[-1] > 0.0
     assert np.abs(radii - r).max() < 1e-9
 
@@ -297,31 +338,46 @@ def main_sphere_in_cube(setup, banner):
     ``setup`` is the example module providing ``build_grid`` / ``classify`` /
     ``build_context``.
     """
-    p = argparse.ArgumentParser(
-        description="3D sphere-in-cube O-grid smoothing demo.")
-    p.add_argument("--n", type=int, default=9,
-                   help="nodes per inset-cube face edge (odd keeps nodes on "
-                        "the section planes)")
-    p.add_argument("--m", type=int, default=4,
-                   help="radial layers in the O-shell")
-    p.add_argument("--mh", type=int, default=3,
-                   help="nodes across each H-grid layer")
+    p = argparse.ArgumentParser(description="3D sphere-in-cube O-grid smoothing demo.")
+    p.add_argument(
+        "--n",
+        type=int,
+        default=9,
+        help="nodes per inset-cube face edge (odd keeps nodes on the section planes)",
+    )
+    p.add_argument("--m", type=int, default=4, help="radial layers in the O-shell")
+    p.add_argument("--mh", type=int, default=3, help="nodes across each H-grid layer")
     p.add_argument("--r0", type=float, default=0.5, help="sphere radius")
-    p.add_argument("--cw", type=float, default=0.7,
-                   help="inset-cube half-width (O-shell outer boundary)")
+    p.add_argument(
+        "--cw",
+        type=float,
+        default=0.7,
+        help="inset-cube half-width (O-shell outer boundary)",
+    )
     _add_run_args(p, sweeps=40)
-    p.add_argument("--plot-live", action="store_true",
-                   help="PyVista animated XY/YZ sections (one frame per chunk)")
-    p.add_argument("--plot-grid", action="store_true",
-                   help="PyVista final XY/YZ section plots")
-    p.add_argument("--plot-energy", action="store_true",
-                   help="matplotlib energy + min-det convergence curves")
-    p.add_argument("--plot-3d", action="store_true",
-                   help="add a 3D wireframe pane to the live/final plots "
-                        "(dome-example style)")
-    p.add_argument("--plot-topology", action="store_true",
-                   help="PyVista view of the declared block topology only — "
-                        "no pipeline run")
+    p.add_argument(
+        "--plot-live",
+        action="store_true",
+        help="PyVista animated XY/YZ sections (one frame per chunk)",
+    )
+    p.add_argument(
+        "--plot-grid", action="store_true", help="PyVista final XY/YZ section plots"
+    )
+    p.add_argument(
+        "--plot-energy",
+        action="store_true",
+        help="matplotlib energy + min-det convergence curves",
+    )
+    p.add_argument(
+        "--plot-3d",
+        action="store_true",
+        help="add a 3D wireframe pane to the live/final plots (dome-example style)",
+    )
+    p.add_argument(
+        "--plot-topology",
+        action="store_true",
+        help="PyVista view of the declared block topology only — no pipeline run",
+    )
     a = p.parse_args()
 
     print("=" * 56)
@@ -342,18 +398,24 @@ def main_sphere_in_cube(setup, banner):
     edges = grid_edges(blocks)
     sections = section_edges(X, edges)
     n_sphere = int((tags == TAG_SPHERE).sum())
-    print(f"nodes={X.shape[0]} sphere={n_sphere} "
-          f"plane={(tags == TAG_PLANE).sum()} edge={(tags == TAG_LINE3).sum()} "
-          f"fixed={fixed.sum()} free={(tags == TAG_FREE).sum() - fixed.sum()}")
+    print(
+        f"nodes={X.shape[0]} sphere={n_sphere} "
+        f"plane={(tags == TAG_PLANE).sum()} edge={(tags == TAG_LINE3).sum()} "
+        f"fixed={fixed.sum()} free={(tags == TAG_FREE).sum() - fixed.sum()}"
+    )
 
     # Re-home the hand-built block lattice onto the halo-padded structured store
     # (owner/broadcast from the per-block global-DOF arrays; cross-block stencil
     # neighbours mirrored by the C++ singular-fan fallback), then relax block-Jacobi.
     from egg.smoothing.cpp_backend import (
-        build_structured_context_from_block_maps, structured_arrays)
+        build_structured_context_from_block_maps,
+        structured_arrays,
+    )
+
     bsc = build_structured_context_from_block_maps(3, blocks)
     session = cpp_core.CppStructuredSweepSession(
-        ctx, structured_arrays(bsc), X.ravel(), device=a.device, dim=3)
+        ctx, structured_arrays(bsc), X.ravel(), device=a.device, dim=3
+    )
     print(f"structured: blocks={bsc.num_blocks} omega={a.omega}")
 
     live = None

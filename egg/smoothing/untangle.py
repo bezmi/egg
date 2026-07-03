@@ -27,10 +27,10 @@ class UntangleResult:
     """Outcome of an :func:`untangle` run."""
 
     converged: bool
-    min_det: float          # final raw min det A over the grid
-    delta: float            # final continuation parameter
-    outer_iters: int        # delta-steps taken
-    no_op: bool = False     # input already valid (margin met), nothing done
+    min_det: float  # final raw min det A over the grid
+    delta: float  # final continuation parameter
+    outer_iters: int  # delta-steps taken
+    no_op: bool = False  # input already valid (margin met), nothing done
 
 
 def grid_min_det(X: np.ndarray, energy_stencil: dict) -> float:
@@ -87,7 +87,9 @@ def untangle(
         return UntangleResult(True, md, 0.0, 0, no_op=True)
 
     X_out, md_final, outer_iters, delta_final = cpp_untangle(
-        ctx, grid, grid.global_nodes,
+        ctx,
+        grid,
+        grid.global_nodes,
         sweeps_per_delta=sweeps_per_delta,
         delta0_factor=delta0_factor,
         shrink=shrink,
@@ -100,4 +102,6 @@ def untangle(
         block.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]
 
     converged = md_final > margin
-    return UntangleResult(converged, md_final, float(delta_final), outer_iters, no_op=False)
+    return UntangleResult(
+        converged, md_final, float(delta_final), outer_iters, no_op=False
+    )

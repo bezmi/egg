@@ -37,6 +37,7 @@ def _solve_stretch_ratio(s0: float, n: int, length: float) -> float:
     The sum is strictly increasing in ``r``; ``r`` is bracketed in
     ``[1e-3, 1e3]`` which covers any sane cell-count/length combination.
     """
+
     def total(r: float) -> float:
         if abs(r - 1.0) < 1e-12:
             return s0 * n
@@ -46,7 +47,8 @@ def _solve_stretch_ratio(s0: float, n: int, length: float) -> float:
     if not (total(lo) <= length <= total(hi)):
         raise ValueError(
             "boundary-layer respacing: cannot fit remaining cells "
-            f"(need {length:.3e} over {n} cells after a {s0:.3e} cell)")
+            f"(need {length:.3e} over {n} cells after a {s0:.3e} cell)"
+        )
     for _ in range(200):
         mid = 0.5 * (lo + hi)
         if total(mid) < length:
@@ -56,9 +58,14 @@ def _solve_stretch_ratio(s0: float, n: int, length: float) -> float:
     return 0.5 * (lo + hi)
 
 
-def _respace_line(points: np.ndarray, first_height: float, growth: float,
-                  n_layers: int, max_height: float | None,
-                  entity=None) -> np.ndarray:
+def _respace_line(
+    points: np.ndarray,
+    first_height: float,
+    growth: float,
+    n_layers: int,
+    max_height: float | None,
+    entity=None,
+) -> np.ndarray:
     """Re-sample one wall-normal polyline (wall first) to the geometric law.
 
     With ``entity`` given, the law is enforced in perpendicular wall
@@ -84,9 +91,9 @@ def _respace_line(points: np.ndarray, first_height: float, growth: float,
     if entity is not None:
         # Perpendicular wall distance at each original node, regularised to
         # something strictly increasing so it is invertible against cum.
-        dist = np.array([
-            np.linalg.norm(p - np.asarray(entity.project(p))) for p in points
-        ])
+        dist = np.array(
+            [np.linalg.norm(p - np.asarray(entity.project(p))) for p in points]
+        )
         dist[0] = 0.0
         dist = np.maximum.accumulate(dist)
         dist += np.arange(len(dist)) * 1e-15
@@ -104,7 +111,8 @@ def _respace_line(points: np.ndarray, first_height: float, growth: float,
             "boundary-layer respacing: geometric layers "
             f"(height {s_geo:.3e}) do not fit in the block "
             f"(available height {total:.3e}); reduce "
-            "first_height/growth/n_layers")
+            "first_height/growth/n_layers"
+        )
 
     last = float(spacings[-1]) if m > 0 else first_height
     r = _solve_stretch_ratio(last, n_cells - m, total - s_geo)
@@ -126,8 +134,9 @@ def _smoothstep(t: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
-def _boundary_shear_direction(grid, entity, flat: np.ndarray, p: int,
-                              n_layers: int) -> np.ndarray | None:
+def _boundary_shear_direction(
+    grid, entity, flat: np.ndarray, p: int, n_layers: int
+) -> np.ndarray | None:
     """Unit direction of the pinned (domain-boundary) column off the wall."""
     pts = grid.global_nodes[flat[:, p]]
     k_ref = min(max(n_layers, 1), len(pts) - 1)
@@ -136,12 +145,18 @@ def _boundary_shear_direction(grid, entity, flat: np.ndarray, p: int,
     return v / norm if norm > 0 else None
 
 
-def _orthogonalise_columns(grid, entity, flat: np.ndarray,
-                           pinned: list[bool], n_layers: int,
-                           done: set, scale: float = 1.0,
-                           shear_taper: int = 0,
-                           dof_constraints: dict | None = None,
-                           fixed_dofs: frozenset = frozenset()) -> None:
+def _orthogonalise_columns(
+    grid,
+    entity,
+    flat: np.ndarray,
+    pinned: list[bool],
+    n_layers: int,
+    done: set,
+    scale: float = 1.0,
+    shear_taper: int = 0,
+    dof_constraints: dict | None = None,
+    fixed_dofs: frozenset = frozenset(),
+) -> None:
     """Straighten near-wall columns, relaxing towards oblique boundaries.
 
     TMOP equilibrium lets wall-normal grid lines lean to follow oblique
@@ -192,8 +207,7 @@ def _orthogonalise_columns(grid, entity, flat: np.ndarray,
         done.add(key)
         pts = grid.global_nodes[dofs]
         foot = pts[0]
-        n_hat = np.asarray(entity.normal(np.asarray(entity.project(foot))),
-                           dtype=float)
+        n_hat = np.asarray(entity.normal(np.asarray(entity.project(foot))), dtype=float)
         if np.dot(n_hat, pts[1] - foot) < 0:
             n_hat = -n_hat
         d_hat = n_hat
@@ -207,10 +221,12 @@ def _orthogonalise_columns(grid, entity, flat: np.ndarray,
             dof = int(dofs[k])
             if dof in fixed_dofs:
                 continue
-            height = np.linalg.norm(
-                pts[k] - np.asarray(entity.project(pts[k])))
-            w = 1.0 if k <= n_layers else \
-                1.0 - _smoothstep((k - n_layers) / max(n_layers, 1))
+            height = np.linalg.norm(pts[k] - np.asarray(entity.project(pts[k])))
+            w = (
+                1.0
+                if k <= n_layers
+                else 1.0 - _smoothstep((k - n_layers) / max(n_layers, 1))
+            )
             w *= scale
             new = w * (foot + height * stretch * d_hat) + (1.0 - w) * pts[k]
             ent_k = dof_constraints.get(dof) if dof_constraints else None
@@ -221,7 +237,7 @@ def _orthogonalise_columns(grid, entity, flat: np.ndarray,
 
 def _region_orientation(nodes: np.ndarray, k_max: int) -> int:
     """Sign of the cell orientation in rows 0..k_max (0 if mixed/degenerate)."""
-    region = nodes[:k_max + 2]
+    region = nodes[: k_max + 2]
     u = region[1:, :-1] - region[:-1, :-1]
     v = region[:-1, 1:] - region[:-1, :-1]
     det = u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
@@ -232,12 +248,12 @@ def _region_orientation(nodes: np.ndarray, k_max: int) -> int:
     return 0
 
 
-def _oriented_dof_lines(grid, topology, block_name: str, axis: int,
-                        side: int) -> np.ndarray:
+def _oriented_dof_lines(
+    grid, topology, block_name: str, axis: int, side: int
+) -> np.ndarray:
     """A block's DOF map with ``axis`` moved to the front, ``side`` at row 0."""
     block_names = list(topology.block_specs.keys())
-    dm = np.moveaxis(grid.block_dof_maps[block_names.index(block_name)],
-                     axis, 0)
+    dm = np.moveaxis(grid.block_dof_maps[block_names.index(block_name)], axis, 0)
     return dm[::-1] if side == 1 else dm
 
 
@@ -253,13 +269,11 @@ def _wall_columns(grid, topology):
         if spec is None:
             continue
         face = assoc.face
-        dm = _oriented_dof_lines(grid, topology, face.block_name,
-                                 face.axis, face.side)
+        dm = _oriented_dof_lines(grid, topology, face.block_name, face.axis, face.side)
         yield assoc, spec, dm.reshape(dm.shape[0], -1)
 
 
-def first_layer_heights(grid, topology=None,
-                        relative: bool = False) -> np.ndarray:
+def first_layer_heights(grid, topology=None, relative: bool = False) -> np.ndarray:
     """Perpendicular first-layer height of every wall column (diagnostic).
 
     For each column of each block face recorded via
@@ -288,30 +302,30 @@ def first_layer_heights(grid, topology=None,
         for dof in flat[1]:
             p = grid.global_nodes[int(dof)]
             heights.append(
-                float(np.linalg.norm(
-                    p - np.asarray(assoc.entity.project(p)))) / scale)
+                float(np.linalg.norm(p - np.asarray(assoc.entity.project(p)))) / scale
+            )
     return np.asarray(heights)
 
 
-def _place_on_column(pts: np.ndarray, cum: np.ndarray, dist: np.ndarray,
-                     entity, height: float) -> np.ndarray:
+def _place_on_column(
+    pts: np.ndarray, cum: np.ndarray, dist: np.ndarray, entity, height: float
+) -> np.ndarray:
     """Point on the column polyline whose perpendicular wall distance is
     ``height``: linear-interpolation guess, then secant-refined (the
     distance is not exactly linear in arc length where the wall or the
     column curves)."""
+
     def _point_at(s: float) -> np.ndarray:
         s = min(max(s, 0.0), float(cum[-1]))
-        return np.array([
-            float(np.interp(s, cum, pts[:, c]))
-            for c in range(pts.shape[1])
-        ])
+        return np.array(
+            [float(np.interp(s, cum, pts[:, c])) for c in range(pts.shape[1])]
+        )
 
     arc = float(np.interp(height, dist, cum))
     new = _point_at(arc)
     arc_prev = d_prev = None
     for _ in range(12):
-        d_cur = float(np.linalg.norm(
-            new - np.asarray(entity.project(new))))
+        d_cur = float(np.linalg.norm(new - np.asarray(entity.project(new))))
         err = height - d_cur
         if abs(err) <= 1e-13 * max(height, 1.0):
             break
@@ -325,8 +339,9 @@ def _place_on_column(pts: np.ndarray, cum: np.ndarray, dist: np.ndarray,
     return new
 
 
-def respace_first_layers(grid, topology=None, n: int | None = None,
-                         pin: bool = True) -> np.ndarray:
+def respace_first_layers(
+    grid, topology=None, n: int | None = None, pin: bool = True
+) -> np.ndarray:
     """Set the first ``n`` off-wall layers to their exact geometric heights.
 
     Each wall column's rows ``1..n`` slide along the existing (smoothed)
@@ -380,8 +395,9 @@ def respace_first_layers(grid, topology=None, n: int | None = None,
         n_pin = int(spec.get("n_fixed", 1)) if n is None else int(n)
         if n_pin <= 0:
             continue
-        spacings = float(spec["first_height"]) \
-            * float(spec["growth"]) ** np.arange(n_pin)
+        spacings = float(spec["first_height"]) * float(spec["growth"]) ** np.arange(
+            n_pin
+        )
         max_h = spec.get("max_height")
         if max_h is not None:
             spacings = np.minimum(spacings, float(max_h))
@@ -394,16 +410,16 @@ def respace_first_layers(grid, topology=None, n: int | None = None,
                 raise ValueError(
                     "respace_first_layers: cannot pin "
                     f"{n_pin} layers in a column of {len(dofs) - 1} cells "
-                    "(at least one free row must remain)")
+                    "(at least one free row must remain)"
+                )
             pts = grid.global_nodes[dofs]
             seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
             cum = np.concatenate([[0.0], np.cumsum(seg)])
             # Perpendicular wall distance along the column, regularised to
             # strictly increasing so it is invertible (cf. _respace_line).
-            dist = np.array([
-                np.linalg.norm(p - np.asarray(assoc.entity.project(p)))
-                for p in pts
-            ])
+            dist = np.array(
+                [np.linalg.norm(p - np.asarray(assoc.entity.project(p))) for p in pts]
+            )
             dist[0] = 0.0
             dist = np.maximum.accumulate(dist)
             dist += np.arange(len(dist)) * 1e-15
@@ -411,13 +427,15 @@ def respace_first_layers(grid, topology=None, n: int | None = None,
                 raise ValueError(
                     "respace_first_layers: pinned band height "
                     f"{cum_h[-1]:.3e} does not fit in a column of height "
-                    f"{dist[-1]:.3e}")
+                    f"{dist[-1]:.3e}"
+                )
             for k in range(1, n_pin + 1):
                 dof_k = int(dofs[k])
                 if not grid.free_mask[dof_k]:
                     continue
-                new = _place_on_column(pts, cum, dist, assoc.entity,
-                                       float(cum_h[k - 1]))
+                new = _place_on_column(
+                    pts, cum, dist, assoc.entity, float(cum_h[k - 1])
+                )
                 ent = grid.dof_constraints.get(dof_k)
                 if ent is not None and ent is not assoc.entity:
                     new = np.asarray(ent.project(new), dtype=float)
@@ -442,8 +460,7 @@ def respace_first_layers(grid, topology=None, n: int | None = None,
                     if not grid.free_mask[dof_k]:
                         continue
                     height = band_top + (hi - band_top) * idx / (j - n_pin)
-                    new = _place_on_column(pts, cum, dist, assoc.entity,
-                                           height)
+                    new = _place_on_column(pts, cum, dist, assoc.entity, height)
                     ent = grid.dof_constraints.get(dof_k)
                     if ent is not None and ent is not assoc.entity:
                         new = np.asarray(ent.project(new), dtype=float)
@@ -457,10 +474,13 @@ def respace_first_layers(grid, topology=None, n: int | None = None,
     return idx
 
 
-def enforce_boundary_layer_spacing(grid, topology=None,
-                                   extend_through_neighbours: bool = True,
-                                   relax_boundary_normals: bool = True,
-                                   straighten_columns: bool = True) -> None:
+def enforce_boundary_layer_spacing(
+    grid,
+    topology=None,
+    extend_through_neighbours: bool = True,
+    relax_boundary_normals: bool = True,
+    straighten_columns: bool = True,
+) -> None:
     """Exactly enforce recorded boundary-layer specs on ``grid`` (in place).
 
     Parameters
@@ -503,13 +523,11 @@ def enforce_boundary_layer_spacing(grid, topology=None,
         if spec is None:
             continue
         face = assoc.face
-        dm = _oriented_dof_lines(grid, topology, face.block_name,
-                                 face.axis, face.side)
+        dm = _oriented_dof_lines(grid, topology, face.block_name, face.axis, face.side)
         flat = dm.reshape(dm.shape[0], -1)
 
         if extend_through_neighbours:
-            nb = _neighbour_across(topology, face.block_name,
-                                   face.axis, 1 - face.side)
+            nb = _neighbour_across(topology, face.block_name, face.axis, 1 - face.side)
             if nb is not None:
                 # Orient the neighbour with the shared face at row 0 and its
                 # transverse ordering matched to the wall block's outer face.
@@ -526,8 +544,13 @@ def enforce_boundary_layer_spacing(grid, topology=None,
             dofs = flat[:, col]
             pts = grid.global_nodes[dofs]
             grid.global_nodes[dofs] = _respace_line(
-                pts, spec["first_height"], spec["growth"],
-                spec["n_layers"], spec["max_height"], entity=assoc.entity)
+                pts,
+                spec["first_height"],
+                spec["growth"],
+                spec["n_layers"],
+                spec["max_height"],
+                entity=assoc.entity,
+            )
 
         # Columns lying on an unconnected (domain-boundary) transverse face
         # must stay on their boundary path; all others are straightened onto
@@ -547,12 +570,18 @@ def enforce_boundary_layer_spacing(grid, topology=None,
             sign = _region_orientation(grid.global_nodes[flat], k_max)
             for attempt in range(4):
                 done_try = set(ortho_done)
-                _orthogonalise_columns(grid, assoc.entity, flat, pinned,
-                                       spec["n_layers"], done_try,
-                                       scale=0.5 ** attempt,
-                                       shear_taper=taper,
-                                       dof_constraints=dof_constraints,
-                                       fixed_dofs=fixed_dofs)
+                _orthogonalise_columns(
+                    grid,
+                    assoc.entity,
+                    flat,
+                    pinned,
+                    spec["n_layers"],
+                    done_try,
+                    scale=0.5**attempt,
+                    shear_taper=taper,
+                    dof_constraints=dof_constraints,
+                    fixed_dofs=fixed_dofs,
+                )
                 new_sign = _region_orientation(grid.global_nodes[flat], k_max)
                 if sign == 0 or new_sign == sign:
                     ortho_done = done_try

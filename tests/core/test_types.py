@@ -89,16 +89,17 @@ class TestMultiBlockGrid:
     def test_interface_map_shared_dofs(self):
         """Two blocks sharing an edge: shared nodes have one global DOF each."""
         builder = TopologyBuilder(d=2)
-        (builder
-         .add_corner("A", (0., 0.), fixed=False)
-         .add_corner("B", (2., 0.), fixed=False)
-         .add_corner("C", (2., 2.), fixed=False)
-         .add_corner("D", (0., 2.), fixed=False)
-         .add_corner("E", (4., 0.), fixed=False)
-         .add_corner("F", (4., 2.), fixed=False)
-         .add_block("L", ("A", "D", "B", "C"), (4, 4))
-         .add_block("R", ("B", "C", "E", "F"), (4, 4))
-         .connect("L", 0, 1, "R", 0, 0))
+        (
+            builder.add_corner("A", (0.0, 0.0), fixed=False)
+            .add_corner("B", (2.0, 0.0), fixed=False)
+            .add_corner("C", (2.0, 2.0), fixed=False)
+            .add_corner("D", (0.0, 2.0), fixed=False)
+            .add_corner("E", (4.0, 0.0), fixed=False)
+            .add_corner("F", (4.0, 2.0), fixed=False)
+            .add_block("L", ("A", "D", "B", "C"), (4, 4))
+            .add_block("R", ("B", "C", "E", "F"), (4, 4))
+            .connect("L", 0, 1, "R", 0, 0)
+        )
         topo = builder.build()
         grid = topo.grid
         # Each block: 5*5 = 25, shared edge has 5 nodes
@@ -109,18 +110,19 @@ class TestMultiBlockGrid:
         dof_L = grid.block_dof_maps[0]
         dof_R = grid.block_dof_maps[1]
         shared_L = dof_L[-1, :]  # i=hi in L
-        shared_R = dof_R[0, :]   # i=lo in R
+        shared_R = dof_R[0, :]  # i=lo in R
         assert np.array_equal(shared_L, shared_R)
 
     def test_free_mask_corners_fixed(self):
         """Corners with fixed=True are NOT in free_mask."""
         builder = TopologyBuilder(d=2)
-        (builder
-         .add_corner("A", (0., 0.), fixed=True)
-         .add_corner("B", (2., 0.), fixed=True)
-         .add_corner("C", (2., 2.), fixed=True)
-         .add_corner("D", (0., 2.), fixed=True)
-         .add_block("main", ("A", "D", "B", "C"), (4, 4)))
+        (
+            builder.add_corner("A", (0.0, 0.0), fixed=True)
+            .add_corner("B", (2.0, 0.0), fixed=True)
+            .add_corner("C", (2.0, 2.0), fixed=True)
+            .add_corner("D", (0.0, 2.0), fixed=True)
+            .add_block("main", ("A", "D", "B", "C"), (4, 4))
+        )
         topo = builder.build()
         grid = topo.grid
         # 5*5 = 25 nodes, 4 fixed corners
@@ -131,12 +133,13 @@ class TestMultiBlockGrid:
     def test_free_mask_corners_free(self):
         """Corners with fixed=False ARE in free_mask."""
         builder = TopologyBuilder(d=2)
-        (builder
-         .add_corner("A", (0., 0.), fixed=False)
-         .add_corner("B", (2., 0.), fixed=False)
-         .add_corner("C", (2., 2.), fixed=False)
-         .add_corner("D", (0., 2.), fixed=False)
-         .add_block("main", ("A", "D", "B", "C"), (4, 4)))
+        (
+            builder.add_corner("A", (0.0, 0.0), fixed=False)
+            .add_corner("B", (2.0, 0.0), fixed=False)
+            .add_corner("C", (2.0, 2.0), fixed=False)
+            .add_corner("D", (0.0, 2.0), fixed=False)
+            .add_block("main", ("A", "D", "B", "C"), (4, 4))
+        )
         topo = builder.build()
         grid = topo.grid
         assert np.sum(grid.free_mask) == 25

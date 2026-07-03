@@ -120,7 +120,7 @@ template <int K> struct Trim;
 
 /// Curve trim: the parameter interval [t0, t1] (or a closed loop).
 template <> struct Trim<1> {
-    real t0, t1;        ///< Interval bounds.
+    real t0, t1;          ///< Interval bounds.
     bool closed = false;  ///< If set, the curve is periodic and @c contains is always true.
     /// Inside test (always true when closed).
     [[nodiscard]] bool contains(Param<1> q) const { return closed || (q[0] >= t0 && q[0] <= t1); }
@@ -409,8 +409,14 @@ static_assert(Parametrization<LineParam>);
 // Seeded variant: when @p has_seed, skip the coarse-sample search and start
 // Newton from @p seed (warm start, e.g. the previous sweep's foot parameter).
 template <class C>
-inline real project_param_seeded(const C& c, const PtN<2>& q, real t_lo, real t_hi,
-                                   real seed, bool has_seed, int n_seed = 16, int iters = 8)
+inline real project_param_seeded(const C& c,
+                                 const PtN<2>& q,
+                                 real t_lo,
+                                 real t_hi,
+                                 real seed,
+                                 bool has_seed,
+                                 int n_seed = 16,
+                                 int iters = 8)
 {
     real t;
     if (has_seed) {
@@ -441,18 +447,16 @@ inline real project_param_seeded(const C& c, const PtN<2>& q, real t_lo, real t_
 }
 
 template <class C>
-inline real project_param(
-  const C& c, const PtN<2>& q, real t_lo, real t_hi, int n_seed = 16, int iters = 8)
-{
-    return project_param_seeded(c, q, t_lo, t_hi, 0.0_r, false, n_seed, iters);
-}
+inline real
+  project_param(const C& c, const PtN<2>& q, real t_lo, real t_hi, int n_seed = 16, int iters = 8)
+{ return project_param_seeded(c, q, t_lo, t_hi, 0.0_r, false, n_seed, iters); }
 
 /// A circular arc of radius @p r centred at @f$ (c_x, c_y) @f$, parametrized
 /// by angle; closed-form inverse.
 struct CircleArcParam {
     static constexpr int edim = 2, idim = 1;
     PtN<2> c;  ///< Centre.
-    real r;  ///< Radius.
+    real r;    ///< Radius.
     /// Inverse: the polar angle of @p q about the centre.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
     { return {sycl::atan2(q[1] - c[1], q[0] - c[0])}; }
@@ -467,7 +471,7 @@ struct CircleArcParam {
 /// A rotated, axis-scaled elliptical arc; nearest foot via Newton.
 struct EllipseArcParam {
     static constexpr int edim = 2, idim = 1;
-    PtN<2> c;     ///< Centre.
+    PtN<2> c;   ///< Centre.
     real a, b;  ///< Semi-axis lengths along the rotated x/y axes.
     real phi;   ///< Rotation of the major axis from +x.
     /// Evaluate @f$ C + R_\phi (a\cos t, b\sin t) @f$.
@@ -543,7 +547,8 @@ struct CubicBezierParam {
     [[nodiscard]] VecN<2> deriv2(const Param<1>& t) const
     {
         const real u = 1.0_r - t[0], tt = t[0];
-        return (6.0_r * u) * (p[2] - (2.0_r * p[1]) + p[0]) + (6.0_r * tt) * (p[3] - (2.0_r * p[2]) + p[1]);
+        return (6.0_r * u) * (p[2] - (2.0_r * p[1]) + p[0]) +
+               (6.0_r * tt) * (p[3] - (2.0_r * p[2]) + p[1]);
     }
     /// Inverse: seeded-Newton nearest foot over @f$ [0,1] @f$.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
@@ -563,7 +568,7 @@ struct CubicBezierParam {
 /// higher-degree surface models. A surface whose degree exceeds it is rejected at
 /// context build (see `bspline_degree_guard` in the `load_into` encoders).
 #ifndef EGG_MAX_BSPLINE_DEGREE
-#define EGG_MAX_BSPLINE_DEGREE 3
+    #define EGG_MAX_BSPLINE_DEGREE 3
 #endif
 inline constexpr int kMaxBSplineDegree = EGG_MAX_BSPLINE_DEGREE;
 /// Leading dimension of the *surface* de Boor work arrays.
@@ -579,7 +584,7 @@ inline constexpr int kBSplineCap = kMaxBSplineDegree + 1;
 /// boundary kernel's register budget depends on. Override with
 /// `-DEGG_MAX_BSPLINE_CURVE_DEGREE=N`.
 #ifndef EGG_MAX_BSPLINE_CURVE_DEGREE
-#define EGG_MAX_BSPLINE_CURVE_DEGREE 7
+    #define EGG_MAX_BSPLINE_CURVE_DEGREE 7
 #endif
 inline constexpr int kMaxBSplineCurveDegree = EGG_MAX_BSPLINE_CURVE_DEGREE;
 /// Leading dimension of the *curve* de Boor work arrays.
@@ -702,8 +707,8 @@ inline void bspline_basis_ders(
 /// way to keep those temporaries (and registers) out of the nd=0/nd=1 paths.
 /// `ders` need only have `ND+1` rows.
 template <int ND, int CAP>
-inline void bspline_basis_ders(
-  int degree, std::span<const real> knots, int span, real u, real ders[][CAP])
+inline void
+  bspline_basis_ders(int degree, std::span<const real> knots, int span, real u, real ders[][CAP])
 {
     const int p = degree;
     real ndu[CAP][CAP];
@@ -769,8 +774,8 @@ inline void bspline_basis_ders(
 /// quotient rule for @f$ C = A/w @f$ and its first two derivatives.
 struct BSplineCurveParam {
     static constexpr int edim = 2, idim = 1;
-    int degree;                       ///< Basis degree @f$ p @f$.
-    int n_ctrl;                       ///< Number of control points @f$ n+1 @f$.
+    int degree;                     ///< Basis degree @f$ p @f$.
+    int n_ctrl;                     ///< Number of control points @f$ n+1 @f$.
     std::span<const real> knots;    ///< Knot vector, length @c n_ctrl+degree+1.
     std::span<const real> ctrl;     ///< Control points, length @c 2*n_ctrl (x,y interleaved).
     std::span<const real> weights;  ///< NURBS weights, length @c n_ctrl, or empty (polynomial).
@@ -848,8 +853,8 @@ struct CompositePath {
     using Vec = VecN<2>;            ///< Vector type.
     static constexpr int tdim = 1;  ///< A path is a curve.
     int n_segs;                     ///< Number of segment records.
-    std::span<const real> recs;   ///< Segment records, @c n_segs*kCompositeRecSize doubles.
-    const real* arena;            ///< Arena base for span-backed segments (B-splines).
+    std::span<const real> recs;     ///< Segment records, @c n_segs*kCompositeRecSize doubles.
+    const real* arena;              ///< Arena base for span-backed segments (B-splines).
 
     /// Fused frame of the nearest segment to @p p.
     /// @return The nearest segment's projected point and unit tangent; @c eff_tdim is 1.
@@ -901,12 +906,13 @@ struct SphereParam {
     static constexpr int edim = 3, idim = 2;
     PtN<3> c;            ///< Centre.
     VecN<3> ax, ay, az;  ///< Orthonormal frame.
-    real r;            ///< Radius.
+    real r;              ///< Radius.
     /// Inverse: azimuth/latitude of the radial direction of @p p.
     [[nodiscard]] Param<2> invert(const PtN<3>& p) const
     {
         const VecN<3> m = normalize(p - c);
-        return {sycl::atan2(dot(m, ay), dot(m, ax)), sycl::asin(std::clamp(dot(m, az), -1.0_r, 1.0_r))};
+        return {sycl::atan2(dot(m, ay), dot(m, ax)),
+                sycl::asin(std::clamp(dot(m, az), -1.0_r, 1.0_r))};
     }
     /// Evaluate @f$ C + r(\cos v\cos u\,a_x + \cos v\sin u\,a_y + \sin v\,a_z) @f$.
     [[nodiscard]] PtN<3> eval(const Param<2>& q) const
@@ -930,7 +936,7 @@ struct CylinderParam {
     static constexpr int edim = 3, idim = 2;
     PtN<3> o;            ///< A point on the axis.
     VecN<3> ax, ay, az;  ///< Orthonormal frame; @c az is the axis.
-    real r;            ///< Radius.
+    real r;              ///< Radius.
     /// Inverse: angle about the axis and height along it.
     [[nodiscard]] Param<2> invert(const PtN<3>& p) const
     {
@@ -974,8 +980,8 @@ struct Line3Param {
 /// instantiation of the curve projector).
 struct BSplineSurfaceParam {
     static constexpr int edim = 3, idim = 2;
-    int pu, pv;                       ///< Basis degrees in u and v.
-    int nu, nv;                       ///< Control-net extents in u and v.
+    int pu, pv;                     ///< Basis degrees in u and v.
+    int nu, nv;                     ///< Control-net extents in u and v.
     std::span<const real> knots_u;  ///< Knot vector in u, length @c nu+pu+1.
     std::span<const real> knots_v;  ///< Knot vector in v, length @c nv+pv+1.
     std::span<const real> ctrl;     ///< Control net, length @c 3*nu*nv (xyz interleaved).
@@ -1015,8 +1021,7 @@ struct BSplineSurfaceParam {
     /// residue) live across the whole inlined kernel — the boundary kernel's
     /// 256-VGPR pin. Routing the warm GN path through `ders_nd<1>` keeps those
     /// out of the warm kernel; the cold path keeps `ders_nd<2>`.
-    template <int ND>
-    [[nodiscard]] SurfDers ders_nd(const Param<2>& q) const
+    template <int ND> [[nodiscard]] SurfDers ders_nd(const Param<2>& q) const
     {
         const int su = bspline_find_span(pu, nu, knots_u, q[0]);
         const int sv = bspline_find_span(pv, nv, knots_v, q[1]);
@@ -1129,9 +1134,13 @@ struct BSplineSurfaceParam {
     ///   call by the caller (F2 Lever C). Parity-gated (not bit-identical: the
     ///   frame is at the pre-final-step iterate).
     template <bool Exact>
-    [[nodiscard]] Param<2>
-      newton_foot(const PtN<3>& p, Param<2> q, real u0, real u1, real v0, real v1,
-                  std::array<VecN<3>, 2>* frame_out = nullptr) const
+    [[nodiscard]] Param<2> newton_foot(const PtN<3>& p,
+                                       Param<2> q,
+                                       real u0,
+                                       real u1,
+                                       real v0,
+                                       real v1,
+                                       std::array<VecN<3>, 2>* frame_out = nullptr) const
     {
         for (int it = 0; it < 12; ++it) {
             const SurfDers S = ders_nd<Exact ? 2 : 1>(q);
@@ -1172,9 +1181,11 @@ struct BSplineSurfaceParam {
     ///     `newton_foot<false>` (GN nd=1). That keeps the heavy de Boor nd=2 rows
     ///     and the grid out of the warm kernel entirely — the scratch lever.
     template <bool Warm = false>
-    __attribute__((noinline)) [[nodiscard]] Param<2> invert_seeded(
-      const PtN<3>& p, Param<2> seed, bool has_seed,
-      std::array<VecN<3>, 2>* frame_out = nullptr) const
+    __attribute__((noinline)) [[nodiscard]] Param<2>
+      invert_seeded(const PtN<3>& p,
+                    Param<2> seed,
+                    bool has_seed,
+                    std::array<VecN<3>, 2>* frame_out = nullptr) const
     {
         const real u0 = knots_u[pu], u1 = knots_u[nu];
         const real v0 = knots_v[pv], v1 = knots_v[nv];
@@ -1309,13 +1320,16 @@ template <> struct decode_entity_fn<TrimmedEntity<BSplineCurveParam>> {
         const auto n_ctrl_d = 2 * static_cast<std::size_t>(n_ctrl);
         const bool has_w = p[7] != 0.0_r;
         const auto w_off = static_cast<std::size_t>(p[6]);
+        // Contract: variable-length tags are always dispatched with a live
+        // arena (see the decode_entity section note); nullptr never reaches here.
         return TrimmedEntity<BSplineCurveParam> {
           .param = {.degree = degree,
                     .n_ctrl = n_ctrl,
+                    // NOLINTNEXTLINE(clang-analyzer-core.NullPointerArithm)
                     .knots = {arena + knot_off, n_knots},
                     .ctrl = {arena + ctrl_off, n_ctrl_d},
                     .weights = has_w ? std::span<const real> {arena + w_off,
-                                                                static_cast<std::size_t>(n_ctrl)}
+                                                              static_cast<std::size_t>(n_ctrl)}
                                      : std::span<const real> {}},
           .trim = {.t0 = p[4], .t1 = p[5], .closed = false}};
     }
@@ -1326,8 +1340,10 @@ template <> struct decode_entity_fn<CompositePath> {
         // Blob: [n_segs, rec_off]; the segment records live in the arena.
         const int n_segs = static_cast<int>(p[0]);
         const auto rec_off = static_cast<std::size_t>(p[1]);
+        // Contract: composites always carry a live arena (segment records).
         return CompositePath {
           .n_segs = n_segs,
+          // NOLINTNEXTLINE(clang-analyzer-core.NullPointerArithm)
           .recs = {arena + rec_off, static_cast<std::size_t>(n_segs) * kCompositeRecSize},
           .arena = arena};
     }
@@ -1377,9 +1393,8 @@ template <> struct decode_entity_fn<TrimmedEntity<Line3Param>> {
     {
         // Blob: [p0(3), p1(3), t0, t1].
         const auto pt = [&](int i) { return PtN<3> {p[i], p[i + 1], p[i + 2]}; };
-        return TrimmedEntity<Line3Param> {
-          .param = {.p0 = pt(0), .p1 = pt(3)},
-          .trim = {.t0 = p[6], .t1 = p[7], .closed = false}};
+        return TrimmedEntity<Line3Param> {.param = {.p0 = pt(0), .p1 = pt(3)},
+                                          .trim = {.t0 = p[6], .t1 = p[7], .closed = false}};
     }
 };
 template <> struct decode_entity_fn<TrimmedEntity<BSplineSurfaceParam>> {
@@ -1423,9 +1438,7 @@ template <> struct decode_entity_fn<TrimmedEntity<BSplineSurfaceParam>> {
 ///              nullptr when no variable-length entity is in play.
 template <class E>
 [[nodiscard]] inline E decode_entity(const real* params, const real* arena = nullptr)
-{
-    return decode_entity_fn<E>::apply(params, arena);
-}
+{ return decode_entity_fn<E>::apply(params, arena); }
 
 // There is no per-DOF entity variant: every call site selects the concrete
 // entity type via dispatch_entity_type<D>(tag, f) and builds it with
@@ -1477,13 +1490,13 @@ template <int D> struct EntitySoA<Free<D>> {
     static constexpr int kFields = 0;  ///< No fields; `records` is empty.
     static constexpr int kSeg = 0;     ///< No segmented fields.
     struct Host {
-        std::vector<real> records;  ///< Empty (kFields == 0).
-        std::size_t count = 0;        ///< Number of free DOFs in the partition.
+        std::vector<real> records;             ///< Empty (kFields == 0).
+        std::size_t count = 0;                 ///< Number of free DOFs in the partition.
         std::vector<SegmentedHost<real>> seg;  ///< Empty (kSeg == 0).
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, 0};  ///< Empty (no fields).
-        SegmentedView<real> seg[kMaxSoASeg]{};       ///< Null (no segmented fields).
+        SoAView<const real> records {nullptr, 0, 0};  ///< Empty (no fields).
+        SegmentedView<real> seg[kMaxSoASeg] {};       ///< Null (no segmented fields).
     };
     /// Reconstruct the (field-less) free entity.
     [[nodiscard]] static Free<D> load(const View&, std::size_t) { return Free<D> {}; }
@@ -1491,7 +1504,7 @@ template <int D> struct EntitySoA<Free<D>> {
     static void load_into(Host&, std::size_t, const Free<D>&) {}
     /// Construct the typed View from the generic partition slots.
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 static_assert(HasEntitySoA<Free<2>>);
@@ -1526,22 +1539,26 @@ template <> struct EntitySoA<LineSeg> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static LineSeg load(const View& v, std::size_t i)
     {
-        return LineSeg {
-          .sx = v.records[i, SX], .sy = v.records[i, SY],
-          .ex = v.records[i, EX], .ey = v.records[i, EY]};
+        return LineSeg {.sx = v.records[i, SX],
+                        .sy = v.records[i, SY],
+                        .ex = v.records[i, EX],
+                        .ey = v.records[i, EY]};
     }
     static void load_into(Host& h, std::size_t i, const LineSeg& e)
     {
         real* r = h.records.data() + i * kFields;
-        r[SX] = e.sx; r[SY] = e.sy; r[EX] = e.ex; r[EY] = e.ey;
+        r[SX] = e.sx;
+        r[SY] = e.sy;
+        r[EX] = e.ex;
+        r[EY] = e.ey;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for @ref Circle: packed `(cx, cy, r)` records.
@@ -1556,20 +1573,20 @@ template <> struct EntitySoA<Circle> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static Circle load(const View& v, std::size_t i)
-    {
-        return Circle {.cx = v.records[i, CX], .cy = v.records[i, CY], .r = v.records[i, R]};
-    }
+    { return Circle {.cx = v.records[i, CX], .cy = v.records[i, CY], .r = v.records[i, R]}; }
     static void load_into(Host& h, std::size_t i, const Circle& e)
     {
         real* r = h.records.data() + i * kFields;
-        r[CX] = e.cx; r[CY] = e.cy; r[R] = e.r;
+        r[CX] = e.cx;
+        r[CY] = e.cy;
+        r[R] = e.r;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for @ref Ellipse: packed `(cx, cy, rx, ry)` records.
@@ -1584,22 +1601,26 @@ template <> struct EntitySoA<Ellipse> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static Ellipse load(const View& v, std::size_t i)
     {
-        return Ellipse {
-          .cx = v.records[i, CX], .cy = v.records[i, CY],
-          .rx = v.records[i, RX], .ry = v.records[i, RY]};
+        return Ellipse {.cx = v.records[i, CX],
+                        .cy = v.records[i, CY],
+                        .rx = v.records[i, RX],
+                        .ry = v.records[i, RY]};
     }
     static void load_into(Host& h, std::size_t i, const Ellipse& e)
     {
         real* r = h.records.data() + i * kFields;
-        r[CX] = e.cx; r[CY] = e.cy; r[RX] = e.rx; r[RY] = e.ry;
+        r[CX] = e.cx;
+        r[CY] = e.cy;
+        r[RX] = e.rx;
+        r[RY] = e.ry;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for `TrimmedEntity<CircleArcParam>`:
@@ -1615,24 +1636,29 @@ template <> struct EntitySoA<TrimmedEntity<CircleArcParam>> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static TrimmedEntity<CircleArcParam> load(const View& v, std::size_t i)
     {
         return TrimmedEntity<CircleArcParam> {
           .param = {.c = {v.records[i, CX], v.records[i, CY]}, .r = v.records[i, R]},
-          .trim = {.t0 = v.records[i, T0], .t1 = v.records[i, T1],
+          .trim = {.t0 = v.records[i, T0],
+                   .t1 = v.records[i, T1],
                    .closed = v.records[i, CLOSED] != 0.0_r}};
     }
     static void load_into(Host& h, std::size_t i, const TrimmedEntity<CircleArcParam>& e)
     {
         real* r = h.records.data() + i * kFields;
-        r[CX] = e.param.c[0]; r[CY] = e.param.c[1]; r[R] = e.param.r;
-        r[T0] = e.trim.t0; r[T1] = e.trim.t1; r[CLOSED] = e.trim.closed ? 1.0_r : 0.0_r;
+        r[CX] = e.param.c[0];
+        r[CY] = e.param.c[1];
+        r[R] = e.param.r;
+        r[T0] = e.trim.t0;
+        r[T1] = e.trim.t1;
+        r[CLOSED] = e.trim.closed ? 1.0_r : 0.0_r;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for `TrimmedEntity<EllipseArcParam>`:
@@ -1648,26 +1674,33 @@ template <> struct EntitySoA<TrimmedEntity<EllipseArcParam>> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static TrimmedEntity<EllipseArcParam> load(const View& v, std::size_t i)
     {
-        return TrimmedEntity<EllipseArcParam> {
-          .param = {.c = {v.records[i, CX], v.records[i, CY]},
-                    .a = v.records[i, A], .b = v.records[i, B], .phi = v.records[i, PHI]},
-          .trim = {.t0 = v.records[i, T0], .t1 = v.records[i, T1],
-                   .closed = v.records[i, CLOSED] != 0.0_r}};
+        return TrimmedEntity<EllipseArcParam> {.param = {.c = {v.records[i, CX], v.records[i, CY]},
+                                                         .a = v.records[i, A],
+                                                         .b = v.records[i, B],
+                                                         .phi = v.records[i, PHI]},
+                                               .trim = {.t0 = v.records[i, T0],
+                                                        .t1 = v.records[i, T1],
+                                                        .closed = v.records[i, CLOSED] != 0.0_r}};
     }
     static void load_into(Host& h, std::size_t i, const TrimmedEntity<EllipseArcParam>& e)
     {
         real* r = h.records.data() + i * kFields;
-        r[CX] = e.param.c[0]; r[CY] = e.param.c[1];
-        r[A] = e.param.a; r[B] = e.param.b; r[PHI] = e.param.phi;
-        r[T0] = e.trim.t0; r[T1] = e.trim.t1; r[CLOSED] = e.trim.closed ? 1.0_r : 0.0_r;
+        r[CX] = e.param.c[0];
+        r[CY] = e.param.c[1];
+        r[A] = e.param.a;
+        r[B] = e.param.b;
+        r[PHI] = e.param.phi;
+        r[T0] = e.trim.t0;
+        r[T1] = e.trim.t1;
+        r[CLOSED] = e.trim.closed ? 1.0_r : 0.0_r;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for `TrimmedEntity<QuadBezierParam>`:
@@ -1683,8 +1716,8 @@ template <> struct EntitySoA<TrimmedEntity<QuadBezierParam>> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static TrimmedEntity<QuadBezierParam> load(const View& v, std::size_t i)
     {
@@ -1697,13 +1730,17 @@ template <> struct EntitySoA<TrimmedEntity<QuadBezierParam>> {
     static void load_into(Host& h, std::size_t i, const TrimmedEntity<QuadBezierParam>& e)
     {
         real* r = h.records.data() + i * kFields;
-        r[P0X] = e.param.p[0][0]; r[P0Y] = e.param.p[0][1];
-        r[P1X] = e.param.p[1][0]; r[P1Y] = e.param.p[1][1];
-        r[P2X] = e.param.p[2][0]; r[P2Y] = e.param.p[2][1];
-        r[T0] = e.trim.t0; r[T1] = e.trim.t1;
+        r[P0X] = e.param.p[0][0];
+        r[P0Y] = e.param.p[0][1];
+        r[P1X] = e.param.p[1][0];
+        r[P1Y] = e.param.p[1][1];
+        r[P2X] = e.param.p[2][0];
+        r[P2Y] = e.param.p[2][1];
+        r[T0] = e.trim.t0;
+        r[T1] = e.trim.t1;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for `TrimmedEntity<CubicBezierParam>`:
@@ -1713,15 +1750,15 @@ template <> struct EntitySoA<TrimmedEntity<CubicBezierParam>> {
     static constexpr int kFields = 10;
     static constexpr int kSeg = 0;
     static constexpr int P0X = 0, P0Y = 1, P1X = 2, P1Y = 3, P2X = 4, P2Y = 5, P3X = 6, P3Y = 7,
-                          T0 = 8, T1 = 9;
+                         T0 = 8, T1 = 9;
     struct Host {
         std::vector<real> records;
         std::size_t count = 0;
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static TrimmedEntity<CubicBezierParam> load(const View& v, std::size_t i)
     {
@@ -1735,14 +1772,19 @@ template <> struct EntitySoA<TrimmedEntity<CubicBezierParam>> {
     static void load_into(Host& h, std::size_t i, const TrimmedEntity<CubicBezierParam>& e)
     {
         real* r = h.records.data() + i * kFields;
-        r[P0X] = e.param.p[0][0]; r[P0Y] = e.param.p[0][1];
-        r[P1X] = e.param.p[1][0]; r[P1Y] = e.param.p[1][1];
-        r[P2X] = e.param.p[2][0]; r[P2Y] = e.param.p[2][1];
-        r[P3X] = e.param.p[3][0]; r[P3Y] = e.param.p[3][1];
-        r[T0] = e.trim.t0; r[T1] = e.trim.t1;
+        r[P0X] = e.param.p[0][0];
+        r[P0Y] = e.param.p[0][1];
+        r[P1X] = e.param.p[1][0];
+        r[P1Y] = e.param.p[1][1];
+        r[P2X] = e.param.p[2][0];
+        r[P2Y] = e.param.p[2][1];
+        r[P3X] = e.param.p[3][0];
+        r[P3Y] = e.param.p[3][1];
+        r[T0] = e.trim.t0;
+        r[T1] = e.trim.t1;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 static_assert(HasEntitySoA<LineSeg>);
@@ -1785,8 +1827,8 @@ template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
 
     [[nodiscard]] static TrimmedEntity<BSplineCurveParam> load(const View& v, std::size_t i)
@@ -1797,9 +1839,10 @@ template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
                     .n_ctrl = static_cast<int>(v.records[i, N_CTRL]),
                     .knots = v.seg[KNOTS][i],
                     .ctrl = v.seg[CTRL][i],
-                    .weights = has_w ? std::span<const real> {v.seg[WEIGHTS][i]}
-                                     : std::span<const real> {}},
-          .trim = {.t0 = v.records[i, T0], .t1 = v.records[i, T1],
+                    .weights =
+                      has_w ? std::span<const real> {v.seg[WEIGHTS][i]} : std::span<const real> {}},
+          .trim = {.t0 = v.records[i, T0],
+                   .t1 = v.records[i, T1],
                    .closed = v.records[i, CLOSED] != 0.0_r}};
     }
 
@@ -1821,7 +1864,7 @@ template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
 
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>* seg)
     {
-        View v{.records = soa};
+        View v {.records = soa};
         if (seg != nullptr) {
             v.seg[KNOTS] = seg[KNOTS];
             v.seg[CTRL] = seg[CTRL];
@@ -1871,8 +1914,8 @@ template <> struct EntitySoA<CompositePath> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
 
     [[nodiscard]] static CompositePath load(const View& v, std::size_t i)
@@ -1882,8 +1925,7 @@ template <> struct EntitySoA<CompositePath> {
         const auto rec_off = static_cast<std::size_t>(v.records[i, REC_OFF]);
         return CompositePath {
           .n_segs = n_segs,
-          .recs = slice.subspan(rec_off,
-                                static_cast<std::size_t>(n_segs) * kCompositeRecSize),
+          .recs = slice.subspan(rec_off, static_cast<std::size_t>(n_segs) * kCompositeRecSize),
           .arena = slice.data()};
     }
 
@@ -1901,7 +1943,7 @@ template <> struct EntitySoA<CompositePath> {
 
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>* seg)
     {
-        View v{.records = soa};
+        View v {.records = soa};
         if (seg != nullptr) { v.seg[ARENA] = seg[ARENA]; }
         return v;
     }
@@ -1935,8 +1977,8 @@ template <> struct EntitySoA<TrimmedEntity<PlaneParam>> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static TrimmedEntity<PlaneParam> load(const View& v, std::size_t i)
     {
@@ -1954,7 +1996,7 @@ template <> struct EntitySoA<TrimmedEntity<PlaneParam>> {
         for (int k = 0; k < 3; ++k) { r[6 + k] = e.param.ay[k]; }
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for `TrimmedEntity<SphereParam>`: packed
@@ -1970,8 +2012,8 @@ template <> struct EntitySoA<TrimmedEntity<SphereParam>> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static TrimmedEntity<SphereParam> load(const View& v, std::size_t i)
     {
@@ -1992,7 +2034,7 @@ template <> struct EntitySoA<TrimmedEntity<SphereParam>> {
         for (int k = 0; k < 3; ++k) { r[7 + k] = e.param.ay[k]; }
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for `TrimmedEntity<CylinderParam>`: packed
@@ -2008,8 +2050,8 @@ template <> struct EntitySoA<TrimmedEntity<CylinderParam>> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static TrimmedEntity<CylinderParam> load(const View& v, std::size_t i)
     {
@@ -2030,7 +2072,7 @@ template <> struct EntitySoA<TrimmedEntity<CylinderParam>> {
         r[9] = e.param.r;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for `TrimmedEntity<Line3Param>`: packed
@@ -2045,8 +2087,8 @@ template <> struct EntitySoA<TrimmedEntity<Line3Param>> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
     [[nodiscard]] static TrimmedEntity<Line3Param> load(const View& v, std::size_t i)
     {
@@ -2066,7 +2108,7 @@ template <> struct EntitySoA<TrimmedEntity<Line3Param>> {
         r[7] = e.trim.t1;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
-    { return View{.records = soa}; }
+    { return View {.records = soa}; }
 };
 
 /// SoA schema for `TrimmedEntity<BSplineSurfaceParam>`: packed
@@ -2079,8 +2121,8 @@ template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
     static constexpr EntityTag tag = EntityTag::BSplineSurface;
     static constexpr int kFields = 9;
     static constexpr int kSeg = 4;  ///< knots_u (0), knots_v (1), ctrl (2), weights (3, optional).
-    static constexpr int PU = 0, PV = 1, NU = 2, NV = 3,
-                          KU_OFF = 4, KV_OFF = 5, CTRL_OFF = 6, W_OFF = 7, HAS_W = 8;
+    static constexpr int PU = 0, PV = 1, NU = 2, NV = 3, KU_OFF = 4, KV_OFF = 5, CTRL_OFF = 6,
+                         W_OFF = 7, HAS_W = 8;
     static constexpr int KNOTS_U = 0, KNOTS_V = 1, CTRL = 2, WEIGHTS = 3;
 
     struct Host {
@@ -2089,8 +2131,8 @@ template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
         std::vector<SegmentedHost<real>> seg;
     };
     struct View {
-        SoAView<const real> records{nullptr, 0, kFields};
-        SegmentedView<real> seg[kMaxSoASeg]{};
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
     };
 
     [[nodiscard]] static TrimmedEntity<BSplineSurfaceParam> load(const View& v, std::size_t i)
@@ -2139,7 +2181,7 @@ template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
 
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>* seg)
     {
-        View v{.records = soa};
+        View v {.records = soa};
         if (seg != nullptr) {
             v.seg[KNOTS_U] = seg[KNOTS_U];
             v.seg[KNOTS_V] = seg[KNOTS_V];
@@ -2172,22 +2214,20 @@ static_assert(HasEntitySoA<TrimmedEntity<BSplineSurfaceParam>>);
 /// @param tag Entity kind tag.
 /// @param f The type-consuming callable.
 template <int D = kDefaultDim, class F>
-    requires ((D == 2) &&
-              EntityDispatchFn<F, Free<2>> && EntityDispatchFn<F, LineSeg> &&
-              EntityDispatchFn<F, Circle> && EntityDispatchFn<F, Ellipse> &&
-              EntityDispatchFn<F, TrimmedEntity<CircleArcParam>> &&
-              EntityDispatchFn<F, TrimmedEntity<EllipseArcParam>> &&
-              EntityDispatchFn<F, TrimmedEntity<QuadBezierParam>> &&
-              EntityDispatchFn<F, TrimmedEntity<CubicBezierParam>> &&
-              EntityDispatchFn<F, TrimmedEntity<BSplineCurveParam>> &&
-              EntityDispatchFn<F, CompositePath>) ||
-             ((D == 3) &&
-              EntityDispatchFn<F, Free<3>> &&
-              EntityDispatchFn<F, TrimmedEntity<PlaneParam>> &&
-              EntityDispatchFn<F, TrimmedEntity<SphereParam>> &&
-              EntityDispatchFn<F, TrimmedEntity<CylinderParam>> &&
-              EntityDispatchFn<F, TrimmedEntity<Line3Param>> &&
-              EntityDispatchFn<F, TrimmedEntity<BSplineSurfaceParam>>)
+    requires((D == 2) && EntityDispatchFn<F, Free<2>> && EntityDispatchFn<F, LineSeg> &&
+             EntityDispatchFn<F, Circle> && EntityDispatchFn<F, Ellipse> &&
+             EntityDispatchFn<F, TrimmedEntity<CircleArcParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<EllipseArcParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<QuadBezierParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<CubicBezierParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<BSplineCurveParam>> &&
+             EntityDispatchFn<F, CompositePath>) ||
+            ((D == 3) && EntityDispatchFn<F, Free<3>> &&
+             EntityDispatchFn<F, TrimmedEntity<PlaneParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<SphereParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<CylinderParam>> &&
+             EntityDispatchFn<F, TrimmedEntity<Line3Param>> &&
+             EntityDispatchFn<F, TrimmedEntity<BSplineSurfaceParam>>)
 inline void dispatch_entity_type(EntityTag tag, F f)
 {
     if constexpr (D == 2) {
@@ -2198,7 +2238,9 @@ inline void dispatch_entity_type(EntityTag tag, F f)
         case EntityTag::CircleArc: f.template operator()<TrimmedEntity<CircleArcParam>>(); break;
         case EntityTag::EllipseArc: f.template operator()<TrimmedEntity<EllipseArcParam>>(); break;
         case EntityTag::QuadBezier: f.template operator()<TrimmedEntity<QuadBezierParam>>(); break;
-        case EntityTag::CubicBezier: f.template operator()<TrimmedEntity<CubicBezierParam>>(); break;
+        case EntityTag::CubicBezier:
+            f.template operator()<TrimmedEntity<CubicBezierParam>>();
+            break;
         case EntityTag::BSpline: f.template operator()<TrimmedEntity<BSplineCurveParam>>(); break;
         case EntityTag::Composite: f.template operator()<CompositePath>(); break;
         case EntityTag::Free:
@@ -2211,16 +2253,13 @@ inline void dispatch_entity_type(EntityTag tag, F f)
         }
     } else if constexpr (D == 3) {
         switch (tag) {
-        case EntityTag::Plane:
-            f.template operator()<TrimmedEntity<PlaneParam>>(); break;
-        case EntityTag::Sphere:
-            f.template operator()<TrimmedEntity<SphereParam>>(); break;
-        case EntityTag::Cylinder:
-            f.template operator()<TrimmedEntity<CylinderParam>>(); break;
-        case EntityTag::Line3:
-            f.template operator()<TrimmedEntity<Line3Param>>(); break;
+        case EntityTag::Plane: f.template operator()<TrimmedEntity<PlaneParam>>(); break;
+        case EntityTag::Sphere: f.template operator()<TrimmedEntity<SphereParam>>(); break;
+        case EntityTag::Cylinder: f.template operator()<TrimmedEntity<CylinderParam>>(); break;
+        case EntityTag::Line3: f.template operator()<TrimmedEntity<Line3Param>>(); break;
         case EntityTag::BSplineSurface:
-            f.template operator()<TrimmedEntity<BSplineSurfaceParam>>(); break;
+            f.template operator()<TrimmedEntity<BSplineSurfaceParam>>();
+            break;
         case EntityTag::Free:
         default: f.template operator()<Free<3>>(); break;
         }
@@ -2323,11 +2362,8 @@ inline Pt tangent_space(const Pt& p, Tag tag, const real* params)
 /// @param i       Row of the DOF within its tag partition.
 /// @param f       The small entity-specific callable.
 template <int D, class F>
-inline void with_entity(EntityTag tag,
-                        SoAView<const real> records,
-                        const SegmentedView<real>* seg,
-                        std::size_t i,
-                        F&& f)
+inline void with_entity(
+  EntityTag tag, SoAView<const real> records, const SegmentedView<real>* seg, std::size_t i, F&& f)
 {
     dispatch_entity_type<D>(tag, [&]<class E>() {
         if constexpr (HasEntitySoA<E>) {

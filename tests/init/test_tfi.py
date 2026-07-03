@@ -63,9 +63,12 @@ class TestTFIBoundary:
             for j in range(nj):
                 for k in range(nk):
                     on_boundary = (
-                        i == 0 or i == ni - 1
-                        or j == 0 or j == nj - 1
-                        or k == 0 or k == nk - 1
+                        i == 0
+                        or i == ni - 1
+                        or j == 0
+                        or j == nj - 1
+                        or k == 0
+                        or k == nk - 1
                     )
                     if on_boundary:
                         assert np.allclose(block.nodes[i, j, k], orig[i, j, k])
@@ -132,4 +135,6 @@ class TestTFITangling:
                 det_val = self._cell_det_A(nodes, (i, j))
                 if det_val < min_det:
                     min_det = det_val
-        assert min_det < 0, f"Expected tangled grid (min det < 0), got min det = {min_det}"
+        assert min_det < 0, (
+            f"Expected tangled grid (min det < 0), got min det = {min_det}"
+        )

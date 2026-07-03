@@ -28,8 +28,7 @@ class TestLuaStyleConstructors:
 
     def test_arc_keywords(self):
         a = Arc(p0=Vector3(1, 0), p1=Vector3(0, 1), centre=Vector3(0, 0))
-        np.testing.assert_allclose(a.eval(np.pi / 4),
-                                   [np.sqrt(0.5), np.sqrt(0.5)])
+        np.testing.assert_allclose(a.eval(np.pi / 4), [np.sqrt(0.5), np.sqrt(0.5)])
 
     def test_bezier_keywords(self):
         bz = Bezier(points=[Vector3(0, 0), Vector3(1, 1), Vector3(2, 0)])
@@ -58,16 +57,16 @@ class TestLuaStyleConstructors:
         centre = Vector3(1.0, 0.0)
         a, b = Vector3(0.0, 0.0), Vector3(1.0, 1.0)
         c = Vector3(2.0, 1.0)
-        wire = Edge(Polyline([Arc(a, b, centre), Line(b, c)]),
-                    arc_length=True)
-        np.testing.assert_allclose(tuple(wire.point_at(0.0))[:2], (0.0, 0.0),
-                                   atol=1e-12)
-        np.testing.assert_allclose(tuple(wire.point_at(1.0))[:2], (2.0, 1.0),
-                                   atol=1e-12)
+        wire = Edge(Polyline([Arc(a, b, centre), Line(b, c)]), arc_length=True)
+        np.testing.assert_allclose(
+            tuple(wire.point_at(0.0))[:2], (0.0, 0.0), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            tuple(wire.point_at(1.0))[:2], (2.0, 1.0), atol=1e-12
+        )
         # Arc quarter = pi/2, line = 1: midpoint of total length sits on
         # the arc near its far end, monotonically ordered.
-        pts = np.array([tuple(wire.point_at(t))[:2]
-                        for t in np.linspace(0, 1, 41)])
+        pts = np.array([tuple(wire.point_at(t))[:2] for t in np.linspace(0, 1, 41)])
         steps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
         assert np.all(steps < 0.12)  # no jumps: continuous forward walk
 
@@ -162,8 +161,9 @@ class TestEdge:
         # A composite of a 3-long and a 1-long line: native (uniform-in-t)
         # placement and arc-length placement agree because CompositePath's
         # parameter is already arc-length proportional.
-        wire = Polyline([Line(Vector3(0, 0), Vector3(3, 0)),
-                         Line(Vector3(3, 0), Vector3(3, 1))])
+        wire = Polyline(
+            [Line(Vector3(0, 0), Vector3(3, 0)), Line(Vector3(3, 0), Vector3(3, 1))]
+        )
         e = Edge(wire, arc_length=True)
         p = e.point_at(0.75)
         np.testing.assert_allclose([p.x, p.y], [3.0, 0.0], atol=1e-6)
@@ -182,8 +182,9 @@ class TestEdge:
 
 class TestEdgeComposites:
     def test_edge_on_polyline(self):
-        wire = Polyline([Line(Vector3(0, 0), Vector3(2, 0)),
-                         Line(Vector3(2, 0), Vector3(2, 2))])
+        wire = Polyline(
+            [Line(Vector3(0, 0), Vector3(2, 0)), Line(Vector3(2, 0), Vector3(2, 2))]
+        )
         e = Edge(wire)
         assert isinstance(wire, CompositePath)
         p = e.point_at(0.5)
@@ -199,8 +200,7 @@ class TestEdgeComposites:
             # Spline through unit-circle points stays near the circle.
             assert np.hypot(p.x, p.y) == pytest.approx(1.0, abs=5e-3)
         start, end = e.point_at(0.0), e.point_at(1.0)
-        np.testing.assert_allclose([start.x, start.y], [end.x, end.y],
-                                   atol=1e-12)
+        np.testing.assert_allclose([start.x, start.y], [end.x, end.y], atol=1e-12)
 
 
 class TestBuilderIntegration:
@@ -230,8 +230,7 @@ class TestBuilderIntegration:
 
         edges = self._square_edges()
         b = TopologyBuilder(d=2)
-        for n, p in [("sw", (0, 0)), ("se", (4, 0)), ("ne", (4, 4)),
-                     ("nw", (0, 4))]:
+        for n, p in [("sw", (0, 0)), ("se", (4, 0)), ("ne", (4, 4)), ("nw", (0, 4))]:
             b.add_corner(n, p)
         b.add_block("blk", ("sw", "nw", "se", "ne"), (4, 4))
         b.associate("blk", 1, 0, edges["bottom"])
@@ -258,8 +257,12 @@ class TestBuilderIntegration:
         b.add_corner("ne", edges["top"].place_node(0.0), fixed=True)
         b.add_corner("nw", edges["top"].place_node(1.0), fixed=True)
         b.add_block("blk", ("sw", "nw", "se", "ne"), (4, 4))
-        for axis, side, e in [(1, 0, edges["bottom"]), (1, 1, edges["top"]),
-                              (0, 0, edges["left"]), (0, 1, edges["right"])]:
+        for axis, side, e in [
+            (1, 0, edges["bottom"]),
+            (1, 1, edges["top"]),
+            (0, 0, edges["left"]),
+            (0, 1, edges["right"]),
+        ]:
             b.associate("blk", axis, side, e)
         topo = b.build()
         grid = topo.initialize_grid()

@@ -54,16 +54,12 @@ template <int D> class BlockField
 
     /// Interior (ghost-excluded) view of block `b`: extents (n0,…,n_{D-1}, D).
     [[nodiscard]] InteriorView<D> interior(std::size_t b) const
-    {
-        return interior_view<D>(buf_.data(), layout_, b);
-    }
+    { return interior_view<D>(buf_.data(), layout_, b); }
 
     /// Whole padded block (ghost layer included) view of block `b`:
     /// extents (n0+2,…,n_{D-1}+2, D).
     [[nodiscard]] HaloView<D> with_halo(std::size_t b) const
-    {
-        return halo_view<D>(buf_.data(), layout_, b);
-    }
+    { return halo_view<D>(buf_.data(), layout_, b); }
 
   private:
     BlockLayout<D> layout_;

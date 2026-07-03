@@ -16,12 +16,15 @@ import sys
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "examples", "2D", "circles"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "..", "examples", "2D", "circles")
+)
 
 
 def _has_cpp() -> bool:
     try:
         from egg._cpp import cpp_core  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -58,10 +61,16 @@ def _mildly_folded_context(t=0.5, R=3):
     topo, _ents = build_circle_in_rectangle(rough=True, R=R)
     grid = topo.initialize_grid()
     X_folded = grid.global_nodes.copy()
-    X_valid = build_circle_in_rectangle(rough=False, R=R)[0].initialize_grid().global_nodes.copy()
+    X_valid = (
+        build_circle_in_rectangle(rough=False, R=R)[0]
+        .initialize_grid()
+        .global_nodes.copy()
+    )
     ctx = build_sweep_context(grid, IdentityTarget(d=topo.d))
     X0 = (1.0 - t) * X_valid + t * X_folded
-    assert _grid_mindet(X0, ctx.energy_stencil) <= 0.0, "interpolated grid is not folded"
+    assert _grid_mindet(X0, ctx.energy_stencil) <= 0.0, (
+        "interpolated grid is not folded"
+    )
     return ctx, grid, X0
 
 
@@ -80,8 +89,15 @@ def test_cpp_untangle_driver_returns_consistent():
     max_outer = 8
 
     X_out, md_cpp, outer_iters, _delta_final = cpp_untangle(
-        ctx, grid, X0.copy(), device="cpu",
-        sweeps_per_delta=20, max_outer=max_outer, margin=1e-9, omega=0.5)
+        ctx,
+        grid,
+        X0.copy(),
+        device="cpu",
+        sweeps_per_delta=20,
+        max_outer=max_outer,
+        margin=1e-9,
+        omega=0.5,
+    )
 
     assert 0 < outer_iters <= max_outer
     np.testing.assert_allclose(md_cpp, _grid_mindet(X_out, es), rtol=0, atol=1e-9)
@@ -93,6 +109,13 @@ def test_cpp_untangle_clears_mild_fold():
 
     ctx, grid, X0 = _mildly_folded_context(t=0.5)
     _X_out, md, _outer_iters, _delta = cpp_untangle(
-        ctx, grid, X0.copy(), device="cpu",
-        sweeps_per_delta=40, max_outer=60, margin=1e-9, omega=0.5)
+        ctx,
+        grid,
+        X0.copy(),
+        device="cpu",
+        sweeps_per_delta=40,
+        max_outer=60,
+        margin=1e-9,
+        omega=0.5,
+    )
     assert md > 1e-9, f"failed to untangle mild fold: min det A = {md:.3e}"

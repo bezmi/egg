@@ -22,10 +22,12 @@ import numpy as np
 # egg::kHessP in src/metric.hpp (C++). Three copies across two languages; any
 # change must be applied to all three.
 _HESS_P = np.array(
-    [[0.0, 0.0, 0.0, 1.0],
-     [0.0, 0.0, -1.0, 0.0],
-     [0.0, -1.0, 0.0, 0.0],
-     [1.0, 0.0, 0.0, 0.0]]
+    [
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ]
 )
 _I4 = np.eye(4)
 
@@ -80,13 +82,13 @@ def _hess_T(T):
     c, d = T[:, 1, 0], T[:, 1, 1]
     D = a * d - b * c
     s = a * a + b * b + c * c + d * d
-    t = np.stack([a, b, c, d], axis=1)        # (P, 4)
-    cof = np.stack([d, -c, -b, a], axis=1)     # (P, 4)
-    tc = t[:, :, None] * cof[:, None, :]       # outer(t, cof)
-    cc = cof[:, :, None] * cof[:, None, :]     # outer(cof, cof)
+    t = np.stack([a, b, c, d], axis=1)  # (P, 4)
+    cof = np.stack([d, -c, -b, a], axis=1)  # (P, 4)
+    tc = t[:, :, None] * cof[:, None, :]  # outer(t, cof)
+    cc = cof[:, :, None] * cof[:, None, :]  # outer(cof, cof)
     inv_D = (1.0 / D)[:, None, None]
     inv_D2 = (1.0 / (D * D))[:, None, None]
-    s_D3 = (s / (D ** 3))[:, None, None]
+    s_D3 = (s / (D**3))[:, None, None]
     s_2D2 = (s / (2.0 * D * D))[:, None, None]
     return (
         inv_D * _I4[None]
@@ -112,8 +114,8 @@ def make_chain_J_nd(S, W_inv):
     dA = np.zeros((P, d, d, n_coords))
     for i in range(d):
         for k in range(d):
-            dA[:, i, k, i] = -S[:, k]                 # d/d corner[i]
-            dA[:, i, k, (k + 1) * d + i] = S[:, k]    # d/d nbr_k[i]
+            dA[:, i, k, i] = -S[:, k]  # d/d corner[i]
+            dA[:, i, k, (k + 1) * d + i] = S[:, k]  # d/d nbr_k[i]
     # J[p, i*d+c, j] = sum_k W_inv[p, k, c] dA[p, i, k, j]
     J = np.einsum("pkc,pikj->picj", W_inv, dA).reshape(P, d * d, n_coords)
     return J
@@ -128,16 +130,16 @@ def make_chain_J(s0, s1, W_inv):
     """
     P = s0.shape[0]
     dA = np.zeros((P, 4, 6))
-    dA[:, 0, 0] = -s0; dA[:, 0, 2] = s0    # A00 = s0*(nbr0_x - corner_x)
-    dA[:, 1, 0] = -s1; dA[:, 1, 4] = s1    # A01 = s1*(nbr1_x - corner_x)
-    dA[:, 2, 1] = -s0; dA[:, 2, 3] = s0    # A10 = s0*(nbr0_y - corner_y)
-    dA[:, 3, 1] = -s1; dA[:, 3, 5] = s1    # A11 = s1*(nbr1_y - corner_y)
+    dA[:, 0, 0], dA[:, 0, 2] = -s0, s0  # A00 = s0*(nbr0_x - corner_x)
+    dA[:, 1, 0], dA[:, 1, 4] = -s1, s1  # A01 = s1*(nbr1_x - corner_x)
+    dA[:, 2, 1], dA[:, 2, 3] = -s0, s0  # A10 = s0*(nbr0_y - corner_y)
+    dA[:, 3, 1], dA[:, 3, 5] = -s1, s1  # A11 = s1*(nbr1_y - corner_y)
     w = W_inv
     M = np.zeros((P, 4, 4))
-    M[:, 0, 0] = w[:, 0, 0]; M[:, 0, 1] = w[:, 1, 0]
-    M[:, 1, 0] = w[:, 0, 1]; M[:, 1, 1] = w[:, 1, 1]
-    M[:, 2, 2] = w[:, 0, 0]; M[:, 2, 3] = w[:, 1, 0]
-    M[:, 3, 2] = w[:, 0, 1]; M[:, 3, 3] = w[:, 1, 1]
+    M[:, 0, 0], M[:, 0, 1] = w[:, 0, 0], w[:, 1, 0]
+    M[:, 1, 0], M[:, 1, 1] = w[:, 0, 1], w[:, 1, 1]
+    M[:, 2, 2], M[:, 2, 3] = w[:, 0, 0], w[:, 1, 0]
+    M[:, 3, 2], M[:, 3, 3] = w[:, 0, 1], w[:, 1, 1]
     return np.einsum("pij,pjk->pik", M, dA)
 
 
@@ -171,7 +173,7 @@ def dof_grad_hess(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None):
     valid = role >= 0
     role_safe = np.maximum(role, 0)
     cols = (2 * role_safe)[:, None] + np.array([0, 1])[None]  # (P, 2)
-    Jb = np.take_along_axis(J, cols[:, None, :], axis=2)       # (P, 4, 2)
+    Jb = np.take_along_axis(J, cols[:, None, :], axis=2)  # (P, 4, 2)
     Jb[~valid] = 0.0
     blk = np.einsum("pai,pab,pbj->pij", Jb, H_T, Jb)
     H = blk.sum(0)

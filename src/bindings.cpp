@@ -24,9 +24,9 @@ namespace py = pybind11;
 #include <sycl/sycl.hpp>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
-
+#include <utility>
 #include <variant>
+#include <vector>
 
 namespace
 {
@@ -43,7 +43,7 @@ sycl::queue select_queue(const std::string& device)
         // q.wait() at chunk boundaries. See AdaptiveCpp doc/extensions.md
         // ACPP_EXT_COARSE_GRAINED_EVENTS, and performance.md "Strong-scaling/
         // latency-bound problems".
-        constexpr auto coarse = sycl::property::queue::AdaptiveCpp_coarse_grained_events{};
+        constexpr auto coarse = sycl::property::queue::AdaptiveCpp_coarse_grained_events {};
         if (device == "cpu") {
             return sycl::queue {sycl::cpu_selector_v, {coarse}};
         } else if (device == "gpu") {
@@ -90,7 +90,7 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
 
     auto check_index = [N](const std::vector<int>& idx, const char* name, const std::string& grp) {
         for (int v : idx) {
-            if (v < 0 || static_cast<std::size_t>(v) >= N) {
+            if (std::cmp_less(v, 0) || std::cmp_greater_equal(v, N)) {
                 throw std::invalid_argument("validate_context: " + grp + " " + name + " index " +
                                             std::to_string(v) + " out of range [0, " +
                                             std::to_string(N) + ")");
@@ -109,6 +109,7 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         const std::size_t ts = g.total_samples;
         auto eq = [&](std::size_t got, std::size_t want, const std::string& what) {
             if (got != want) {
+                // NOLINTNEXTLINE(performance-inefficient-string-concatenation): cold throw path
                 throw invalid_argument("validate_context: " + grp + " " + what + " size " +
                                        std::to_string(got) + " != " + std::to_string(want));
             }
@@ -166,40 +167,45 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         std::vector<int> covered(g.ndof, 0);
         for (std::size_t si = 0; si < g.soa.size(); ++si) {
             const auto& s = g.soa[si];
-            const std::string snm = grp + " soa[" + std::to_string(si) + "] (tag=" +
-                                    std::to_string(egg::to_int(s.tag)) + ")";
+            const std::string snm = grp + " soa[" + std::to_string(si) +
+                                    "] (tag=" + std::to_string(egg::to_int(s.tag)) + ")";
             if (s.records.size() != s.count * static_cast<std::size_t>(s.k_fields)) {
-                throw std::invalid_argument("validate_context: " + snm + " records size " +
-                    std::to_string(s.records.size()) + " != count*kFields " +
-                    std::to_string(s.count * static_cast<std::size_t>(s.k_fields)));
+                throw std::invalid_argument(
+                  "validate_context: " + snm + " records size " + std::to_string(s.records.size()) +
+                  " != count*kFields " +
+                  std::to_string(s.count * static_cast<std::size_t>(s.k_fields)));
             }
             if (s.dof_local.size() != s.count) {
                 throw std::invalid_argument("validate_context: " + snm + " dof_local size " +
-                    std::to_string(s.dof_local.size()) + " != count " + std::to_string(s.count));
+                                            std::to_string(s.dof_local.size()) + " != count " +
+                                            std::to_string(s.count));
             }
             for (std::size_t j = 0; j < s.seg.size(); ++j) {
                 if (s.seg[j].off.size() != s.count + 1) {
-                    throw std::invalid_argument("validate_context: " + snm +
-                        " seg[" + std::to_string(j) + "].off size " +
-                        std::to_string(s.seg[j].off.size()) + " != count+1 " +
-                        std::to_string(s.count + 1));
+                    throw std::invalid_argument("validate_context: " + snm + " seg[" +
+                                                std::to_string(j) + "].off size " +
+                                                std::to_string(s.seg[j].off.size()) +
+                                                " != count+1 " + std::to_string(s.count + 1));
                 }
             }
             for (int dl : s.dof_local) {
                 if (dl < 0 || static_cast<std::size_t>(dl) >= g.ndof) {
                     throw std::invalid_argument("validate_context: " + snm + " dof_local " +
-                        std::to_string(dl) + " out of range [0, " + std::to_string(g.ndof) + ")");
+                                                std::to_string(dl) + " out of range [0, " +
+                                                std::to_string(g.ndof) + ")");
                 }
                 if (covered[static_cast<std::size_t>(dl)]++ != 0) {
                     throw std::invalid_argument("validate_context: " + snm + " dof_local " +
-                        std::to_string(dl) + " covered by more than one SoA partition");
+                                                std::to_string(dl) +
+                                                " covered by more than one SoA partition");
                 }
             }
         }
         for (std::size_t d = 0; d < g.ndof; ++d) {
             if (covered[d] == 0) {
                 throw std::invalid_argument("validate_context: " + grp + " DOF " +
-                    std::to_string(d) + " not covered by any SoA partition");
+                                            std::to_string(d) +
+                                            " not covered by any SoA partition");
             }
         }
     }
@@ -227,7 +233,6 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         check_index(es.gn[k], ("gn" + std::to_string(k)).c_str(), "energy_stencil");
     }
 }
-
 
 // Extract a contiguous int32 numpy array from a dict key, returning a vector.
 std::vector<int> extract_int(const py::dict& d, const std::string& key)
@@ -381,7 +386,8 @@ egg::SweepContextHostT<D>
 // Extract a (rows, D) int32 numpy array as a vector of per-row D-index arrays.
 // An empty (0, D) array yields an empty vector (no entries to exchange).
 template <int D>
-std::vector<std::array<std::size_t, D>> extract_index_rows(const py::dict& d, const std::string& key)
+std::vector<std::array<std::size_t, D>> extract_index_rows(const py::dict& d,
+                                                           const std::string& key)
 {
     auto arr = d[key.c_str()].cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
     const auto info = arr.request();
@@ -455,7 +461,7 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     // Unravel a row-major flat logical index (last axis fastest), matching the
     // C-order build_block_structured_context flattens block_global_dof in.
     auto unravel = [](std::size_t f,
-                      const typename BlockLayout<D>::Shape& shape) -> std::array<std::size_t, D> {
+                      const BlockLayout<D>::Shape& shape) -> std::array<std::size_t, D> {
         std::array<std::size_t, D> logical {};
         std::size_t rem = f;
         for (int k = D - 1; k >= 0; --k) {
@@ -465,7 +471,7 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         return logical;
     };
     auto ravel = [](const std::array<std::size_t, D>& logical,
-                    const typename BlockLayout<D>::Shape& shape) -> std::size_t {
+                    const BlockLayout<D>::Shape& shape) -> std::size_t {
         std::size_t f = 0;
         for (int k = 0; k < D; ++k) { f = (f * shape[static_cast<std::size_t>(k)]) + logical[k]; }
         return f;
@@ -481,7 +487,7 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         auto arr = bgd_list[b].cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
         std::size_t n = 1;
         for (int k = 0; k < D; ++k) { n *= shapes[b][static_cast<std::size_t>(k)]; }
-        if (static_cast<std::size_t>(arr.size()) != n) {
+        if (std::cmp_not_equal(arr.size(), n)) {
             throw std::invalid_argument("structured: block_global_dof length != prod(shape)");
         }
         bgd[b].assign(arr.data(), arr.data() + arr.size());
@@ -491,7 +497,7 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     // slots come from block_global_dof; the ghost shell from the halo table (a
     // dst-block ghost holds the src-block's interior node, keyed by its global id).
     std::vector<std::unordered_map<int, int>> block_map(num_blocks);
-    std::vector<egg::real> Xp(layout.total_doubles(), egg::real(0));
+    std::vector<egg::real> Xp(layout.total_doubles(), egg::real {0});
     // Owner block + owner interior slot of each global node, derived in this same
     // interior pass: the lowest-index block that contains a node owns (relaxes)
     // it; every later block holds a copy refreshed by an owner->copy broadcast.
@@ -535,7 +541,9 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         // The halo source is an INTERIOR padded index (1-based per axis); recover
         // the neighbour's global id, then register db's ghost slot under it.
         std::array<std::size_t, D> src_logical {};
-        for (int k = 0; k < D; ++k) { src_logical[static_cast<std::size_t>(k)] = halo_src_padded[e][k] - 1; }
+        for (int k = 0; k < D; ++k) {
+            src_logical[static_cast<std::size_t>(k)] = halo_src_padded[e][k] - 1;
+        }
         const int gid = bgd[sb][ravel(src_logical, shapes[sb])];
         block_map[db][gid] = padded_node_index<D>(layout, db, halo_dst_padded[e]);
     }
@@ -565,7 +573,8 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     std::vector<std::unordered_set<int>> used_ghost(num_blocks);
     for (std::size_t e = 0; e < halo_dst_block.size(); ++e) {
         used_ghost[static_cast<std::size_t>(halo_dst_block[e])].insert(
-          padded_node_index<D>(layout, static_cast<std::size_t>(halo_dst_block[e]),
+          padded_node_index<D>(layout,
+                               static_cast<std::size_t>(halo_dst_block[e]),
                                halo_dst_padded[e]));
     }
     std::vector<std::vector<int>> free_ghosts(num_blocks);
@@ -607,9 +616,9 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         if (it != block_map[b].end()) { return it->second; }
         const int src = g2s[static_cast<std::size_t>(gid)];  // owner-interior node index
         if (src < 0) {
-            throw std::invalid_argument(
-              std::string("structured: ") + what + " references global node " +
-              std::to_string(gid) + " absent from every block's interior map");
+            throw std::invalid_argument(std::string("structured: ") + what +
+                                        " references global node " + std::to_string(gid) +
+                                        " absent from every block's interior map");
         }
         if (free_cursor[b] >= free_ghosts[b].size()) {
             throw std::invalid_argument(
@@ -627,9 +636,10 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     // and all its patch samples resolve to that block's interior or ghost slots.
     for (auto& g : host.groups) {
         for (std::size_t d = 0; d < g.ndof; ++d) {
-            const auto ob = static_cast<std::size_t>(owner_block[static_cast<std::size_t>(g.dof_idx[d])]);
-            const std::size_t off = static_cast<std::size_t>(g.sample_offset[d]);
-            const std::size_t P = static_cast<std::size_t>(g.P_of[d]);
+            const auto ob =
+              static_cast<std::size_t>(owner_block[static_cast<std::size_t>(g.dof_idx[d])]);
+            const auto off = static_cast<std::size_t>(g.sample_offset[d]);
+            const auto P = static_cast<std::size_t>(g.P_of[d]);
             for (std::size_t p = off; p < off + P; ++p) {
                 g.gc[p] = lookup(ob, g.gc[p], "gc");
                 for (int k = 0; k < D; ++k) { g.gn[k][p] = lookup(ob, g.gn[k][p], "gn"); }
@@ -674,15 +684,20 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         }
     }
 
-    return StructuredRemap<D> {std::move(layout), std::move(g2s), M, std::move(fan_src_off),
-                               std::move(fan_dst_off), std::move(share_src_off),
+    return StructuredRemap<D> {std::move(layout),
+                               std::move(g2s),
+                               M,
+                               std::move(fan_src_off),
+                               std::move(fan_dst_off),
+                               std::move(share_src_off),
                                std::move(share_dst_off)};
 }
 
 // Build the device halo topology from the host-side padded-index tables, plus
 // any singular-fan mirror copies the remap allocated (pre-resolved to offsets).
 template <int D>
-egg::BlockTopologyDevice<D> build_topology(sycl::queue& q, const egg::BlockLayout<D>& layout,
+egg::BlockTopologyDevice<D> build_topology(sycl::queue& q,
+                                           const egg::BlockLayout<D>& layout,
                                            const py::dict& structured,
                                            const std::vector<std::size_t>& share_src_off,
                                            const std::vector<std::size_t>& share_dst_off,
@@ -713,7 +728,6 @@ int require_supported_dim(int d)
     return d;
 }
 
-
 // A device-resident structured session: the executor (owning the packed X +
 // halo topology) and the gather-back remap for one dimension.
 template <int D> struct StructuredSession {
@@ -725,14 +739,21 @@ template <int D> struct StructuredSession {
 // the halo-padded store once, upload it, and keep it resident.
 template <int D>
 StructuredSession<D> make_structured_session(const py::dict& ctx_arrays,
-                                             const py::dict& structured, const double* X,
-                                             std::size_t num_nodes, const std::string& device)
+                                             const py::dict& structured,
+                                             const double* X,
+                                             std::size_t num_nodes,
+                                             const std::string& device)
 {
     sycl::queue q = select_queue(device);
     auto host = unpack_context<D>(ctx_arrays, X, num_nodes);
     StructuredRemap<D> rm = apply_structured_remap<D>(host, structured);
-    auto topo = build_topology<D>(q, rm.layout, structured, rm.share_src_off, rm.share_dst_off,
-                                           rm.fan_src_off, rm.fan_dst_off);
+    auto topo = build_topology<D>(q,
+                                  rm.layout,
+                                  structured,
+                                  rm.share_src_off,
+                                  rm.share_dst_off,
+                                  rm.fan_src_off,
+                                  rm.fan_dst_off);
     egg::StructuredExecutorT<D> exec(q, host, std::move(topo));
     return StructuredSession<D> {std::move(exec), std::move(rm)};
 }
@@ -745,17 +766,18 @@ class CppStructuredSweepSession
 {
   public:
     CppStructuredSweepSession(
-      const py::dict& ctx_arrays, const py::dict& structured,
+      const py::dict& ctx_arrays,
+      const py::dict& structured,
       const py::array_t<double, py::array::c_style | py::array::forcecast>& X0,
-      const std::string& device, int dim) :
+      const std::string& device,
+      int dim) :
         dim_(require_supported_dim(dim)), num_nodes_(checked_num_nodes(X0, dim_)),
-        sess_(dim_ == 2
-                ? SessVariant {std::in_place_type<StructuredSession<2>>,
-                               make_structured_session<2>(ctx_arrays, structured, X0.data(),
-                                                          num_nodes_, device)}
-                : SessVariant {std::in_place_type<StructuredSession<3>>,
-                               make_structured_session<3>(ctx_arrays, structured, X0.data(),
-                                                          num_nodes_, device)})
+        sess_(dim_ == 2 ? SessVariant {std::in_place_type<StructuredSession<2>>,
+                                       make_structured_session<2>(
+                                         ctx_arrays, structured, X0.data(), num_nodes_, device)}
+                        : SessVariant {std::in_place_type<StructuredSession<3>>,
+                                       make_structured_session<3>(
+                                         ctx_arrays, structured, X0.data(), num_nodes_, device)})
     {
     }
 
@@ -775,7 +797,8 @@ class CppStructuredSweepSession
           },
           sess_);
         const auto n_reported = static_cast<py::ssize_t>(energies.size());
-        return std::make_tuple(to_f64(energies.data(), n_reported), to_f64(mindets.data(), n_reported));
+        return std::make_tuple(to_f64(energies.data(), n_reported),
+                               to_f64(mindets.data(), n_reported));
     }
 
     // Download the packed buffer and gather it back to global node order.
@@ -826,7 +849,6 @@ PYBIND11_MODULE(cpp_core, m)
     // tests/cpp/real_tol.hpp). True when built with -DEGG_REAL_IS_FP32=ON.
     m.attr("REAL_IS_FLOAT") = (sizeof(egg::real) == 4);
 
-
     py::class_<CppStructuredSweepSession>(
       m,
       "CppStructuredSweepSession",
@@ -864,7 +886,6 @@ PYBIND11_MODULE(cpp_core, m)
            &CppStructuredSweepSession::get_X,
            "Download X gathered back to global node order, shape (N*dim,).");
 
-
     m.def(
       "cpp_structured_sweep",
       [](const py::dict& ctx_arrays,
@@ -876,7 +897,8 @@ PYBIND11_MODULE(cpp_core, m)
          double delta,
          int dim,
          double omega,
-         int report_every) -> std::tuple<py::array_t<double>, py::array_t<double>, py::array_t<double>> {
+         int report_every)
+        -> std::tuple<py::array_t<double>, py::array_t<double>, py::array_t<double>> {
           require_supported_dim(dim);
 
           const auto run = [&]<int D>() {
@@ -890,9 +912,13 @@ PYBIND11_MODULE(cpp_core, m)
               const std::size_t num_nodes = checked_num_nodes(X_arr, dim);
               auto host_ctx = unpack_context<D>(ctx_arrays, X_arr.data(), num_nodes);
               StructuredRemap<D> rm = apply_structured_remap<D>(host_ctx, structured);
-              egg::BlockTopologyDevice<D> topo =
-                build_topology<D>(q, rm.layout, structured, rm.share_src_off, rm.share_dst_off,
-                                           rm.fan_src_off, rm.fan_dst_off);
+              egg::BlockTopologyDevice<D> topo = build_topology<D>(q,
+                                                                   rm.layout,
+                                                                   structured,
+                                                                   rm.share_src_off,
+                                                                   rm.share_dst_off,
+                                                                   rm.fan_src_off,
+                                                                   rm.fan_dst_off);
 
               egg::StructuredExecutorT<D> exec(q, host_ctx, std::move(topo));
               const egg::ObjectiveKindT<D> objective = egg::make_objective<D>(phase, delta);
@@ -965,7 +991,7 @@ PYBIND11_MODULE(cpp_core, m)
                         static_cast<egg::real>(t[2]),
                         static_cast<egg::real>(t[3])};
           egg::ShapeObjective objective;
-          double mu = static_cast<double>(objective.value(vt));
+          const auto mu = static_cast<double>(objective.value(vt));
           auto g = objective.grad(vt);
           auto h = objective.hess(vt);
           return std::make_tuple(mu, to_f64(g.data(), 4), to_f64(h.data(), 16));
@@ -979,8 +1005,7 @@ PYBIND11_MODULE(cpp_core, m)
         -> std::tuple<double, py::array_t<double>, py::array_t<double>> {
           const std::vector<egg::real> t = narrow(t_arr);
           egg::MuCond3Eval r = egg::mu_cond3_eval(t.data());
-          return std::make_tuple(
-            static_cast<double>(r.val), to_f64(r.grad, 9), to_f64(r.hess, 81));
+          return std::make_tuple(static_cast<double>(r.val), to_f64(r.grad, 9), to_f64(r.hess, 81));
       },
       py::arg("t"),
       "Evaluate mu_cond3 metric (3D). vec(T) row-major [t00..t22]. "
@@ -1101,7 +1126,8 @@ PYBIND11_MODULE(cpp_core, m)
           sv.s[0] = s0.data();
           sv.s[1] = s1.data();
           sv.W_inv = W_inv.data();
-          egg::real energy = egg::real(0), mindet = egg::real(0);
+          egg::real energy {0};
+          egg::real mindet {0};
           egg::patch_energy_mindet<2>(sv, X.data(), energy, mindet);
           return std::make_tuple(static_cast<double>(energy), static_cast<double>(mindet));
       },

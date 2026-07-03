@@ -24,10 +24,12 @@ def main():
 
     # Geometry + topology; each circle carries its own boundary-layer spec.
     bl = {
-        "circle": dict(first_height=a.bl_first_height, growth=a.bl_growth,
-                       n_fixed=a.pin_layers),
-        "circle2": dict(first_height=a.bl_first_height2, growth=a.bl_growth2,
-                        n_fixed=a.pin_layers),
+        "circle": dict(
+            first_height=a.bl_first_height, growth=a.bl_growth, n_fixed=a.pin_layers
+        ),
+        "circle2": dict(
+            first_height=a.bl_first_height2, growth=a.bl_growth2, n_fixed=a.pin_layers
+        ),
     }
     topo, ents = build_twin_circle(rough=False, bl=bl, R=a.resolution)
 
@@ -46,8 +48,15 @@ def main():
     )
     steps = generate_steps(grid, target, cfg, untangle_direct=not a.plot_live)
 
-    finish(grid, topo, ents, steps, a, title="good twin-circle",
-           mindet_title="min det A (TMOP only)")
+    finish(
+        grid,
+        topo,
+        ents,
+        steps,
+        a,
+        title="good twin-circle",
+        mindet_title="min det A (TMOP only)",
+    )
 
 
 if __name__ == "__main__":

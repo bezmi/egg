@@ -1,3 +1,4 @@
+# ruff: noqa: E402  (script: imports interleaved with generation stages)
 """Derive the closed-form grad/Hessian of mu_cond3 via SymPy CSE.
 
 Computes value, 9-entry gradient, and the 45 unique Hessian entries
@@ -11,6 +12,7 @@ mu_cond3(t) = (s*q)/(9*D^2) - 1
   s = sum t_i^2       (quadratic)
   q = sum cof_i^2     (quartic)
 """
+
 from __future__ import annotations
 
 import sympy as sp
@@ -62,6 +64,8 @@ def to_cxx(expr) -> str:
     # Substitute array indexing, then print.
     e = expr.subs(sym_to_cxx)
     return _PRINTER.doprint(e)
+
+
 import time
 
 # 9 symbols of vec(T) (row-major).
@@ -71,9 +75,9 @@ N = 9
 
 def det3(t):
     t0, t1, t2, t3, t4, t5, t6, t7, t8 = t
-    return (t0 * (t4 * t8 - t5 * t7)
-            - t1 * (t3 * t8 - t5 * t6)
-            + t2 * (t3 * t7 - t4 * t6))
+    return (
+        t0 * (t4 * t8 - t5 * t7) - t1 * (t3 * t8 - t5 * t6) + t2 * (t3 * t7 - t4 * t6)
+    )
 
 
 def cof3(t):
@@ -100,7 +104,7 @@ mu = s * q / (9 * D**2) - 1
 print("=== Computing Gradient (unexpanded) ===", flush=True)
 t0 = time.time()
 grad = [sp.diff(mu, ti) for ti in t]
-print(f"  Grad done ({time.time()-t0:.2f}s)", flush=True)
+print(f"  Grad done ({time.time() - t0:.2f}s)", flush=True)
 
 print("=== Computing symmetric Hessian (45 unique entries) ===", flush=True)
 unique_hess = []
@@ -111,13 +115,12 @@ for i in range(N):
         hess_map[i][j] = h
         hess_map[j][i] = h
         unique_hess.append(h)
-print(f"  Hessian done ({time.time()-t0:.2f}s)", flush=True)
+print(f"  Hessian done ({time.time() - t0:.2f}s)", flush=True)
 
 print("=== Running CSE ===", flush=True)
 all_exprs = [mu] + grad + unique_hess
 replacements, reduced = sp.cse(all_exprs)
-print(f"  CSE done ({time.time()-t0:.2f}s, {len(replacements)} temps)",
-      flush=True)
+print(f"  CSE done ({time.time() - t0:.2f}s, {len(replacements)} temps)", flush=True)
 
 # Map t0..t8 -> t[0]..t[8] for C++.
 sym_to_cxx = {t[k]: sp.Symbol(f"t[{k}]") for k in range(N)}
@@ -130,9 +133,12 @@ print(f"  Raw temp expression bytes: {total_size}", flush=True)
 # Per the plan's decision gate: if unfactored output exceeds ~200 KB, stop.
 LARGE = 200_000
 if total_size > LARGE:
-    print(f"WARN: total CSE expression size {total_size} > {LARGE}; "
-          f"the formula may not admit a clean tensor decomposition.",
-          flush=True)
+    print(
+        f"WARN: total CSE expression size {total_size} > {LARGE}; "
+        f"the formula may not admit a clean tensor decomposition.",
+        flush=True,
+    )
+
 
 # Post-CSE peephole: collapse 3 independent FP64 divisions on powers of D
 # (det3) into 1 division. CSE produces:
@@ -179,8 +185,7 @@ def _to_cxx_lines(replacements, reduced):
             if i == j:
                 lines.append(f"    r.hess[{ij}] = {val_str};")
             else:
-                lines.append(f"    r.hess[{ij}] = "
-                             f"r.hess[{ji}] = {val_str};")
+                lines.append(f"    r.hess[{ij}] = r.hess[{ji}] = {val_str};")
             idx += 1
     return lines
 
@@ -226,12 +231,14 @@ def _to_cxx_lines_jhj(replacements, reduced):
             if i == j:
                 lines.append(
                     f"                jhj_out[(p * 3) + qcol] += "
-                    f"h * Jb[({i} * 3) + p] * Jb[({i} * 3) + qcol];")
+                    f"h * Jb[({i} * 3) + p] * Jb[({i} * 3) + qcol];"
+                )
             else:
                 lines.append(
                     f"                jhj_out[(p * 3) + qcol] += h * "
                     f"((Jb[({i} * 3) + p] * Jb[({j} * 3) + qcol]) + "
-                    f"(Jb[({j} * 3) + p] * Jb[({i} * 3) + qcol]));")
+                    f"(Jb[({j} * 3) + p] * Jb[({i} * 3) + qcol]));"
+                )
             lines.append("            }")
             lines.append("        }")
             lines.append("    }")
@@ -263,33 +270,36 @@ header = [
     "",
 ]
 header.extend(body_lines)
-header.extend([
-    "",
-    "    return r;",
-    "}",
-    "",
-    "// Fused value + gradient + contracted Hessian jhj = Jb^T H Jb (3x3).",
-    "// Jb: runtime 9x3 row-major chain matrix (the role-selected columns of J).",
-    "// Avoids materialising the 81-entry metric Hessian — folds each entry into",
-    "// the 3x3 accumulator on the fly.",
-    "inline void mu_cond3_jhj(const real* t, const real* Jb,",
-    "                         real* val_out, real* grad_out, real* jhj_out) {",
-    "",
-])
+header.extend(
+    [
+        "",
+        "    return r;",
+        "}",
+        "",
+        "// Fused value + gradient + contracted Hessian jhj = Jb^T H Jb (3x3).",
+        "// Jb: runtime 9x3 row-major chain matrix (the role-selected columns of J).",
+        "// Avoids materialising the 81-entry metric Hessian — folds each entry into",
+        "// the 3x3 accumulator on the fly.",
+        "inline void mu_cond3_jhj(const real* t, const real* Jb,",
+        "                         real* val_out, real* grad_out, real* jhj_out) {",
+        "",
+    ]
+)
 header.extend(jhj_lines)
-header.extend([
-    "",
-    "}",
-    "",
-    "} // namespace egg",
-    "",
-])
+header.extend(
+    [
+        "",
+        "}",
+        "",
+        "} // namespace egg",
+        "",
+    ]
+)
 out_path = "bench/optimized_3d_mu.hpp"
 with open(out_path, "w") as f:
     f.write("\n".join(header))
 
 print(f"Done! C++ header written to {out_path}", flush=True)
-
 
 
 # ---------------------------------------------------------------------------
@@ -318,8 +328,18 @@ sym_to_cxx.update({w[k]: sp.Symbol(f"w[{k}]") for k in range(N)})
 
 # --- numeric self-check: analytic D2 (the template's math) vs w^T H w ---------
 import random
-_idx = [(4, 8, 5, 7), (5, 6, 3, 8), (3, 7, 4, 6), (2, 7, 1, 8), (0, 8, 2, 6),
-        (1, 6, 0, 7), (1, 5, 2, 4), (2, 3, 0, 5), (0, 4, 1, 3)]
+
+_idx = [
+    (4, 8, 5, 7),
+    (5, 6, 3, 8),
+    (3, 7, 4, 6),
+    (2, 7, 1, 8),
+    (0, 8, 2, 6),
+    (1, 6, 0, 7),
+    (1, 5, 2, 4),
+    (2, 3, 0, 5),
+    (0, 4, 1, 3),
+]
 _cof = [t[a] * t[b] - t[c] * t[d] for (a, b, c, d) in _idx]
 _cp = [w[a] * t[b] + t[a] * w[b] - w[c] * t[d] - t[c] * w[d] for (a, b, c, d) in _idx]
 _cpp = [2 * (w[a] * w[b] - w[c] * w[d]) for (a, b, c, d) in _idx]
@@ -331,14 +351,18 @@ _spp = 2 * sum(w[i] * w[i] for i in range(N))
 _Dp = sum(w[i] * _cof[i] for i in range(N))
 _Dpp = sum(w[i] * _cp[i] for i in range(N))
 _qp = 2 * sum(_cof[i] * _cp[i] for i in range(N))
-_qpp = 2 * (sum(_cp[i] * _cp[i] for i in range(N)) + sum(_cof[i] * _cpp[i] for i in range(N)))
+_qpp = 2 * (
+    sum(_cp[i] * _cp[i] for i in range(N)) + sum(_cof[i] * _cpp[i] for i in range(N))
+)
 _h = 9 * _D**2
 _g = _s * _q
 _gp = _sp * _q + _s * _qp
 _gpp = _spp * _q + 2 * _sp * _qp + _s * _qpp
 _hp = 18 * _D * _Dp
 _hpp = 18 * (_Dp**2 + _D * _Dpp)
-_D2_template = _gpp / _h - 2 * _gp * _hp / _h**2 - _g * _hpp / _h**2 + 2 * _g * _hp**2 / _h**3
+_D2_template = (
+    _gpp / _h - 2 * _gp * _hp / _h**2 - _g * _hpp / _h**2 + 2 * _g * _hp**2 / _h**3
+)
 _D2_ref = (sp.Matrix(w).T * sp.hessian(mu, t) * sp.Matrix(w))[0]
 _f_t = sp.lambdify(t + w, _D2_template, "math")
 _f_r = sp.lambdify(t + w, _D2_ref, "math")
@@ -353,7 +377,7 @@ print(f"  analytic D2 template self-check OK (max rel err {_maxerr:.2e})", flush
 
 # value + gradient only (CSE; pool dies after writing to memory).
 repl_vg, red_vg = sp.cse([mu] + grad)
-print(f"  valgrad CSE done ({time.time()-t0:.2f}s, {len(repl_vg)} temps)", flush=True)
+print(f"  valgrad CSE done ({time.time() - t0:.2f}s, {len(repl_vg)} temps)", flush=True)
 
 
 def _emit_cse_temps(replacements):
@@ -361,7 +385,7 @@ def _emit_cse_temps(replacements):
 
 
 # d2dir + jhj: fixed analytic template (precompute-once, self-checked above).
-D2DIR_JHJ_TEMPLATE = r'''// mu''(t; w): the 2nd directional derivative of mu_cond3 at t along the 9-vector
+D2DIR_JHJ_TEMPLATE = r"""// mu''(t; w): the 2nd directional derivative of mu_cond3 at t along the 9-vector
 // w. The cofactors cof[9] and the scalars s, q, D=det are precomputed ONCE by
 // mu_cond3_jhj and passed in (shared across all 6 directions), so this body is
 // only the cheap w-contractions -> small (force-inlined) 6x working set.
@@ -478,7 +502,7 @@ __attribute__((noinline)) inline void mu_cond3_jhj(
     jhj_out[0] = d00; jhj_out[1] = j01; jhj_out[2] = j02;
     jhj_out[3] = j01; jhj_out[4] = d11; jhj_out[5] = j12;
     jhj_out[6] = j02; jhj_out[7] = j12; jhj_out[8] = d22;
-}'''
+}"""
 
 valgrad_lines = [
     "// value + gradient of mu_cond3 at t, written to memory (CSE pool dies here).",
@@ -493,22 +517,24 @@ valgrad_lines += [f"    grad_out[{i}] = {to_cxx(red_vg[1 + i])};" for i in range
 valgrad_lines += ["}"]
 
 body = D2DIR_JHJ_TEMPLATE.replace("%VALGRAD%", "\n".join(valgrad_lines))
-dir_header = "\n".join([
-    "// GENERATED by bench/derive_cond3.py — directional 2nd-derivative jhj.",
-    "// Paste mu_cond3_d2dir / mu_cond3_valgrad / mu_cond3_jhj into src/metric.hpp",
-    "// (replacing the full-Hessian mu_cond3_jhj). Keep mu_cond3_eval as the parity",
-    "// reference. clang-format -i src/metric.hpp afterward.",
-    "#pragma once",
-    "",
-    "namespace egg {",
-    "",
-    body,
-    "",
-    "} // namespace egg",
-    "",
-])
+dir_header = "\n".join(
+    [
+        "// GENERATED by bench/derive_cond3.py — directional 2nd-derivative jhj.",
+        "// Paste mu_cond3_d2dir / mu_cond3_valgrad / mu_cond3_jhj into src/metric.hpp",
+        "// (replacing the full-Hessian mu_cond3_jhj). Keep mu_cond3_eval as the parity",
+        "// reference. clang-format -i src/metric.hpp afterward.",
+        "#pragma once",
+        "",
+        "namespace egg {",
+        "",
+        body,
+        "",
+        "} // namespace egg",
+        "",
+    ]
+)
 dir_path = "bench/optimized_3d_mu_directional.hpp"
 with open(dir_path, "w") as f:
     f.write(dir_header)
 print(f"Done! Directional jhj header written to {dir_path}", flush=True)
-print(f"Total elapsed: {time.time()-t0:.2f}s", flush=True)
+print(f"Total elapsed: {time.time() - t0:.2f}s", flush=True)

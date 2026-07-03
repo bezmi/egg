@@ -38,8 +38,9 @@ def _wrap(x: float, a: float, b: float) -> float:
     return a + t
 
 
-def _newton_foot(curve, q: np.ndarray, t_lo: float, t_hi: float,
-                 n_seed: int = 16, iters: int = 8) -> float:
+def _newton_foot(
+    curve, q: np.ndarray, t_lo: float, t_hi: float, n_seed: int = 16, iters: int = 8
+) -> float:
     """Seeded-Newton nearest-foot parameter (mirrors C++ ``project_param``)."""
     ts = t_lo + (t_hi - t_lo) * np.arange(n_seed + 1) / n_seed
     pts = np.stack([curve.eval(t) for t in ts])
@@ -110,8 +111,9 @@ class CircleArc(_TrimmedCurve):
     interval before it reaches the C++ projection kernels.
     """
 
-    def __init__(self, center, radius: float, t0: float, t1: float,
-                 closed: bool = False):
+    def __init__(
+        self, center, radius: float, t0: float, t1: float, closed: bool = False
+    ):
         self.center = np.asarray(center, dtype=float)
         self.radius = float(radius)
         self.t0, self.t1, self.closed = float(t0), float(t1), bool(closed)
@@ -133,8 +135,16 @@ class CircleArc(_TrimmedCurve):
 class EllipseArc(_TrimmedCurve):
     """A rotated elliptical arc ``C + R_phi (a cos t, b sin t)``."""
 
-    def __init__(self, center, a: float, b: float, phi: float,
-                 t0: float, t1: float, closed: bool = False):
+    def __init__(
+        self,
+        center,
+        a: float,
+        b: float,
+        phi: float,
+        t0: float,
+        t1: float,
+        closed: bool = False,
+    ):
         self.center = np.asarray(center, dtype=float)
         self.a, self.b, self.phi = float(a), float(b), float(phi)
         self.t0, self.t1, self.closed = float(t0), float(t1), bool(closed)
@@ -191,21 +201,28 @@ class CubicBezier(_TrimmedCurve):
     def eval(self, t: float) -> np.ndarray:
         """Point at parameter t."""
         u = 1.0 - t
-        return (u ** 3 * self.p[0] + 3 * u * u * t * self.p[1]
-                + 3 * u * t * t * self.p[2] + t ** 3 * self.p[3])
+        return (
+            u**3 * self.p[0]
+            + 3 * u * u * t * self.p[1]
+            + 3 * u * t * t * self.p[2]
+            + t**3 * self.p[3]
+        )
 
     def deriv(self, t: float) -> np.ndarray:
         """d/dt of :meth:`eval`."""
         u = 1.0 - t
-        return (3 * u * u * (self.p[1] - self.p[0])
-                + 6 * u * t * (self.p[2] - self.p[1])
-                + 3 * t * t * (self.p[3] - self.p[2]))
+        return (
+            3 * u * u * (self.p[1] - self.p[0])
+            + 6 * u * t * (self.p[2] - self.p[1])
+            + 3 * t * t * (self.p[3] - self.p[2])
+        )
 
     def deriv2(self, t: float) -> np.ndarray:
         """d2/dt2 of :meth:`eval`."""
         u = 1.0 - t
-        return (6 * u * (self.p[2] - 2 * self.p[1] + self.p[0])
-                + 6 * t * (self.p[3] - 2 * self.p[2] + self.p[1]))
+        return 6 * u * (self.p[2] - 2 * self.p[1] + self.p[0]) + 6 * t * (
+            self.p[3] - 2 * self.p[2] + self.p[1]
+        )
 
 
 class BSplineCurve(_TrimmedCurve):
@@ -234,8 +251,9 @@ class BSplineCurve(_TrimmedCurve):
             self.weights = np.asarray(weights, dtype=float)
             if self.weights.shape != (n_ctrl,):
                 raise ValueError("weights length must equal n_ctrl")
-        coeffs = (self.ctrl if self.weights is None
-                  else self.weights[:, None] * self.ctrl)
+        coeffs = (
+            self.ctrl if self.weights is None else self.weights[:, None] * self.ctrl
+        )
         self._spl = _SciBSpline(self.knots, coeffs, self.degree)
         self._d1 = self._spl.derivative(1)
         self._d2 = self._spl.derivative(2)
@@ -310,13 +328,13 @@ class CompositePath(GeometryEntity):
                     0.0, 1.0, samples_per_segment + 1
                 )
                 pts = np.stack([seg.eval(t) for t in ts])
-                lengths.append(float(np.linalg.norm(np.diff(pts, axis=0),
-                                                    axis=1).sum()))
+                lengths.append(
+                    float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
+                )
             total = sum(lengths)
             if total <= 0.0:
                 raise ValueError("CompositePath has zero total arc length")
-            self._breaks = np.concatenate(
-                [[0.0], np.cumsum(lengths) / total])
+            self._breaks = np.concatenate([[0.0], np.cumsum(lengths) / total])
             self._breaks[-1] = 1.0
         return self._breaks
 
@@ -324,8 +342,7 @@ class CompositePath(GeometryEntity):
         """Segment, local parameter, and d(local)/d(global) at global t."""
         br = self._segment_breaks()
         t = float(np.clip(t, 0.0, 1.0))
-        i = min(int(np.searchsorted(br, t, side="right")) - 1,
-                len(self.segments) - 1)
+        i = min(int(np.searchsorted(br, t, side="right")) - 1, len(self.segments) - 1)
         i = max(i, 0)
         seg = self.segments[i]
         width = br[i + 1] - br[i]

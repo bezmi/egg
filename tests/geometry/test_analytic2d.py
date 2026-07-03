@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 
 from egg.geometry.analytic2d import Circle, Ellipse, LineSegment
-from egg.geometry.analytic2d import Circle, LineSegment
 
 
 class TestCircle:

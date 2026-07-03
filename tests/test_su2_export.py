@@ -11,6 +11,7 @@ from egg.topology.builder import TopologyBuilder
 # Minimal SU2 ASCII parser for round-trip checks.
 # ---------------------------------------------------------------------------
 
+
 def parse_su2(path):
     """Parse an SU2 mesh into (ndime, points, elements, markers)."""
     with open(path) as f:
@@ -27,9 +28,7 @@ def parse_su2(path):
     ndime = int(expect("NDIME="))
 
     npoin = int(expect("NPOIN="))
-    points = np.array(
-        [[float(c) for c in lines[i + k].split()] for k in range(npoin)]
-    )
+    points = np.array([[float(c) for c in lines[i + k].split()] for k in range(npoin)])
     i += npoin
     assert points.shape == (npoin, ndime)
 
@@ -59,12 +58,17 @@ def parse_su2(path):
 # Grid builders.
 # ---------------------------------------------------------------------------
 
+
 def two_block_2d():
     """Two unit-square blocks side by side, sharing one edge."""
     b = TopologyBuilder(d=2)
     for n, p in [
-        ("sw", (0, 0)), ("s", (1, 0)), ("se", (2, 0)),
-        ("nw", (0, 1)), ("n", (1, 1)), ("ne", (2, 1)),
+        ("sw", (0, 0)),
+        ("s", (1, 0)),
+        ("se", (2, 0)),
+        ("nw", (0, 1)),
+        ("n", (1, 1)),
+        ("ne", (2, 1)),
     ]:
         b.add_corner(n, p)
     # corner order: product((0,1), repeat=2) = (lo,lo),(lo,hi),(hi,lo),(hi,hi)
@@ -85,19 +89,29 @@ def one_block_3d():
     """A single unit-cube block."""
     b = TopologyBuilder(d=3)
     corners = {
-        (0, 0, 0): "c000", (0, 0, 1): "c001", (0, 1, 0): "c010",
-        (0, 1, 1): "c011", (1, 0, 0): "c100", (1, 0, 1): "c101",
-        (1, 1, 0): "c110", (1, 1, 1): "c111",
+        (0, 0, 0): "c000",
+        (0, 0, 1): "c001",
+        (0, 1, 0): "c010",
+        (0, 1, 1): "c011",
+        (1, 0, 0): "c100",
+        (1, 0, 1): "c101",
+        (1, 1, 0): "c110",
+        (1, 1, 1): "c111",
     }
     for idx, name in corners.items():
         b.add_corner(name, np.array(idx, dtype=float))
     from itertools import product
+
     names = tuple(corners[idx] for idx in product((0, 1), repeat=3))
     b.add_block("cube", names, (3, 4, 5))
     b.tag_boundary("xlo", "cube", 0, 0)
     b.tag_boundary("xhi", "cube", 0, 1)
-    for axis, side, tag in [(1, 0, "walls"), (1, 1, "walls"),
-                            (2, 0, "walls"), (2, 1, "walls")]:
+    for axis, side, tag in [
+        (1, 0, "walls"),
+        (1, 1, "walls"),
+        (2, 0, "walls"),
+        (2, 1, "walls"),
+    ]:
         b.tag_boundary(tag, "cube", axis, side)
     topo = b.build()
     # initialize_grid's edge/face fill is 2D-only for now; place the
@@ -115,6 +129,7 @@ def one_block_3d():
 # ---------------------------------------------------------------------------
 # 2D tests.
 # ---------------------------------------------------------------------------
+
 
 def test_2d_counts_and_dedup(tmp_path):
     topo, grid = two_block_2d()
@@ -155,7 +170,7 @@ def test_2d_markers(tmp_path):
     _, points, _, markers = parse_su2(out)
 
     assert set(markers) == {"inlet", "outlet", "wall"}
-    assert len(markers["inlet"]) == 3   # L has 3 cells along axis 1
+    assert len(markers["inlet"]) == 3  # L has 3 cells along axis 1
     assert len(markers["outlet"]) == 3
     assert len(markers["wall"]) == 4 + 5 + 4 + 5
 
@@ -209,6 +224,7 @@ def test_flipped_block_exports_ccw(tmp_path):
 # 3D tests.
 # ---------------------------------------------------------------------------
 
+
 def test_3d_counts_types_volume(tmp_path):
     topo, grid = one_block_3d()
     out = tmp_path / "mesh.su2"
@@ -255,6 +271,7 @@ def test_3d_markers(tmp_path):
 # Validation / error paths.
 # ---------------------------------------------------------------------------
 
+
 def test_uninitialized_grid_rejected(tmp_path):
     b = TopologyBuilder(d=2)
     for n, p in [("sw", (0, 0)), ("nw", (0, 1)), ("se", (1, 0)), ("ne", (1, 1))]:
@@ -268,8 +285,12 @@ def test_uninitialized_grid_rejected(tmp_path):
 def test_tag_on_interface_face_rejected():
     b = TopologyBuilder(d=2)
     for n, p in [
-        ("sw", (0, 0)), ("s", (1, 0)), ("se", (2, 0)),
-        ("nw", (0, 1)), ("n", (1, 1)), ("ne", (2, 1)),
+        ("sw", (0, 0)),
+        ("s", (1, 0)),
+        ("se", (2, 0)),
+        ("nw", (0, 1)),
+        ("n", (1, 1)),
+        ("ne", (2, 1)),
     ]:
         b.add_corner(n, p)
     b.add_block("L", ("sw", "nw", "s", "n"), (2, 2))

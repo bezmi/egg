@@ -150,9 +150,9 @@ class TopologyBuilder:
             raise ValueError("add_block needs `resolutions` (or `res`)")
         if name is None:
             name = f"blk{len(self._block_specs)}"
-        if len(corners) != 2 ** self._d:
+        if len(corners) != 2**self._d:
             raise ValueError(
-                f"Block '{name}' needs {2 ** self._d} corners "
+                f"Block '{name}' needs {2**self._d} corners "
                 f"(2**d for d={self._d}), got {len(corners)}"
             )
         if len(resolutions) != self._d:
@@ -338,11 +338,11 @@ class TopologyBuilder:
                 else:
                     corner[i, j] = tfi_point(u, v, south, north, west, east)
         for (i, j), obj in sorted(corner.items()):
-            self.add_corner(f"{corner_prefix}{i}_{j}", obj,
-                            fixed=getattr(obj, "fixed", False))
+            self.add_corner(
+                f"{corner_prefix}{i}_{j}", obj, fixed=getattr(obj, "fixed", False)
+            )
 
-        names = [[f"{block_prefix}{i}_{j}" for j in range(njb)]
-                 for i in range(nib)]
+        names = [[f"{block_prefix}{i}_{j}" for j in range(njb)] for i in range(nib)]
         for i in range(nib):
             for j in range(njb):
                 self.add_block(
@@ -413,12 +413,14 @@ class TopologyBuilder:
         if isinstance(entity, Edge):
             entity = entity.entity
         self._boundary_layer_specs[id(entity)] = dict(
-            first_height=first_height, growth=growth, n_layers=n_layers,
-            max_height=max_height, tangential_spacing=tangential_spacing,
+            first_height=first_height,
+            growth=growth,
+            n_layers=n_layers,
+            max_height=max_height,
+            tangential_spacing=tangential_spacing,
             n_fixed=int(n_fixed),
             relax_orthogonality=tuple(
-                e.entity if isinstance(e, Edge) else e
-                for e in relax_orthogonality
+                e.entity if isinstance(e, Edge) else e for e in relax_orthogonality
             ),
         )
         self._bl_entities[id(entity)] = entity
@@ -433,10 +435,12 @@ class TopologyBuilder:
         kept and not duplicated.
         """
         declared = {
-            frozenset((
-                (c.face_a.block_name, c.face_a.axis, c.face_a.side),
-                (c.face_b.block_name, c.face_b.axis, c.face_b.side),
-            ))
+            frozenset(
+                (
+                    (c.face_a.block_name, c.face_a.axis, c.face_a.side),
+                    (c.face_b.block_name, c.face_b.axis, c.face_b.side),
+                )
+            )
             for c in self._connections
         }
         groups: dict[frozenset, list[FaceSpec]] = {}
@@ -447,9 +451,7 @@ class TopologyBuilder:
                     key = frozenset(names)
                     if len(key) != len(names):  # degenerate face
                         continue
-                    groups.setdefault(key, []).append(
-                        FaceSpec(spec.name, axis, side)
-                    )
+                    groups.setdefault(key, []).append(FaceSpec(spec.name, axis, side))
         inferred = []
         for key, faces in groups.items():
             if len(faces) > 2:
@@ -461,10 +463,12 @@ class TopologyBuilder:
             if len(faces) != 2:
                 continue
             fa, fb = faces
-            pair = frozenset((
-                (fa.block_name, fa.axis, fa.side),
-                (fb.block_name, fb.axis, fb.side),
-            ))
+            pair = frozenset(
+                (
+                    (fa.block_name, fa.axis, fa.side),
+                    (fb.block_name, fb.axis, fb.side),
+                )
+            )
             if pair not in declared:
                 inferred.append(InterfaceConnection(face_a=fa, face_b=fb))
         return inferred
@@ -504,10 +508,12 @@ class TopologyBuilder:
                     key = (spec.name, axis, side, id(edge.entity))
                     if key in declared:
                         continue
-                    inferred.append(Association(
-                        face=FaceSpec(spec.name, axis, side),
-                        entity=edge.entity,
-                    ))
+                    inferred.append(
+                        Association(
+                            face=FaceSpec(spec.name, axis, side),
+                            entity=edge.entity,
+                        )
+                    )
         return inferred
 
     def build(self) -> BlockTopology:

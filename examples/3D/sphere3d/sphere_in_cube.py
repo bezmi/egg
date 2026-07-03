@@ -87,8 +87,11 @@ def build_grid(n, m, mh, r0, cw):
     # H-grid: the 3x3x3 boxes around the inset cube (centre box omitted).
     # The middle segment reuses the O-shell face node count/spacing so shared
     # faces merge node-for-node.
-    segs = [np.linspace(-1.0, -cw, mh), np.linspace(-cw, cw, n),
-            np.linspace(cw, 1.0, mh)]
+    segs = [
+        np.linspace(-1.0, -cw, mh),
+        np.linspace(-cw, cw, n),
+        np.linspace(cw, 1.0, mh),
+    ]
     for si, sj, sk in product(range(3), repeat=3):
         if si == sj == sk == 1:
             continue  # the inset cube interior is the O-shell + cavity
@@ -117,8 +120,9 @@ def classify(X, r0, tol=1e-9):
         p = X[nid]
         if abs(np.linalg.norm(p) - r0) < tol:
             tags[nid] = TAG_SPHERE
-            dof_entities[nid] = Sphere((0.0, 0.0, 0.0), r0,
-                                       (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+            dof_entities[nid] = Sphere(
+                (0.0, 0.0, 0.0), r0, (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
+            )
             continue
         on = [ax for ax in range(3) if abs(abs(p[ax]) - 1.0) < tol]
         if len(on) == 3:
@@ -164,4 +168,5 @@ if __name__ == "__main__":
 
     main_sphere_in_cube(
         sys.modules[__name__],
-        banner="d=3: sphere in a cube (6-block O-grid) → TMOP smooth")
+        banner="d=3: sphere in a cube (6-block O-grid) → TMOP smooth",
+    )

@@ -52,11 +52,11 @@ template <int D> struct SweepGroupHostT {
     std::size_t total_samples;       // Σ P_of[d]
     std::vector<int> gc;             // [total_samples]
     std::vector<int> gn[D];          // [total_samples] per axis (was gn0, gn1)
-    std::vector<real> s[D];        // [total_samples] per axis (was s0, s1)
-    std::vector<real> W_inv;       // [total_samples * dim::wInv(D)], or one row if w_uniform
+    std::vector<real> s[D];          // [total_samples] per axis (was s0, s1)
+    std::vector<real> W_inv;         // [total_samples * dim::wInv(D)], or one row if w_uniform
     bool w_uniform = false;          // W_inv is a single shared row (uniform/identity target)
     std::vector<int> role;           // [total_samples]
-    std::vector<real> J;           // [total_samples * dim::jSize(D)]
+    std::vector<real> J;             // [total_samples * dim::jSize(D)]
     std::vector<int> dof_idx;        // [ndof]
     std::vector<int> P_of;           // [ndof]  patch size per DOF
     std::vector<int> sample_offset;  // [ndof]  exclusive prefix sum of P_of
@@ -102,12 +102,13 @@ template <int D> struct SweepContextHostT {
 /// std::visit, no const void* erasure. seg views are null for fixed-size
 /// types.
 struct PartitionView {
-    static constexpr int kMaxSeg = kMaxSoASeg;  ///< Max segmented slots (matches EntitySoA<E>::View).
-    EntityTag tag;                 ///< Entity type of this partition.
-    std::size_t ndof;              ///< Number of DOFs in this partition.
-    const int* dof_list;           ///< Group-local DOF indices, length @c ndof.
-    SoAView<const real> soa_view{nullptr, 0, 0};  ///< Packed records (ndof, kFields).
-    SegmentedView<real> seg[kMaxSeg]{};  ///< CSR fields (null for fixed-size).
+    static constexpr int kMaxSeg =
+      kMaxSoASeg;         ///< Max segmented slots (matches EntitySoA<E>::View).
+    EntityTag tag;        ///< Entity type of this partition.
+    std::size_t ndof;     ///< Number of DOFs in this partition.
+    const int* dof_list;  ///< Group-local DOF indices, length @c ndof.
+    SoAView<const real> soa_view {nullptr, 0, 0};  ///< Packed records (ndof, kFields).
+    SegmentedView<real> seg[kMaxSeg] {};           ///< CSR fields (null for fixed-size).
 };
 
 template <int D> struct GroupViewT {
@@ -118,15 +119,15 @@ template <int D> struct GroupViewT {
     // Shared deduplicated metric table (base pointers, indexed by sample_id[p],
     // shared by every group/the merged view — sized num table samples, NOT
     // total_samples). gc/gn/s/W_inv below are these bases; J is recomputed.
-    View1<const int> gc;                                 // [n_table]
-    View1<const int> gn[D];                              // [n_table]
-    View1<const std::int8_t> s[D];                       // [n_table] per-axis sign ±1
-    View1<const real> W_inv;                           // [n_table * wInv], or one row if uniform
-    int w_stride = dim::wInv(D);                          // 0 when W_inv is a uniform shared row
-    View1<const int> dof_idx, P_of, sample_offset;       // [ndof]
-    View1<const int> part_of, row_of;                    // [ndof] DOF -> (partition, row)
-    const PartitionView* partitions = nullptr;           // [num_partitions]
-    std::size_t num_partitions = 0;                      // per-EntityTag splits
+    View1<const int> gc;                            // [n_table]
+    View1<const int> gn[D];                         // [n_table]
+    View1<const std::int8_t> s[D];                  // [n_table] per-axis sign ±1
+    View1<const real> W_inv;                        // [n_table * wInv], or one row if uniform
+    int w_stride = dim::wInv(D);                    // 0 when W_inv is a uniform shared row
+    View1<const int> dof_idx, P_of, sample_offset;  // [ndof]
+    View1<const int> part_of, row_of;               // [ndof] DOF -> (partition, row)
+    const PartitionView* partitions = nullptr;      // [num_partitions]
+    std::size_t num_partitions = 0;                 // per-EntityTag splits
 
     // Structured interior fast path (null on the unstructured path): interior_block
     // [d] (or -1) names the block whose layout synthesizes DOF d's patch, and
@@ -143,7 +144,9 @@ template <int D> struct GroupViewT {
     {
         if (interior_block == nullptr || interior_block[d] < 0) { return false; }
         block = interior_block[d];
-        for (int k = 0; k < D; ++k) { logical[k] = interior_logical[(d * D) + static_cast<std::size_t>(k)]; }
+        for (int k = 0; k < D; ++k) {
+            logical[k] = interior_logical[(d * D) + static_cast<std::size_t>(k)];
+        }
         return true;
     }
 
@@ -206,10 +209,10 @@ template <int D> struct StencilViewT {
 // occurrence's sample_id. One table is shared by every group and the merged view.
 // J is not stored — its role block is recomputed in-kernel from s + W_inv.
 template <int D> struct MetricTableViewT {
-    View1<const int> gc;       // [n_table]
-    View1<const int> gn[D];    // [n_table]
+    View1<const int> gc;            // [n_table]
+    View1<const int> gn[D];         // [n_table]
     View1<const std::int8_t> s[D];  // [n_table] per-axis sign ±1, widened on read
-    View1<const real> W_inv; // [n_table * dim::wInv(D)], or one row when uniform
+    View1<const real> W_inv;        // [n_table * dim::wInv(D)], or one row when uniform
     // W_inv row stride: dim::wInv(D), or 0 when every sample shares one row (a
     // uniform target), in which case W_inv holds a single dim::wInv(D)-wide row.
     int w_stride = dim::wInv(D);
@@ -225,9 +228,9 @@ template <int D> class SweepDeviceContextT
 
     SweepDeviceContextT(sycl::queue q, const SweepContextHostT<D>& host) :
         q_(q), num_nodes_(host.num_nodes), X_(q, host.X),
-        seeds_(q,
-               std::vector<real>(host.num_nodes * kSeedStride,
-                                   std::numeric_limits<real>::quiet_NaN()))
+        seeds_(
+          q,
+          std::vector<real>(host.num_nodes * kSeedStride, std::numeric_limits<real>::quiet_NaN()))
     {
         // Deduplicate the per-sample payload (gc/gn/s/W_inv/J) across every group
         // into one shared table; each group keeps only a per-occurrence sample_id.
@@ -254,11 +257,11 @@ template <int D> class SweepDeviceContextT
                 dispatch_entity_type<D>(rec.tag, [&]<class E>() {
                     if constexpr (HasEntitySoA<E>) {
                         using SoA = EntitySoA<E>;
-                        dp.soa_records = UsmBuffer<real>{q, rec.records};
+                        dp.soa_records = UsmBuffer<real> {q, rec.records};
                         for (int j = 0; j < SoA::kSeg; ++j) {
                             if (j < static_cast<int>(rec.seg.size())) {
-                                dp.seg_data[j] = UsmBuffer<real>{q, rec.seg[j].data};
-                                dp.seg_off[j] = UsmBuffer<int>{q, rec.seg[j].off};
+                                dp.seg_data[j] = UsmBuffer<real> {q, rec.seg[j].data};
+                                dp.seg_off[j] = UsmBuffer<int> {q, rec.seg[j].off};
                             }
                         }
                     }
@@ -354,15 +357,17 @@ template <int D> class SweepDeviceContextT
                 const real* soa_ptr = dp.soa_records.data();
                 std::size_t kfields = 0;
                 dispatch_entity_type<D>(dp.tag, [&]<class E>() {
-                    if constexpr (HasEntitySoA<E>) { kfields = static_cast<std::size_t>(EntitySoA<E>::kFields); }
+                    if constexpr (HasEntitySoA<E>) {
+                        kfields = static_cast<std::size_t>(EntitySoA<E>::kFields);
+                    }
                 });
-                PartitionView pv {
-                  .tag = dp.tag, .ndof = ndof, .dof_list = dp.dof_list.data(),
-                  .soa_view = SoAView<const real> {soa_ptr, ndof, kfields}};
+                PartitionView pv {.tag = dp.tag,
+                                  .ndof = ndof,
+                                  .dof_list = dp.dof_list.data(),
+                                  .soa_view = SoAView<const real> {soa_ptr, ndof, kfields}};
                 // Fill segmented views from uploaded USM (null for fixed-size).
                 for (int j = 0; j < PartitionView::kMaxSeg; ++j) {
-                    pv.seg[j] = SegmentedView<real>{
-                      dp.seg_data[j].data(), dp.seg_off[j].data()};
+                    pv.seg[j] = SegmentedView<real> {dp.seg_data[j].data(), dp.seg_off[j].data()};
                 }
                 pvs.push_back(pv);
             }
@@ -398,10 +403,10 @@ template <int D> class SweepDeviceContextT
     /// launch collapses dispatch_entity_type to one arm (no control-flow
     /// union).
     struct BoundaryLaunch {
-        EntityTag tag;          ///< Entity type of this partition (drives monomorphization).
-        PartitionView pv;       ///< Entity SoA view (records + seg) for this partition.
-        std::size_t count;      ///< Number of boundary DOFs in this partition.
-        const int* positions;   ///< Device USM: reordered positions into the merged view.
+        EntityTag tag;         ///< Entity type of this partition (drives monomorphization).
+        PartitionView pv;      ///< Entity SoA view (records + seg) for this partition.
+        std::size_t count;     ///< Number of boundary DOFs in this partition.
+        const int* positions;  ///< Device USM: reordered positions into the merged view.
     };
 
     /// Per-partition boundary launch descriptors, built lazily with the merged
@@ -424,10 +429,10 @@ template <int D> class SweepDeviceContextT
   private:
     struct DevicePartition {
         EntityTag tag;
-        UsmBuffer<int> dof_list;         // group-local DOF indices, length = ndof of partition
-        UsmBuffer<real> soa_records;   // packed SoA records, length = ndof * kFields (0 if none)
+        UsmBuffer<int> dof_list;      // group-local DOF indices, length = ndof of partition
+        UsmBuffer<real> soa_records;  // packed SoA records, length = ndof * kFields (0 if none)
         UsmBuffer<real> seg_data[kMaxSoASeg];  // CSR data per segmented slot (empty if kSeg==0)
-        UsmBuffer<int> seg_off[kMaxSoASeg];      // CSR offsets per segmented slot (empty if kSeg==0)
+        UsmBuffer<int> seg_off[kMaxSoASeg];    // CSR offsets per segmented slot (empty if kSeg==0)
     };
 
     struct DeviceGroup {
@@ -438,12 +443,15 @@ template <int D> class SweepDeviceContextT
         // into the context-level shared MetricTable, referenced by sample_id).
         UsmBuffer<int> sample_id, role;
         UsmBuffer<int> dof_idx, P_of, sample_offset;
-        UsmBuffer<int> part_of, row_of;  // [ndof] DOF -> (partition, row)
+        UsmBuffer<int> part_of, row_of;                   // [ndof] DOF -> (partition, row)
         UsmBuffer<int> interior_block, interior_logical;  // [ndof], [ndof*D]; empty if unstructured
         std::vector<DevicePartition> partitions;
 
-        GroupViewT<D> view(const PartitionView* pvs, std::size_t np, const MetricTableViewT<D>& tbl,
-                           const int* block_off, const int* nstride) const
+        GroupViewT<D> view(const PartitionView* pvs,
+                           std::size_t np,
+                           const MetricTableViewT<D>& tbl,
+                           const int* block_off,
+                           const int* nstride) const
         {
             const std::size_t n = total_samples;
             GroupViewT<D> gv;
@@ -639,11 +647,11 @@ template <int D> class SweepDeviceContextT
             assert(merged_pvs[p].tag != EntityTag::Free);
             bnd_total += buckets[p].size();
             m_part_positions_.emplace_back(q_, buckets[p]);
-            boundary_launches_.push_back(BoundaryLaunch {
-              .tag = merged_pvs[p].tag,
-              .pv = merged_pvs[p],
-              .count = buckets[p].size(),
-              .positions = m_part_positions_.back().data()});
+            boundary_launches_.push_back(
+              BoundaryLaunch {.tag = merged_pvs[p].tag,
+                              .pv = merged_pvs[p],
+                              .count = buckets[p].size(),
+                              .positions = m_part_positions_.back().data()});
         }
         // The boundary partitions must exactly tile the boundary tail.
         assert(bnd_total == total_ndof - merged_n_free);
@@ -730,8 +738,8 @@ template <int D> class SweepDeviceContextT
         }
         const std::size_t wInv = dim::wInv(D);
         t.w_stride = table_.w_uniform ? 0 : static_cast<int>(wInv);
-        t.W_inv = View1<const real> {table_.W_inv.data(),
-                                     table_.w_uniform ? wInv : (table_.n * wInv)};
+        t.W_inv =
+          View1<const real> {table_.W_inv.data(), table_.w_uniform ? wInv : (table_.n * wInv)};
         return t;
     }
 
@@ -746,7 +754,8 @@ template <int D> class SweepDeviceContextT
         constexpr std::size_t wInv = dim::wInv(D);
         std::vector<int> t_gc;
         std::vector<int> t_gn[D];
-        std::vector<std::int8_t> t_s[D];  // s is ±1; store as int8 (key still hashes the real bytes)
+        std::vector<std::int8_t>
+          t_s[D];  // s is ±1; store as int8 (key still hashes the real bytes)
         std::vector<real> t_W;
         std::vector<std::vector<int>> sid(host.groups.size());
 
@@ -898,8 +907,13 @@ inline VecN<D> newton_delta_with_seed(
 /// Interior DOFs are relaxed by the fissioned metric/interior kernels; the
 /// warm boundary path is @ref sweep_boundary_paramls_kernel.
 template <int D, class Obj>
-inline void sweep_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, Obj objective,
-                                real* X_out = nullptr, real omega = 1.0_r, real* seeds = nullptr)
+inline void sweep_kernel(sycl::queue& q,
+                         const GroupViewT<D>& g,
+                         real* X,
+                         Obj objective,
+                         real* X_out = nullptr,
+                         real omega = 1.0_r,
+                         real* seeds = nullptr)
 {
     if (g.ndof == 0) { return; }
     constexpr std::size_t kSeedStride = (D > 1) ? (D - 1) : 1;
@@ -922,8 +936,9 @@ inline void sweep_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, Obj ob
         {
             const PartitionView& part = parts[g.part_of[d]];
             const auto row = static_cast<std::size_t>(g.row_of[d]);
-            real* seed_slot =
-              (seeds != nullptr) ? (seeds + (static_cast<std::size_t>(dof) * kSeedStride)) : nullptr;
+            real* seed_slot = (seeds != nullptr)
+                                ? (seeds + (static_cast<std::size_t>(dof) * kSeedStride))
+                                : nullptr;
             with_entity<D>(part.tag, part.soa_view, part.seg, row, [&](const auto& ent) {
                 delta = newton_delta_with_seed<D, false>(r.grad, r.hess, pos, ent, seed_slot);
             });
@@ -945,9 +960,9 @@ inline void sweep_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, Obj ob
                 const EntityTag tag = part.tag;
                 const auto row = static_cast<std::size_t>(g.row_of[d]);
                 if (tag != EntityTag::Free) {
-                    real* seed_slot =
-                      (seeds != nullptr) ? (seeds + (static_cast<std::size_t>(dof) * kSeedStride))
-                                         : nullptr;
+                    real* seed_slot = (seeds != nullptr)
+                                        ? (seeds + (static_cast<std::size_t>(dof) * kSeedStride))
+                                        : nullptr;
                     with_entity<D>(tag, part.soa_view, part.seg, row, [&](const auto& ent) {
                         trial = project_with_seed<D, false>(ent, raw, seed_slot);
                     });
@@ -960,9 +975,7 @@ inline void sweep_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, Obj ob
                 // Substitute the trial position for the moving DOF; all other
                 // nodes load from X. The A→T→detA math is the single source in
                 // patch.hpp::assemble_vecT.
-                auto node = [&](int ni) -> PtN<D> {
-                    return ni == dof ? trial : load_pt<D>(X, ni);
-                };
+                auto node = [&](int ni) -> PtN<D> { return ni == dof ? trial : load_pt<D>(X, ni); };
                 const int sid = pv.sample_id[p];  // shared-table index of occurrence p
                 PtN<D> corner = node(pv.gc[sid]);
                 std::array<PtN<D>, D> nbr;
@@ -1012,8 +1025,13 @@ inline void sweep_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, Obj ob
 /// @param hess_buf  [num_nodes * D*D]  contracted Hessian per node (row-major).
 /// @param e0_buf    [num_nodes]        baseline patch energy per node.
 template <int D, class Obj>
-inline void metric_kernel(sycl::queue& q, const GroupViewT<D>& g, const real* X, real* grad_buf,
-                          real* hess_buf, real* e0_buf, Obj objective)
+inline void metric_kernel(sycl::queue& q,
+                          const GroupViewT<D>& g,
+                          const real* X,
+                          real* grad_buf,
+                          real* hess_buf,
+                          real* e0_buf,
+                          Obj objective)
 {
     if (g.ndof == 0) { return; }
     q.parallel_for(sycl::range<1>(g.ndof), [=](sycl::id<1> idx) {
@@ -1046,9 +1064,15 @@ inline void metric_kernel(sycl::queue& q, const GroupViewT<D>& g, const real* X,
 /// @param X_out  Write buffer (null = in place).
 /// @param omega  Relaxation weight (1.0 = undamped).
 template <int D, class Obj>
-inline void interior_update_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, real* X_out,
-                                   real omega, const real* grad_buf, const real* hess_buf,
-                                   const real* e0_buf, Obj objective)
+inline void interior_update_kernel(sycl::queue& q,
+                                   const GroupViewT<D>& g,
+                                   real* X,
+                                   real* X_out,
+                                   real omega,
+                                   const real* grad_buf,
+                                   const real* hess_buf,
+                                   const real* e0_buf,
+                                   Obj objective)
 {
     if (g.ndof == 0) { return; }
     real* out = X_out ? X_out : X;
@@ -1089,8 +1113,8 @@ inline void interior_update_kernel(sycl::queue& q, const GroupViewT<D>& g, real*
             real e_new = 0.0_r;
             real mdet = std::numeric_limits<real>::infinity();
             if (synth) {
-                synth_trial_energy_mindet<D>(g.block_off, g.nstride, block, logical, X, dof, trial,
-                                             objective, e_new, mdet);
+                synth_trial_energy_mindet<
+                  D>(g.block_off, g.nstride, block, logical, X, dof, trial, objective, e_new, mdet);
             } else {
                 for (int p = 0; p < pv.P; ++p) {
                     auto node = [&](int ni) -> PtN<D> {
@@ -1111,8 +1135,8 @@ inline void interior_update_kernel(sycl::queue& q, const GroupViewT<D>& g, real*
                     mdet = std::min(detA, mdet);
                 }
             }
-            const bool ok = sycl::isfinite(e_new) && (e_new <= e0 + tol::energy) &&
-                            objective.accept_mindet(mdet);
+            const bool ok =
+              sycl::isfinite(e_new) && (e_new <= e0 + tol::energy) && objective.accept_mindet(mdet);
             if (ok) {
                 cur = trial;
                 accepted = true;
@@ -1149,8 +1173,8 @@ template <int K> inline VecN<K> spd_solve(const MatN<K>& M, const VecN<K>& b)
 /// @ref project_with_seed but returns the parameter, which the param-space
 /// line search backtracks in.
 template <int K, class P>
-inline Param<K> foot_param_seeded(const P& param, const PtN<P::edim>& p, const Param<K>& seed,
-                                  bool has_seed)
+inline Param<K>
+  foot_param_seeded(const P& param, const PtN<P::edim>& p, const Param<K>& seed, bool has_seed)
 {
     if constexpr (requires { param.template invert_seeded<true>(p, seed, has_seed); }) {
         return param.template invert_seeded<true>(p, seed, has_seed);
@@ -1190,8 +1214,13 @@ inline std::pair<Param<K>, std::array<VecN<D>, K>>
 /// difference vs world-space LS is curvature at finite α. Warm path only —
 /// the cold sweep 0 stays the world-space @ref sweep_kernel that seeds q*.
 template <int D, class Obj>
-inline void sweep_boundary_paramls_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X,
-                                          Obj objective, real* X_out, real omega, real* seeds)
+inline void sweep_boundary_paramls_kernel(sycl::queue& q,
+                                          const GroupViewT<D>& g,
+                                          real* X,
+                                          Obj objective,
+                                          real* X_out,
+                                          real omega,
+                                          real* seeds)
 {
     if (g.ndof == 0) { return; }
     constexpr std::size_t kSeedStride = (D > 1) ? (D - 1) : 1;
@@ -1322,8 +1351,8 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q, const GroupViewT<D>& g
                             sc[k] = pv.s[k][sid];
                         }
                         real detA;
-                        const VecTN<D> t = assemble_vecT<D>(
-                          corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
+                        const VecTN<D> t =
+                          assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
                         e_new += objective.value(t);
                         mdet = std::min(detA, mdet);
                     }
@@ -1349,12 +1378,8 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q, const GroupViewT<D>& g
 /// to out_e/out_m (USM scalars). Reduction identities are supplied explicitly,
 /// so the targets need no host pre-initialisation.
 template <int D, class Obj>
-inline void reduce_energy_mindet(sycl::queue& q,
-                                 const StencilViewT<D>& es,
-                                 const real* X,
-                                 real* out_e,
-                                 real* out_m,
-                                 Obj objective)
+inline void reduce_energy_mindet(
+  sycl::queue& q, const StencilViewT<D>& es, const real* X, real* out_e, real* out_m, Obj objective)
 {
     auto e_red = sycl::reduction(out_e,
                                  0.0_r,
@@ -1396,13 +1421,16 @@ inline void reduce_energy_mindet(sycl::queue& q,
 /// re-exchanged, so no per-sweep full copy is needed. The canonical ctx
 /// buffer is restored if an odd number of swaps left the result in X_new.
 template <int D, class Obj, class PreSweep>
-inline std::pair<std::vector<real>, std::vector<real>>
-  run_block_jacobi(sycl::queue& q, SweepDeviceContextT<D>& ctx, Obj objective, int n_sweeps,
-                   PreSweep before_sweep, real omega = 1.0_r, int report_every = 1)
+inline std::pair<std::vector<real>, std::vector<real>> run_block_jacobi(sycl::queue& q,
+                                                                        SweepDeviceContextT<D>& ctx,
+                                                                        Obj objective,
+                                                                        int n_sweeps,
+                                                                        PreSweep before_sweep,
+                                                                        real omega = 1.0_r,
+                                                                        int report_every = 1)
 {
     const int k = (report_every <= 0) ? n_sweeps : report_every;
-    const std::size_t report_count =
-      static_cast<std::size_t>((n_sweeps + k - 1) / k);
+    const std::size_t report_count = static_cast<std::size_t>((n_sweeps + k - 1) / k);
     UsmBuffer<real> d_e(q, report_count);
     UsmBuffer<real> d_m(q, report_count);
     const std::size_t nbuf = ctx.x_size();
@@ -1435,10 +1463,22 @@ inline std::pair<std::vector<real>, std::vector<real>>
         // holds. Separate kernels keep the working sets apart (144 → ~88 + ~80
         // VGPR).
         const GroupViewT<D> interior = mg.dof_subrange(0, mg.n_free);
-        metric_kernel<D, Obj>(q, interior, x_in, grad_buf.data(), hess_buf.data(), e0_buf.data(),
+        metric_kernel<D, Obj>(q,
+                              interior,
+                              x_in,
+                              grad_buf.data(),
+                              hess_buf.data(),
+                              e0_buf.data(),
                               objective);
-        interior_update_kernel<D, Obj>(q, interior, x_in, x_out, omega, grad_buf.data(),
-                                       hess_buf.data(), e0_buf.data(), objective);
+        interior_update_kernel<D, Obj>(q,
+                                       interior,
+                                       x_in,
+                                       x_out,
+                                       omega,
+                                       grad_buf.data(),
+                                       hess_buf.data(),
+                                       e0_buf.data(),
+                                       objective);
         // Boundary cold/warm split: sweep 0 runs the robust cold kernel (8×8
         // grid + exact Newton nd=2) to project topologically-placed nodes and
         // populate the warm-seed cache; later sweeps run the lean warm kernel
@@ -1451,12 +1491,20 @@ inline std::pair<std::vector<real>, std::vector<real>>
             sweep_kernel<D, Obj>(q, bndry, x_in, objective, x_out, omega, ctx.seeds());
         } else {
             // Warm path: param-space line search (see kernel doc).
-            sweep_boundary_paramls_kernel<D, Obj>(q, bndry, x_in, objective, x_out, omega,
+            sweep_boundary_paramls_kernel<D, Obj>(q,
+                                                  bndry,
+                                                  x_in,
+                                                  objective,
+                                                  x_out,
+                                                  omega,
                                                   ctx.seeds());
         }
         if ((s + 1) % k == 0 || s == n_sweeps - 1) {
-            reduce_energy_mindet<D>(q, ctx.stencil_view(), x_out,
-                                    d_e.data() + report_idx, d_m.data() + report_idx,
+            reduce_energy_mindet<D>(q,
+                                    ctx.stencil_view(),
+                                    x_out,
+                                    d_e.data() + report_idx,
+                                    d_m.data() + report_idx,
                                     objective);
             ++report_idx;
         }

@@ -64,7 +64,9 @@ def main() -> None:
     )
     # Fraction of total wall the (multi-threaded) sweep represents — the closer to
     # 1, the more "Percent of CPU" reflects the sweep rather than setup.
-    print(f"sweep fraction of timed-region wall ≈ {dt / (dt + t_setup):.2f}", flush=True)
+    print(
+        f"sweep fraction of timed-region wall ≈ {dt / (dt + t_setup):.2f}", flush=True
+    )
 
 
 if __name__ == "__main__":

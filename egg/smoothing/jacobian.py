@@ -15,9 +15,7 @@ __all__ = [
 ]
 
 
-def compute_jacobian(
-    nodes: np.ndarray, cell_base: tuple[int, ...]
-) -> np.ndarray:
+def compute_jacobian(nodes: np.ndarray, cell_base: tuple[int, ...]) -> np.ndarray:
     """Forward-difference Jacobian at a cell's lower-left corner.
 
     A[:, k] = nodes[base + e_k] - nodes[base]   for each axis k.

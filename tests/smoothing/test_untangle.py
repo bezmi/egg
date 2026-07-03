@@ -16,13 +16,16 @@ from egg.smoothing.targets import IdentityTarget
 from egg.smoothing.untangle import untangle, grid_min_det
 from egg.topology.builder import TopologyBuilder
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "2D", "circles"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "2D", "circles")
+)
 from topologies import build_circle_in_rectangle  # noqa: E402
 
 
 def _has_cpp() -> bool:
     try:
         from egg._cpp import cpp_core  # noqa: F401
+
         return True
     except ImportError:
         return False

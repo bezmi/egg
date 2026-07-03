@@ -4,7 +4,6 @@
 #include <cmath>
 #include <experimental/mdspan>
 #include <limits>
-
 #include <sycl/sycl.hpp>
 
 namespace egg
@@ -31,10 +30,10 @@ namespace tol
 {
 inline constexpr real eps = std::numeric_limits<real>::epsilon();  ///< ~2.2e-16 / 1.2e-7
 #if defined(EGG_REAL_IS_FP32) && EGG_REAL_IS_FP32
-inline constexpr real tiny = 1e-20_r;    ///< det/denominator floor
-inline constexpr real znorm = 1e-7_r;    ///< zero-vector guard
-inline constexpr real newton = 1e-5_r;   ///< projection |dq| break
-inline constexpr real energy = 1e-6_r;   ///< line-search accept slack
+inline constexpr real tiny = 1e-20_r;   ///< det/denominator floor
+inline constexpr real znorm = 1e-7_r;   ///< zero-vector guard
+inline constexpr real newton = 1e-5_r;  ///< projection |dq| break
+inline constexpr real energy = 1e-6_r;  ///< line-search accept slack
 #else
 inline constexpr real tiny = 1e-30_r;    ///< det/denominator floor
 inline constexpr real znorm = 1e-15_r;   ///< zero-vector guard
@@ -122,16 +121,14 @@ inline std::array<real, N> operator-(const std::array<real, N>& a, const std::ar
     return out;
 }
 /// Scalar–vector product.
-template <std::size_t N>
-inline std::array<real, N> operator*(real s, const std::array<real, N>& a)
+template <std::size_t N> inline std::array<real, N> operator*(real s, const std::array<real, N>& a)
 {
     std::array<real, N> out;
     for (std::size_t i = 0; i < N; ++i) { out[i] = s * a[i]; }
     return out;
 }
 /// Euclidean inner product.
-template <std::size_t N>
-inline real dot(const std::array<real, N>& a, const std::array<real, N>& b)
+template <std::size_t N> inline real dot(const std::array<real, N>& a, const std::array<real, N>& b)
 {
     real acc = 0.0_r;
     for (std::size_t i = 0; i < N; ++i) { acc += a[i] * b[i]; }

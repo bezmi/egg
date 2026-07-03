@@ -33,14 +33,20 @@ pytestmark = pytest.mark.skipif(
 def _valid_inputs():
     """A valid (ctx_arrays, structured, X_flat) triple from a 4x4 demo grid."""
     from egg.smoothing.cpp_backend import (
-        build_block_structured_context, structured_arrays)
+        build_block_structured_context,
+        structured_arrays,
+    )
     from egg.smoothing.solver import build_sweep_context
     from egg.smoothing.targets import IdentityTarget
     from egg.topology.builder import TopologyBuilder
 
     builder = TopologyBuilder(d=2)
-    for name, pos in [("A", (0.0, 0.0)), ("B", (4.0, 0.0)),
-                      ("C", (4.0, 4.0)), ("D", (0.0, 4.0))]:
+    for name, pos in [
+        ("A", (0.0, 0.0)),
+        ("B", (4.0, 0.0)),
+        ("C", (4.0, 4.0)),
+        ("D", (0.0, 4.0)),
+    ]:
         builder.add_corner(name, pos, fixed=True)
     builder.add_block("main", ("A", "D", "B", "C"), (4, 4))
     topo = builder.build()
@@ -57,7 +63,8 @@ def _sweep(ctx_arrays, structured, X_flat, *, dim=2):
     from egg._cpp import cpp_core
 
     return cpp_core.cpp_structured_sweep(
-        ctx_arrays, structured, X_flat, 1, device="cpu", dim=dim)
+        ctx_arrays, structured, X_flat, 1, device="cpu", dim=dim
+    )
 
 
 def test_valid_inputs_do_not_raise():

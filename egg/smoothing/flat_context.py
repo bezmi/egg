@@ -76,13 +76,15 @@ def cell_stencil(blocks, d):
             continue
         cols = []
         for a in range(nc):
-            sl = tuple(slice((a >> (d - 1 - ax)) & 1,
-                             ((a >> (d - 1 - ax)) & 1) + shp[ax] - 1)
-                       for ax in range(d))
+            sl = tuple(
+                slice((a >> (d - 1 - ax)) & 1, ((a >> (d - 1 - ax)) & 1) + shp[ax] - 1)
+                for ax in range(d)
+            )
             cols.append(ids[sl].reshape(-1))
         cell_cols.append(np.stack(cols, axis=1))  # (ncell_block, nc)
-    Ccell = (np.concatenate(cell_cols) if cell_cols
-             else np.zeros((0, nc), dtype=np.int64))
+    Ccell = (
+        np.concatenate(cell_cols) if cell_cols else np.zeros((0, nc), dtype=np.int64)
+    )
     ncell = Ccell.shape[0]
 
     # Per-sample corner / neighbour / sign arrays. Sample (c, b) -> id nc*c + b.
@@ -94,13 +96,22 @@ def cell_stencil(blocks, d):
 
     # Membership: in cell c, corner a (node Ccell[c, a]) meets sample b
     # (id nc*c + b) with role role[a, b]. Flatten the (cell, a, b) rows.
-    cell_sid = nc * np.arange(ncell)[:, None] + b_idx[None, :]      # (ncell, nc)
+    cell_sid = nc * np.arange(ncell)[:, None] + b_idx[None, :]  # (ncell, nc)
     m_node = np.repeat(Ccell[:, :, None], nc, axis=2).reshape(-1)
     m_sid = np.repeat(cell_sid[:, None, :], nc, axis=1).reshape(-1)
     m_role = np.tile(role.reshape(-1), ncell)
 
-    return {"gc": gc, "gn": gn, "s": s, "m_node": m_node, "m_sid": m_sid,
-            "m_role": m_role, "nc": nc, "ns": ns, "ncell": ncell}
+    return {
+        "gc": gc,
+        "gn": gn,
+        "s": s,
+        "m_node": m_node,
+        "m_sid": m_sid,
+        "m_role": m_role,
+        "nc": nc,
+        "ns": ns,
+        "ncell": ncell,
+    }
 
 
 def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
@@ -136,8 +147,8 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
     # energy (true W) climbs.
     w0 = w_inv if uniform_w else (w_inv[0] if len(w_inv) else np.eye(d))
     synth_interior = bool(
-        np.allclose(w0, w0[0, 0] * np.eye(d))
-        and (uniform_w or np.allclose(w_inv, w0)))
+        np.allclose(w0, w0[0, 0] * np.eye(d)) and (uniform_w or np.allclose(w_inv, w0))
+    )
 
     # Interior-eligible nodes: strictly inside a block (logical in [1, n-2] on every
     # axis), so the node AND its whole 2^d-cell patch sit inside that block. The C++
@@ -152,8 +163,9 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
             if any(s < 3 for s in sh):
                 continue  # no strictly-interior node on a < 3-wide axis
             inner = np.asarray(ids)[tuple(slice(1, s - 1) for s in sh)].reshape(-1)
-            axes = np.meshgrid(*[np.arange(1, s - 1, dtype=np.int32) for s in sh],
-                               indexing="ij")
+            axes = np.meshgrid(
+                *[np.arange(1, s - 1, dtype=np.int32) for s in sh], indexing="ij"
+            )
             node_block[inner] = b
             node_logical[inner] = np.stack([a.reshape(-1) for a in axes], axis=1)
     node_interior = node_block >= 0
@@ -199,11 +211,15 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
         uniq, cnt = np.unique(m_node, return_counts=True)
         P_of = np.zeros(dofs.size, dtype=np.int32)
         P_of[np.searchsorted(dofs, uniq)] = cnt
-        g = {"D": int(dofs.size), "role": m_role.astype(np.int32),
-             "dof_idx": dofs.astype(np.int32), "P_of": P_of,
-             "interior_block": np.ascontiguousarray(node_block[dofs]),
-             "interior_logical": np.ascontiguousarray(node_logical[dofs]),
-             "entities": group_entities_by_type(dofs.tolist(), dof_entities, d=d)}
+        g = {
+            "D": int(dofs.size),
+            "role": m_role.astype(np.int32),
+            "dof_idx": dofs.astype(np.int32),
+            "P_of": P_of,
+            "interior_block": np.ascontiguousarray(node_block[dofs]),
+            "interior_logical": np.ascontiguousarray(node_logical[dofs]),
+            "entities": group_entities_by_type(dofs.tolist(), dof_entities, d=d),
+        }
         g.update(sample_fields(m_sid, uniform_out=True))
         groups.append(g)
 

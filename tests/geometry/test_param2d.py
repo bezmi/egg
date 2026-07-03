@@ -18,8 +18,7 @@ class TestEvalFrac:
 
     def test_circle_frac_maps_to_angle(self):
         c = Circle(center=(0.0, 0.0), radius=1.0)
-        np.testing.assert_allclose(c.eval_frac(0.5), c.eval(np.pi),
-                                   atol=1e-15)
+        np.testing.assert_allclose(c.eval_frac(0.5), c.eval(np.pi), atol=1e-15)
         np.testing.assert_allclose(c.eval_frac(0.25), [0.0, 1.0], atol=1e-15)
 
     def test_arc_frac_maps_onto_trim(self):
@@ -42,8 +41,7 @@ class TestLineSegmentParam:
 
     def test_deriv(self):
         seg = LineSegment((1.0, 2.0), (3.0, 6.0))
-        np.testing.assert_allclose(seg.deriv(0.3), finite_diff(seg, 0.3),
-                                   atol=1e-8)
+        np.testing.assert_allclose(seg.deriv(0.3), finite_diff(seg, 0.3), atol=1e-8)
 
 
 class TestCircleParam:
@@ -58,8 +56,7 @@ class TestCircleParam:
 
     def test_deriv(self):
         c = Circle(center=(2.0, -1.0), radius=0.5)
-        np.testing.assert_allclose(c.deriv(1.1), finite_diff(c, 1.1),
-                                   atol=1e-8)
+        np.testing.assert_allclose(c.deriv(1.1), finite_diff(c, 1.1), atol=1e-8)
 
 
 class TestEllipseParam:
@@ -68,17 +65,18 @@ class TestEllipseParam:
         assert e.closed
         np.testing.assert_allclose(e.eval(0.0), [2.0, 0.0])
         np.testing.assert_allclose(e.eval(np.pi / 2), [0.0, 1.0], atol=1e-15)
-        np.testing.assert_allclose(e.deriv(0.7), finite_diff(e, 0.7),
-                                   atol=1e-8)
+        np.testing.assert_allclose(e.deriv(0.7), finite_diff(e, 0.7), atol=1e-8)
 
 
 class TestCompositePathParam:
     def test_arc_length_proportional_breaks(self):
         # 3-long then 1-long segment: the joint sits at t = 0.75.
-        path = CompositePath([
-            LineSegment((0.0, 0.0), (3.0, 0.0)),
-            LineSegment((3.0, 0.0), (3.0, 1.0)),
-        ])
+        path = CompositePath(
+            [
+                LineSegment((0.0, 0.0), (3.0, 0.0)),
+                LineSegment((3.0, 0.0), (3.0, 1.0)),
+            ]
+        )
         np.testing.assert_allclose(path.eval(0.0), [0.0, 0.0])
         np.testing.assert_allclose(path.eval(0.75), [3.0, 0.0], atol=1e-12)
         np.testing.assert_allclose(path.eval(1.0), [3.0, 1.0])
@@ -92,18 +90,18 @@ class TestCompositePathParam:
         np.testing.assert_allclose(path.eval(1.5), [1.0, 0.0])
 
     def test_deriv_chain_rule(self):
-        path = CompositePath([
-            LineSegment((0.0, 0.0), (3.0, 0.0)),
-            CircleArc((3.0, 1.0), 1.0, -np.pi / 2, 0.0),
-        ])
+        path = CompositePath(
+            [
+                LineSegment((0.0, 0.0), (3.0, 0.0)),
+                CircleArc((3.0, 1.0), 1.0, -np.pi / 2, 0.0),
+            ]
+        )
         for t in (0.3, 0.9):
-            np.testing.assert_allclose(path.deriv(t), finite_diff(path, t),
-                                       atol=1e-6)
+            np.testing.assert_allclose(path.deriv(t), finite_diff(path, t), atol=1e-6)
 
     def test_deriv_respects_segment_trim(self):
         # A trimmed arc: local parameter spans [t0, t1] != [0, 1].
         arc = CircleArc((0.0, 0.0), 2.0, 0.0, np.pi)
         path = CompositePath([arc])
         np.testing.assert_allclose(path.eval(0.5), [0.0, 2.0], atol=1e-12)
-        np.testing.assert_allclose(path.deriv(0.5), finite_diff(path, 0.5),
-                                   atol=1e-6)
+        np.testing.assert_allclose(path.deriv(0.5), finite_diff(path, 0.5), atol=1e-6)

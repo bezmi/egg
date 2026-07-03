@@ -103,20 +103,20 @@ _KFIELDS = {
     TAG_ELLIPSEARC: 8,
     TAG_QUADBEZIER: 8,
     TAG_CUBICBEZIER: 10,
-    TAG_BSPLINE: 6,       # degree, n_ctrl, t0, t1, closed, has_w
-    TAG_COMPOSITE: 2,     # n_segs, rec_off
-    TAG_PLANE: 9,         # o(3), ax(3), ay(3)
-    TAG_SPHERE: 10,       # c(3), r, ax(3), ay(3)
-    TAG_CYLINDER: 10,     # o(3), ax(3), ay(3), r
-    TAG_LINE3: 8,         # p0(3), p1(3), t0, t1
-    TAG_BSPLINESURF: 9,   # pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w
+    TAG_BSPLINE: 6,  # degree, n_ctrl, t0, t1, closed, has_w
+    TAG_COMPOSITE: 2,  # n_segs, rec_off
+    TAG_PLANE: 9,  # o(3), ax(3), ay(3)
+    TAG_SPHERE: 10,  # c(3), r, ax(3), ay(3)
+    TAG_CYLINDER: 10,  # o(3), ax(3), ay(3), r
+    TAG_LINE3: 8,  # p0(3), p1(3), t0, t1
+    TAG_BSPLINESURF: 9,  # pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w
 }
 
 # Per-type segmented field counts (mirror C++ EntitySoA<E>::kSeg).
 _KSEG = {
-    TAG_BSPLINE: 3,        # knots, ctrl, weights
-    TAG_COMPOSITE: 1,      # segment records
-    TAG_BSPLINESURF: 4,    # knots_u, knots_v, ctrl, weights
+    TAG_BSPLINE: 3,  # knots, ctrl, weights
+    TAG_COMPOSITE: 1,  # segment records
+    TAG_BSPLINESURF: 4,  # knots_u, knots_v, ctrl, weights
 }
 
 # Tag -> wire-format name (used as dict key in the per-group `entities` sub-dict).
@@ -140,58 +140,106 @@ TAG_NAMES = {
 
 
 def _encode_lineseg(entity) -> np.ndarray:
-    return np.array([
-        entity.start[0], entity.start[1],
-        entity.end[0], entity.end[1],
-    ], dtype=np.float64)
+    return np.array(
+        [
+            entity.start[0],
+            entity.start[1],
+            entity.end[0],
+            entity.end[1],
+        ],
+        dtype=np.float64,
+    )
 
 
 def _encode_circle(entity) -> np.ndarray:
-    return np.array([
-        entity.center[0], entity.center[1], entity.radius,
-    ], dtype=np.float64)
+    return np.array(
+        [
+            entity.center[0],
+            entity.center[1],
+            entity.radius,
+        ],
+        dtype=np.float64,
+    )
 
 
 def _encode_ellipse(entity) -> np.ndarray:
-    return np.array([
-        entity.center[0], entity.center[1], entity.rx, entity.ry,
-    ], dtype=np.float64)
+    return np.array(
+        [
+            entity.center[0],
+            entity.center[1],
+            entity.rx,
+            entity.ry,
+        ],
+        dtype=np.float64,
+    )
 
 
 def _encode_circlearc(entity) -> np.ndarray:
     # t1 < t0 encodes a reversed traversal in Python; the C++ projection
     # clamps to the interval, so normalise it (same point set either way).
-    return np.array([
-        entity.center[0], entity.center[1], entity.radius,
-        min(entity.t0, entity.t1), max(entity.t0, entity.t1),
-        float(entity.closed),
-    ], dtype=np.float64)
+    return np.array(
+        [
+            entity.center[0],
+            entity.center[1],
+            entity.radius,
+            min(entity.t0, entity.t1),
+            max(entity.t0, entity.t1),
+            float(entity.closed),
+        ],
+        dtype=np.float64,
+    )
 
 
 def _encode_ellipsearc(entity) -> np.ndarray:
-    return np.array([
-        entity.center[0], entity.center[1],
-        entity.a, entity.b, entity.phi,
-        min(entity.t0, entity.t1), max(entity.t0, entity.t1),
-        float(entity.closed),
-    ], dtype=np.float64)
+    return np.array(
+        [
+            entity.center[0],
+            entity.center[1],
+            entity.a,
+            entity.b,
+            entity.phi,
+            min(entity.t0, entity.t1),
+            max(entity.t0, entity.t1),
+            float(entity.closed),
+        ],
+        dtype=np.float64,
+    )
 
 
 def _encode_quadbezier(entity) -> np.ndarray:
     p = entity.p
-    return np.array([
-        p[0, 0], p[0, 1], p[1, 0], p[1, 1], p[2, 0], p[2, 1],
-        entity.t0, entity.t1,
-    ], dtype=np.float64)
+    return np.array(
+        [
+            p[0, 0],
+            p[0, 1],
+            p[1, 0],
+            p[1, 1],
+            p[2, 0],
+            p[2, 1],
+            entity.t0,
+            entity.t1,
+        ],
+        dtype=np.float64,
+    )
 
 
 def _encode_cubicbezier(entity) -> np.ndarray:
     p = entity.p
-    return np.array([
-        p[0, 0], p[0, 1], p[1, 0], p[1, 1],
-        p[2, 0], p[2, 1], p[3, 0], p[3, 1],
-        entity.t0, entity.t1,
-    ], dtype=np.float64)
+    return np.array(
+        [
+            p[0, 0],
+            p[0, 1],
+            p[1, 0],
+            p[1, 1],
+            p[2, 0],
+            p[2, 1],
+            p[3, 0],
+            p[3, 1],
+            entity.t0,
+            entity.t1,
+        ],
+        dtype=np.float64,
+    )
 
 
 def _bspline_curve_degree_guard(degree: int) -> None:
@@ -228,16 +276,25 @@ def _encode_bspline(entity):
     """
     _bspline_curve_degree_guard(int(entity.degree))
     has_w = entity.weights is not None
-    row = np.array([
-        float(entity.degree),
-        float(entity.ctrl.shape[0]),
-        entity.t0, entity.t1, float(entity.closed), float(has_w),
-    ], dtype=np.float64)
+    row = np.array(
+        [
+            float(entity.degree),
+            float(entity.ctrl.shape[0]),
+            entity.t0,
+            entity.t1,
+            float(entity.closed),
+            float(has_w),
+        ],
+        dtype=np.float64,
+    )
     seg = [
         np.asarray(entity.knots, dtype=np.float64).ravel(),
         np.asarray(entity.ctrl, dtype=np.float64).ravel(),
-        (np.asarray(entity.weights, dtype=np.float64).ravel()
-         if has_w else np.empty(0, dtype=np.float64)),
+        (
+            np.asarray(entity.weights, dtype=np.float64).ravel()
+            if has_w
+            else np.empty(0, dtype=np.float64)
+        ),
     ]
     return row, seg
 
@@ -279,42 +336,51 @@ def _encode_composite(entity):
 
 # --- 3D entity encoders ----------------------------------------------------
 
+
 def _encode_plane(entity) -> np.ndarray:
     """Encode a Plane into a 9-double record [o(3), ax(3), ay(3)]."""
-    return np.concatenate([
-        np.asarray(entity.o, dtype=np.float64).ravel(),
-        np.asarray(entity.ax, dtype=np.float64).ravel(),
-        np.asarray(entity.ay, dtype=np.float64).ravel(),
-    ])
+    return np.concatenate(
+        [
+            np.asarray(entity.o, dtype=np.float64).ravel(),
+            np.asarray(entity.ax, dtype=np.float64).ravel(),
+            np.asarray(entity.ay, dtype=np.float64).ravel(),
+        ]
+    )
 
 
 def _encode_sphere(entity) -> np.ndarray:
     """Encode a Sphere into a 10-double record [c(3), r, ax(3), ay(3)]."""
-    return np.concatenate([
-        np.asarray(entity.c, dtype=np.float64).ravel(),
-        np.array([entity.r], dtype=np.float64),
-        np.asarray(entity.ax, dtype=np.float64).ravel(),
-        np.asarray(entity.ay, dtype=np.float64).ravel(),
-    ])
+    return np.concatenate(
+        [
+            np.asarray(entity.c, dtype=np.float64).ravel(),
+            np.array([entity.r], dtype=np.float64),
+            np.asarray(entity.ax, dtype=np.float64).ravel(),
+            np.asarray(entity.ay, dtype=np.float64).ravel(),
+        ]
+    )
 
 
 def _encode_cylinder(entity) -> np.ndarray:
     """Encode a Cylinder into a 10-double record [o(3), ax(3), ay(3), r]."""
-    return np.concatenate([
-        np.asarray(entity.o, dtype=np.float64).ravel(),
-        np.asarray(entity.ax, dtype=np.float64).ravel(),
-        np.asarray(entity.ay, dtype=np.float64).ravel(),
-        np.array([entity.r], dtype=np.float64),
-    ])
+    return np.concatenate(
+        [
+            np.asarray(entity.o, dtype=np.float64).ravel(),
+            np.asarray(entity.ax, dtype=np.float64).ravel(),
+            np.asarray(entity.ay, dtype=np.float64).ravel(),
+            np.array([entity.r], dtype=np.float64),
+        ]
+    )
 
 
 def _encode_line3(entity) -> np.ndarray:
     """Encode a Line3 into an 8-double record [p0(3), p1(3), t0, t1]."""
-    return np.concatenate([
-        np.asarray(entity.p0, dtype=np.float64).ravel(),
-        np.asarray(entity.p1, dtype=np.float64).ravel(),
-        np.array([entity.t0, entity.t1], dtype=np.float64),
-    ])
+    return np.concatenate(
+        [
+            np.asarray(entity.p0, dtype=np.float64).ravel(),
+            np.asarray(entity.p1, dtype=np.float64).ravel(),
+            np.array([entity.t0, entity.t1], dtype=np.float64),
+        ]
+    )
 
 
 def _encode_bsplinesurface(entity):
@@ -329,17 +395,29 @@ def _encode_bsplinesurface(entity):
     per-entity offsets implicit). has_w == 0.0 selects the polynomial path.
     """
     has_w = entity.weights is not None
-    row = np.array([
-        float(entity.pu), float(entity.pv),
-        float(entity.nu), float(entity.nv),
-        0.0, 0.0, 0.0, 0.0, float(has_w),
-    ], dtype=np.float64)
+    row = np.array(
+        [
+            float(entity.pu),
+            float(entity.pv),
+            float(entity.nu),
+            float(entity.nv),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            float(has_w),
+        ],
+        dtype=np.float64,
+    )
     seg = [
         np.asarray(entity.knots_u, dtype=np.float64).ravel(),
         np.asarray(entity.knots_v, dtype=np.float64).ravel(),
         np.asarray(entity.ctrl, dtype=np.float64).ravel(),
-        (np.asarray(entity.weights, dtype=np.float64).ravel()
-         if has_w else np.empty(0, dtype=np.float64)),
+        (
+            np.asarray(entity.weights, dtype=np.float64).ravel()
+            if has_w
+            else np.empty(0, dtype=np.float64)
+        ),
     ]
     return row, seg
 
@@ -391,11 +469,26 @@ def encode_entity_soa(entity, d: int = 2):
     if isinstance(entity, CircleArc):
         return TAG_CIRCLEARC, _KFIELDS[TAG_CIRCLEARC], _encode_circlearc(entity), None
     if isinstance(entity, EllipseArc):
-        return TAG_ELLIPSEARC, _KFIELDS[TAG_ELLIPSEARC], _encode_ellipsearc(entity), None
+        return (
+            TAG_ELLIPSEARC,
+            _KFIELDS[TAG_ELLIPSEARC],
+            _encode_ellipsearc(entity),
+            None,
+        )
     if isinstance(entity, QuadBezier):
-        return TAG_QUADBEZIER, _KFIELDS[TAG_QUADBEZIER], _encode_quadbezier(entity), None
+        return (
+            TAG_QUADBEZIER,
+            _KFIELDS[TAG_QUADBEZIER],
+            _encode_quadbezier(entity),
+            None,
+        )
     if isinstance(entity, CubicBezier):
-        return TAG_CUBICBEZIER, _KFIELDS[TAG_CUBICBEZIER], _encode_cubicbezier(entity), None
+        return (
+            TAG_CUBICBEZIER,
+            _KFIELDS[TAG_CUBICBEZIER],
+            _encode_cubicbezier(entity),
+            None,
+        )
     if isinstance(entity, BSplineCurve):
         row, seg = _encode_bspline(entity)
         return TAG_BSPLINE, _KFIELDS[TAG_BSPLINE], row, seg
@@ -493,7 +586,11 @@ def group_entities_by_type(
         if seg_lists:
             g["seg"] = []
             for arrays in seg_lists:
-                data = np.concatenate(arrays).astype(np.float64) if arrays else np.empty(0, dtype=np.float64)
+                data = (
+                    np.concatenate(arrays).astype(np.float64)
+                    if arrays
+                    else np.empty(0, dtype=np.float64)
+                )
                 off = np.zeros(len(arrays) + 1, dtype=np.int32)
                 for i, arr in enumerate(arrays):
                     off[i + 1] = off[i] + arr.shape[0]

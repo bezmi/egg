@@ -38,13 +38,19 @@ def build_context(n, sphere_c, sphere_r):
     geometry: the n^3 lattice and the moving-DOF classification.
     """
     h = 1.0 / (n - 1)
-    ids = np.arange(n ** 3).reshape(n, n, n)     # ids[i,j,k] == node_id(i,j,k,n)
+    ids = np.arange(n**3).reshape(n, n, n)  # ids[i,j,k] == node_id(i,j,k,n)
     ii, jj, kk = np.indices((n, n, n))
 
     # Node classification. Moving DOFs = free interior + sphere-constrained
     # top-face interior; everything else (5 faces, all edges/corners) is fixed.
-    on_bnd = ((ii == 0) | (ii == n - 1) | (jj == 0) | (jj == n - 1)
-              | (kk == 0) | (kk == n - 1))
+    on_bnd = (
+        (ii == 0)
+        | (ii == n - 1)
+        | (jj == 0)
+        | (jj == n - 1)
+        | (kk == 0)
+        | (kk == n - 1)
+    )
     top_int = (kk == n - 1) & (ii > 0) & (ii < n - 1) & (jj > 0) & (jj < n - 1)
     moving_mask = (top_int | ~on_bnd).reshape(-1)
 
@@ -55,10 +61,9 @@ def build_context(n, sphere_c, sphere_r):
     for nid in ids[~on_bnd]:
         dof_entities[int(nid)] = None
 
-    w_inv_sample = np.eye(3) / h                 # W = h I per sample
+    w_inv_sample = np.eye(3) / h  # W = h I per sample
 
-    return build_flat_context([ids], moving_mask, dof_entities, 3,
-                              w_inv=w_inv_sample)
+    return build_flat_context([ids], moving_mask, dof_entities, 3, w_inv=w_inv_sample)
 
 
 def initial_lattice(n, sphere_c, sphere_r):
@@ -72,20 +77,18 @@ def initial_lattice(n, sphere_c, sphere_r):
     Returns ``(X (n^3, 3), top)`` with ``top`` the top-face interior ids.
     """
     rng = np.random.default_rng(7)
-    X = np.zeros((n ** 3, 3))
+    X = np.zeros((n**3, 3))
     for i, j, k in product(range(n), repeat=3):
         X[node_id(i, j, k, n)] = (i, j, k)
-    X /= (n - 1)
-    interior = np.array([
-        node_id(i, j, k, n)
-        for i, j, k in product(range(1, n - 1), repeat=3)
-    ])
+    X /= n - 1
+    interior = np.array(
+        [node_id(i, j, k, n) for i, j, k in product(range(1, n - 1), repeat=3)]
+    )
     X[interior] += rng.uniform(-0.15, 0.15, size=(interior.size, 3)) / (n - 1)
 
-    top = np.array([
-        node_id(i, j, n - 1, n)
-        for i, j in product(range(1, n - 1), repeat=2)
-    ])
+    top = np.array(
+        [node_id(i, j, n - 1, n) for i, j in product(range(1, n - 1), repeat=2)]
+    )
     d = X[top] - sphere_c
     X[top] = sphere_c + sphere_r * d / np.linalg.norm(d, axis=1)[:, None]
     return X, top

@@ -23,9 +23,11 @@ def main():
     a = parse_single_args("folded circle-in-rectangle → untangle → smooth")
 
     # Geometry + topology; optional boundary-layer spec on the circle.
-    bl = (dict(first_height=a.bl_first_height, growth=a.bl_growth,
-               n_fixed=a.pin_layers)
-          if a.bl_first_height > 0.0 else None)
+    bl = (
+        dict(first_height=a.bl_first_height, growth=a.bl_growth, n_fixed=a.pin_layers)
+        if a.bl_first_height > 0.0
+        else None
+    )
     topo, ents = build_circle_in_rectangle(rough=True, bl=bl)
 
     # Quality target (aspect-ratio clustering where specs exist), grid, and
@@ -43,8 +45,15 @@ def main():
     )
     steps = generate_steps(grid, target, cfg, untangle_direct=not a.plot_live)
 
-    finish(grid, topo, ents, steps, a, title="single-circle",
-           mindet_title="min det A (untangle+TMOP)")
+    finish(
+        grid,
+        topo,
+        ents,
+        steps,
+        a,
+        title="single-circle",
+        mindet_title="min det A (untangle+TMOP)",
+    )
 
 
 if __name__ == "__main__":

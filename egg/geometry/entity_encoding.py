@@ -101,7 +101,7 @@ def encode_entity(entity, d: int = 2, arena: list | None = None):
         return TAG_FREE, params
     if isinstance(entity, LineSegment):
         params[:d] = entity.start[:d]
-        params[d:2 * d] = entity.end[:d]
+        params[d : 2 * d] = entity.end[:d]
         return TAG_LINESEG, params
     if isinstance(entity, Circle):
         params[:d] = entity.center[:d]
@@ -109,7 +109,7 @@ def encode_entity(entity, d: int = 2, arena: list | None = None):
         return TAG_CIRCLE, params
     if isinstance(entity, Ellipse):
         params[:d] = entity.center[:d]
-        params[d:2 * d] = np.array([entity.rx, entity.ry])
+        params[d : 2 * d] = np.array([entity.rx, entity.ry])
         return TAG_ELLIPSE, params
     if isinstance(entity, CircleArc):
         params[:2] = entity.center
@@ -143,9 +143,16 @@ def encode_entity(entity, d: int = 2, arena: list | None = None):
         if entity.weights is not None:
             w_off = len(arena)
             arena.extend(entity.weights.tolist())
-        params[:8] = (entity.degree, entity.ctrl.shape[0],
-                      knot_off, ctrl_off, entity.t0, entity.t1,
-                      w_off, float(entity.weights is not None))
+        params[:8] = (
+            entity.degree,
+            entity.ctrl.shape[0],
+            knot_off,
+            ctrl_off,
+            entity.t0,
+            entity.t1,
+            w_off,
+            float(entity.weights is not None),
+        )
         return TAG_BSPLINE, params
     if isinstance(entity, CompositePath):
         if arena is None:

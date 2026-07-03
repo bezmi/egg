@@ -23,8 +23,14 @@ __all__ = [
 ]
 
 
-def plot_convergence(energy_history, mindet_history, *,
-                     mindet_title="min det A", xlabel="chunk", show=True):
+def plot_convergence(
+    energy_history,
+    mindet_history,
+    *,
+    mindet_title="min det A",
+    xlabel="chunk",
+    show=True,
+):
     """Two-pane matplotlib figure: TMOP energy and min det A per step."""
     import matplotlib.pyplot as plt
 
@@ -81,14 +87,21 @@ def plot_geometry_entity(
     if isinstance(entity, type) or entity.dim == 1:
         t_vals = np.linspace(0, 1, n_curve)
         if hasattr(entity, "start") and hasattr(entity, "end"):
-            pts = np.array([entity.project(entity.start + t * (entity.end - entity.start)) for t in t_vals])
+            pts = np.array(
+                [
+                    entity.project(entity.start + t * (entity.end - entity.start))
+                    for t in t_vals
+                ]
+            )
         else:
             # Circle: sample roughly around it
             angles = np.linspace(0, 2 * np.pi, n_curve)
-            pts = np.column_stack([
-                entity.center[0] + entity.radius * np.cos(angles),
-                entity.center[1] + entity.radius * np.sin(angles),
-            ])
+            pts = np.column_stack(
+                [
+                    entity.center[0] + entity.radius * np.cos(angles),
+                    entity.center[1] + entity.radius * np.sin(angles),
+                ]
+            )
     else:
         # Generic: just project some reference points (not exhaustive)
         pts = np.array([entity.project(np.array([0.0, 0.0]))])
@@ -108,7 +121,9 @@ def plot_geometry_entity(
     for idx in sample_idxs:
         q = pts[idx]
         q_3d = pts_3d[idx]
-        scale = 0.3 * np.linalg.norm(entity.project(np.array([5.0, 5.0])) - q) * 0.2 + 0.15
+        scale = (
+            0.3 * np.linalg.norm(entity.project(np.array([5.0, 5.0])) - q) * 0.2 + 0.15
+        )
 
         try:
             n = entity.normal(q)
@@ -166,11 +181,15 @@ def plot_projection(
 
     # Source points
     src_pd = pv.PolyData(points_3d)
-    plotter.add_mesh(src_pd, color="orange", point_size=8, render_points_as_spheres=True)
+    plotter.add_mesh(
+        src_pd, color="orange", point_size=8, render_points_as_spheres=True
+    )
 
     # Projected points
     dst_pd = pv.PolyData(proj_3d)
-    plotter.add_mesh(dst_pd, color="green", point_size=10, render_points_as_spheres=True)
+    plotter.add_mesh(
+        dst_pd, color="green", point_size=10, render_points_as_spheres=True
+    )
 
     # Connection lines
     for i in range(len(points)):
@@ -204,10 +223,12 @@ def _add_entity_curve(plotter: "pv.Plotter", entity: "GeometryEntity") -> None:
     elif hasattr(entity, "center") and hasattr(entity, "radius"):
         # Analytic full circle.
         angles = np.linspace(0, 2 * np.pi, 200)
-        pts2 = np.column_stack([
-            entity.center[0] + entity.radius * np.cos(angles),
-            entity.center[1] + entity.radius * np.sin(angles),
-        ])
+        pts2 = np.column_stack(
+            [
+                entity.center[0] + entity.radius * np.cos(angles),
+                entity.center[1] + entity.radius * np.sin(angles),
+            ]
+        )
     elif hasattr(entity, "start") and hasattr(entity, "end"):
         t_vals = np.linspace(0, 1, 200)
         pts2 = entity.start[None, :] + t_vals[:, None] * (entity.end - entity.start)
@@ -264,7 +285,7 @@ def plot_topology(
 
         corners_order = list(product((0, 1), repeat=d))
         for i, offset_a in enumerate(corners_order):
-            for offset_b in corners_order[i + 1:]:
+            for offset_b in corners_order[i + 1 :]:
                 diff = sum(abs(a - b) for a, b in zip(offset_a, offset_b))
                 if diff == 1:
                     name_a = spec.corner_names[corners_order.index(offset_a)]
@@ -278,13 +299,21 @@ def plot_topology(
 
     # Corners
     for name, corner in topology.corners.items():
-        pos = np.append(corner.position, 0.0) if len(corner.position) == 2 else corner.position
+        pos = (
+            np.append(corner.position, 0.0)
+            if len(corner.position) == 2
+            else corner.position
+        )
         color = "blue" if corner.fixed else "green"
         sphere = pv.Sphere(radius=corner_radius, center=pos)
         plotter.add_mesh(sphere, color=color)
         plotter.add_point_labels(
-            np.array([pos]), [name], font_size=12, point_size=0,
-            shape_opacity=0.5, always_visible=True,
+            np.array([pos]),
+            [name],
+            font_size=12,
+            point_size=0,
+            shape_opacity=0.5,
+            always_visible=True,
         )
 
     # Singularities
@@ -297,8 +326,7 @@ def plot_topology(
             pos = None
             for ci_logical, cname in zip(corner_indices, spec.corner_names):
                 actual = tuple(
-                    0 if c == 0 else shape[dim] - 1
-                    for dim, c in enumerate(ci_logical)
+                    0 if c == 0 else shape[dim] - 1 for dim, c in enumerate(ci_logical)
                 )
                 if actual == s.logical_idx:
                     corner = topology.corners[cname]
@@ -307,13 +335,21 @@ def plot_topology(
                     break
             if pos is None:
                 pos = np.zeros(3)
-            box = pv.Cube(center=pos, x_length=singularity_size,
-                          y_length=singularity_size, z_length=singularity_size)
+            box = pv.Cube(
+                center=pos,
+                x_length=singularity_size,
+                y_length=singularity_size,
+                z_length=singularity_size,
+            )
             plotter.add_mesh(box, color="red", style="wireframe", line_width=2)
             plotter.add_point_labels(
-                np.array([pos + np.array([singularity_size, 0.6 * singularity_size, 0.0])]),
+                np.array(
+                    [pos + np.array([singularity_size, 0.6 * singularity_size, 0.0])]
+                ),
                 [f"v={s.valence}"],
-                font_size=10, point_size=0, always_visible=True,
+                font_size=10,
+                point_size=0,
+                always_visible=True,
             )
 
     plotter.view_xy()
@@ -323,8 +359,9 @@ def plot_topology(
     return plotter
 
 
-def plot_grid(grid, *, show: bool = True,
-              geometry_entities: list | None = None) -> Optional["pv.Plotter"]:
+def plot_grid(
+    grid, *, show: bool = True, geometry_entities: list | None = None
+) -> Optional["pv.Plotter"]:
     """Render a structured multiblock grid as wireframe.
 
     Each block gets a distinct color. Works for 2D and 3D grids.
@@ -459,8 +496,11 @@ def plot_quality_field(
                 surf.cell_data["quality"] = values.ravel()
                 scalars_all.extend(values.ravel())
                 plotter.add_mesh(
-                    surf, scalars="quality", cmap="viridis",
-                    show_scalar_bar=(len(mesh_blocks) == 0), clim=None,
+                    surf,
+                    scalars="quality",
+                    cmap="viridis",
+                    show_scalar_bar=(len(mesh_blocks) == 0),
+                    clim=None,
                 )
                 mesh_blocks.append(surf)
 
@@ -545,8 +585,14 @@ def _add_grid_meshes(
     import pyvista as pv
 
     block_fill_colors = [
-        "lightblue", "lightcoral", "lightgreen", "lightyellow",
-        "lightsalmon", "plum", "palegreen", "wheat",
+        "lightblue",
+        "lightcoral",
+        "lightgreen",
+        "lightyellow",
+        "lightsalmon",
+        "plum",
+        "palegreen",
+        "wheat",
     ]
     block_edge_colors = ["cyan", "magenta", "yellow", "lime", "orange", "white"]
 
@@ -582,8 +628,11 @@ def _add_grid_meshes(
             faces_array = np.hstack(cells)
             surf = pv.PolyData(pts_3d, faces_array)
             plotter.add_mesh(
-                surf, color=block_fill_colors[bi % len(block_fill_colors)],
-                opacity=0.35, show_edges=True, edge_color="gray",
+                surf,
+                color=block_fill_colors[bi % len(block_fill_colors)],
+                opacity=0.35,
+                show_edges=True,
+                edge_color="gray",
                 line_width=0.5,
             )
 
@@ -592,8 +641,10 @@ def _add_grid_meshes(
         z = np.zeros_like(x)
         sg = pv.StructuredGrid(x, y, z)
         plotter.add_mesh(
-            sg, color=block_edge_colors[bi % len(block_edge_colors)],
-            style="wireframe", line_width=1.5,
+            sg,
+            color=block_edge_colors[bi % len(block_edge_colors)],
+            style="wireframe",
+            line_width=1.5,
         )
 
     for bi, block in enumerate(grid.blocks):
@@ -628,8 +679,14 @@ class LiveGridView:
     """
 
     _FILL_COLORS = [
-        "lightblue", "lightcoral", "lightgreen", "lightyellow",
-        "lightsalmon", "plum", "palegreen", "wheat",
+        "lightblue",
+        "lightcoral",
+        "lightgreen",
+        "lightyellow",
+        "lightsalmon",
+        "plum",
+        "palegreen",
+        "wheat",
     ]
     _EDGE_COLORS = ["cyan", "magenta", "yellow", "lime", "orange", "white"]
 
@@ -671,8 +728,8 @@ class LiveGridView:
             fill_colour_idx[bi] = c
 
         # Per-block fill (PolyData) + wireframe (StructuredGrid), built once.
-        self._fills: list = []          # (surf, block_idx)
-        self._wires: list = []          # (sg, block_idx)
+        self._fills: list = []  # (surf, block_idx)
+        self._wires: list = []  # (sg, block_idx)
         for bi, block in enumerate(grid.blocks):
             if block.d != 2:
                 continue
@@ -688,20 +745,28 @@ class LiveGridView:
             if cells:
                 surf = pv.PolyData(pts_3d, np.hstack(cells))
                 plotter.add_mesh(
-                    surf, color=self._FILL_COLORS[fill_colour_idx[bi] % len(self._FILL_COLORS)],
-                    opacity=0.35, show_edges=True, edge_color="gray", line_width=0.5,
+                    surf,
+                    color=self._FILL_COLORS[
+                        fill_colour_idx[bi] % len(self._FILL_COLORS)
+                    ],
+                    opacity=0.35,
+                    show_edges=True,
+                    edge_color="gray",
+                    line_width=0.5,
                 )
                 self._fills.append((surf, bi))
 
             sg = pv.StructuredGrid(*self._wire_coords(nodes))
             plotter.add_mesh(
-                sg, color=self._EDGE_COLORS[bi % len(self._EDGE_COLORS)],
-                style="wireframe", line_width=1.5,
+                sg,
+                color=self._EDGE_COLORS[bi % len(self._EDGE_COLORS)],
+                style="wireframe",
+                line_width=1.5,
             )
             self._wires.append((sg, bi))
 
         # Boundary markers: one point cloud per tag, updated in place.
-        self._clouds: list = []         # (cloud, gids)
+        self._clouds: list = []  # (cloud, gids)
         if show_edge_verts:
             for tag, color in (("circle", "red"), ("outer", "blue")):
                 gids = np.array(
@@ -711,7 +776,10 @@ class LiveGridView:
                     continue
                 cloud = pv.PolyData(self._cloud_points(gids))
                 plotter.add_mesh(
-                    cloud, color=color, point_size=10, render_points_as_spheres=True,
+                    cloud,
+                    color=color,
+                    point_size=10,
+                    render_points_as_spheres=True,
                 )
                 self._clouds.append((cloud, gids))
 
@@ -745,8 +813,9 @@ class LiveGridView:
             self.plotter.render()
 
 
-def animate_pipeline(grid, geometry_entities, steps, *, title="pipeline",
-                     show_edge_verts=True):
+def animate_pipeline(
+    grid, geometry_entities, steps, *, title="pipeline", show_edge_verts=True
+):
     """Drive a :func:`egg.pipeline.generate_steps` generator from a PyVista
     timer so the grid animates the folded → untangled → smoothed transition.
 
@@ -760,14 +829,18 @@ def animate_pipeline(grid, geometry_entities, steps, *, title="pipeline",
     def _fmt(info: dict) -> str:
         return " ".join(
             f"{k}={v:.4e}" if isinstance(v, float) else f"{k}={v}"
-            for k, v in info.items())
+            for k, v in info.items()
+        )
 
-    tags = {g: ("circle" if isinstance(e, Circle) else "outer")
-            for g, e in grid.dof_constraints.items()}
+    tags = {
+        g: ("circle" if isinstance(e, Circle) else "outer")
+        for g, e in grid.dof_constraints.items()
+    }
 
     plotter = pv.Plotter()
-    view = LiveGridView(plotter, grid, tags, geometry_entities,
-                        show_edge_verts=show_edge_verts)
+    view = LiveGridView(
+        plotter, grid, tags, geometry_entities, show_edge_verts=show_edge_verts
+    )
     plotter.view_xy()
     plotter.show_axes()
     plotter.add_text(f"{title}: tangled start", name="t", font_size=12)

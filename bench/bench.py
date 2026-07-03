@@ -1,8 +1,11 @@
-import sys, os, time
+import sys
+import os
+import time
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "examples", "sphere3d"))
-import numpy as np
+
+# ruff: noqa: E402  (sys.path setup must precede the example import)
 from egg._cpp import cpp_core
 from sphere_in_cube import build_grid, classify, build_context
 from egg.smoothing.cpp_backend import (

@@ -141,8 +141,9 @@ class Cylinder(GeometryEntity):
         return u, v
 
     def _eval(self, u: float, v: float) -> np.ndarray:
-        return (self.o + self.r * (np.cos(u) * self.ax + np.sin(u) * self.ay)
-                + v * self.az)
+        return (
+            self.o + self.r * (np.cos(u) * self.ax + np.sin(u) * self.ay) + v * self.az
+        )
 
     def _frame(self, u: float, v: float) -> tuple[np.ndarray, np.ndarray]:
         su = self.r * (-np.sin(u) * self.ax + np.cos(u) * self.ay)

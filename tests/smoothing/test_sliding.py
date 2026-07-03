@@ -6,7 +6,6 @@ from ``examples/phase4_sliding_demo.py`` (since removed). The pieces the gate ne
 are inlined here so the test does not depend on the examples package.
 """
 
-
 import numpy as np
 
 from egg.geometry.analytic2d import Circle, LineSegment
@@ -32,13 +31,22 @@ def build_demo_grid():
         builder.add_corner(n, p, fixed=True)
     for n, p in [("msw", (1, 1)), ("mse", (3, 1)), ("mne", (3, 3)), ("mnw", (1, 3))]:
         builder.add_corner(n, p, fixed=False)
-    for n, p in [("isw", (1.3, 1.3)), ("ise", (2.7, 1.3)), ("ine", (2.7, 2.7)), ("inw", (1.3, 2.7))]:
+    for n, p in [
+        ("isw", (1.3, 1.3)),
+        ("ise", (2.7, 1.3)),
+        ("ine", (2.7, 2.7)),
+        ("inw", (1.3, 2.7)),
+    ]:
         builder.add_corner(n, p, fixed=False)
     for n, p in [
-        ("bsw", (1, 0)), ("bse", (3, 0)),  # bottom wall
-        ("rse", (4, 1)), ("rne", (4, 3)),  # right wall
-        ("tne", (3, 4)), ("tnw", (1, 4)),  # top wall
-        ("lnw", (0, 3)), ("lsw", (0, 1)),  # left wall
+        ("bsw", (1, 0)),
+        ("bse", (3, 0)),  # bottom wall
+        ("rse", (4, 1)),
+        ("rne", (4, 3)),  # right wall
+        ("tne", (3, 4)),
+        ("tnw", (1, 4)),  # top wall
+        ("lnw", (0, 3)),
+        ("lsw", (0, 1)),  # left wall
     ]:
         builder.add_corner(n, p, fixed=False)
 
@@ -69,10 +77,14 @@ def build_demo_grid():
     for e, o in [("e_s", "o_s"), ("e_e", "o_e"), ("e_n", "o_n"), ("e_w", "o_w")]:
         builder.connect(e, 1, 1, o, 1, 0)
     for cb, ca, cs, eb, ea, es in [
-        ("c_sw", 0, 1, "e_s", 0, 0), ("c_sw", 1, 1, "e_w", 0, 1),
-        ("c_se", 0, 1, "e_e", 0, 0), ("c_se", 1, 1, "e_s", 0, 1),
-        ("c_ne", 0, 1, "e_n", 0, 0), ("c_ne", 1, 1, "e_e", 0, 1),
-        ("c_nw", 0, 1, "e_w", 0, 0), ("c_nw", 1, 1, "e_n", 0, 1),
+        ("c_sw", 0, 1, "e_s", 0, 0),
+        ("c_sw", 1, 1, "e_w", 0, 1),
+        ("c_se", 0, 1, "e_e", 0, 0),
+        ("c_se", 1, 1, "e_s", 0, 1),
+        ("c_ne", 0, 1, "e_n", 0, 0),
+        ("c_ne", 1, 1, "e_e", 0, 1),
+        ("c_nw", 0, 1, "e_w", 0, 0),
+        ("c_nw", 1, 1, "e_n", 0, 1),
     ]:
         builder.connect(cb, ca, cs, eb, ea, es)
 
@@ -81,8 +93,10 @@ def build_demo_grid():
     for blk, ent in [("e_s", bottom), ("e_e", right), ("e_n", top), ("e_w", left)]:
         builder.associate(blk, 1, 0, ent)
     for blk, a0_ent, a1_ent in [
-        ("c_sw", left, bottom), ("c_se", bottom, right),
-        ("c_ne", right, top), ("c_nw", top, left),
+        ("c_sw", left, bottom),
+        ("c_se", bottom, right),
+        ("c_ne", right, top),
+        ("c_nw", top, left),
     ]:
         builder.associate(blk, 0, 0, a0_ent)
         builder.associate(blk, 1, 0, a1_ent)
@@ -118,7 +132,9 @@ def clump_boundary(grid, amp):
         if isinstance(ent, Circle):
             th = _circle_angle(ent, p)
             th2 = th + amp * np.sin(2.0 * th)
-            grid.global_nodes[dof] = ent.center + ent.radius * np.array([np.cos(th2), np.sin(th2)])
+            grid.global_nodes[dof] = ent.center + ent.radius * np.array(
+                [np.cos(th2), np.sin(th2)]
+            )
         elif isinstance(ent, LineSegment):
             t = _line_param(ent, p)
             t2 = np.clip(t + amp * 0.25 * np.sin(np.pi * t), 0.0, 1.0)
@@ -127,8 +143,10 @@ def clump_boundary(grid, amp):
 
 
 def constrained_positions(grid):
-    return {dof: (ent, grid.global_nodes[dof].copy())
-            for dof, ent in grid.dof_constraints.items()}
+    return {
+        dof: (ent, grid.global_nodes[dof].copy())
+        for dof, ent in grid.dof_constraints.items()
+    }
 
 
 def _relax(grid, ctx, n_sweeps=400):
@@ -138,8 +156,10 @@ def _relax(grid, ctx, n_sweeps=400):
     more sweeps to reach the same slid/evened distribution.
     """
     from egg.smoothing.cpp_backend import cpp_structured_sweep
+
     X_out, _e, _m = cpp_structured_sweep(
-        ctx, grid, grid.global_nodes, n_sweeps, device="cpu")
+        ctx, grid, grid.global_nodes, n_sweeps, device="cpu"
+    )
     grid.global_nodes = X_out
     _propagate(grid)
 
@@ -165,18 +185,23 @@ def test_constrained_dofs_slide_along_entity():
     # fp32 projects onto the entity to ~1e-7, so floor the on-curve tolerance
     # there (the double build keeps the tight 1e-8).
     assert max_resid < real_tol(1e-8, floor=1e-6), (
-        f"a constrained DOF left its entity: resid={max_resid:.2e}")
+        f"a constrained DOF left its entity: resid={max_resid:.2e}"
+    )
 
     # (2) Points actually slid tangentially (non-trivial along-boundary shift).
     shifts = []
     for dof, (ent, p1) in final.items():
         p0 = initial[dof][1]
         if isinstance(ent, Circle):
-            dth = (_circle_angle(ent, p1) - _circle_angle(ent, p0) + np.pi) % (2 * np.pi) - np.pi
+            dth = (_circle_angle(ent, p1) - _circle_angle(ent, p0) + np.pi) % (
+                2 * np.pi
+            ) - np.pi
             shifts.append(abs(ent.radius * dth))
         else:
-            shifts.append(abs(_line_param(ent, p1) - _line_param(ent, p0))
-                          * float(np.linalg.norm(ent.end - ent.start)))
+            shifts.append(
+                abs(_line_param(ent, p1) - _line_param(ent, p0))
+                * float(np.linalg.norm(ent.end - ent.start))
+            )
     assert np.mean(shifts) > 1e-3, "constrained DOFs did not slide tangentially"
 
 
@@ -186,8 +211,11 @@ def test_clumped_circle_spacing_becomes_more_even():
     clump_boundary(grid, amp=0.6)
 
     def circle_gap_std(g):
-        angs = sorted(_circle_angle(e, g.global_nodes[d])
-                      for d, e in g.dof_constraints.items() if isinstance(e, Circle))
+        angs = sorted(
+            _circle_angle(e, g.global_nodes[d])
+            for d, e in g.dof_constraints.items()
+            if isinstance(e, Circle)
+        )
         return float(np.std(np.diff(angs)))
 
     before = circle_gap_std(grid)

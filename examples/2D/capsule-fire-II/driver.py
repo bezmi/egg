@@ -84,8 +84,7 @@ def parse_args():
     return a
 
 
-def finish(grid, topo, ents, steps, a, *, title,
-           mindet_title="min det A"):
+def finish(grid, topo, ents, steps, a, *, title, mindet_title="min det A"):
     """Act on the CLI flags: drive the steps (live or batch), report, plot.
 
     ``steps`` is the (lazy, unconsumed) :func:`egg.pipeline.generate_steps`
@@ -112,16 +111,14 @@ def finish(grid, topo, ents, steps, a, *, title,
     else:
         from egg.pipeline import drain_steps
 
-        drain_steps(steps, mindet_history=mindet_history,
-                    energy_history=energy_history)
+        drain_steps(steps, mindet_history=mindet_history, energy_history=energy_history)
 
     if getattr(topo, "boundary_layer_specs", None):
         from egg.smoothing import first_layer_heights
 
         # Height / its own spec target per wall column (1.0 = exact).
         r = first_layer_heights(grid, topo, relative=True)
-        print(f"First layer heights / target: min={r.min():.6f} "
-              f"max={r.max():.6f}")
+        print(f"First layer heights / target: min={r.min():.6f} max={r.max():.6f}")
 
     if not getattr(a, "plot_live", False):
         print(f"\nFinal min det A: {mindet_history[-1]:.4e}")
@@ -133,8 +130,7 @@ def finish(grid, topo, ents, steps, a, *, title,
         if getattr(a, "plot_energy", False):
             from egg.io.visualize import plot_convergence
 
-            plot_convergence(energy_history, mindet_history,
-                             mindet_title=mindet_title)
+            plot_convergence(energy_history, mindet_history, mindet_title=mindet_title)
 
     if getattr(a, "export", None):
         from egg.io import export_su2

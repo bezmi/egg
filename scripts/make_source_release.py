@@ -139,7 +139,10 @@ def main() -> None:
 
     # Warn if releasing HEAD with uncommitted changes (git archive captures
     # only the committed tree, so local edits are silently excluded).
-    if args.ref == "HEAD" and subprocess.run(["git", "diff", "--quiet", "HEAD"]).returncode:
+    if (
+        args.ref == "HEAD"
+        and subprocess.run(["git", "diff", "--quiet", "HEAD"]).returncode
+    ):
         print(
             "warning: working tree has uncommitted changes; they will NOT be included",
             file=sys.stderr,
@@ -154,14 +157,17 @@ def main() -> None:
     base_tar = git_archive(args.ref, prefix)
 
     notice = build_countdown_notice(start_date).encode()
-    mtime = datetime(release_date.year, release_date.month, release_date.day,
-                     tzinfo=timezone.utc).timestamp()
+    mtime = datetime(
+        release_date.year, release_date.month, release_date.day, tzinfo=timezone.utc
+    ).timestamp()
 
     # Repack: copy tracked entries, append the generated Countdown notice.
     with tarfile.open(tarball, "w:gz") as out:
         with tarfile.open(fileobj=io.BytesIO(base_tar), mode="r:") as src:
             for member in src.getmembers():
-                out.addfile(member, src.extractfile(member) if member.isfile() else None)
+                out.addfile(
+                    member, src.extractfile(member) if member.isfile() else None
+                )
         info = tarfile.TarInfo(f"{prefix}/LICENSE-COUNTDOWN.md")
         info.size = len(notice)
         info.mtime = int(mtime)

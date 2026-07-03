@@ -48,8 +48,9 @@ def split_cells(n: int, k: int) -> list[int]:
     return [round(n * (t + 1) / k) - round(n * t / k) for t in range(k)]
 
 
-def tfi_point(u: float, v: float, south: "Edge", north: "Edge",
-              west: "Edge", east: "Edge") -> "Vector3":
+def tfi_point(
+    u: float, v: float, south: "Edge", north: "Edge", west: "Edge", east: "Edge"
+) -> "Vector3":
     """Bilinear transfinite interpolation of four bounding edges at (u, v).
 
     Standard Coons-patch formula; used to place interior block corners of a
@@ -228,7 +229,8 @@ def Arc(p0, p1, centre) -> CircleArc:
         t0, t1 = ta2, ta2 + sweep
         if max(t0, t1) > np.pi or min(t0, t1) <= -np.pi:
             raise ValueError(
-                "Arc angular range wraps past the +/-pi branch cut; split it")
+                "Arc angular range wraps past the +/-pi branch cut; split it"
+            )
     return CircleArc(center, ra, float(t0), float(t1))
 
 
@@ -430,11 +432,10 @@ class Edge:
         self._table = None
         if arc_length:
             ts = np.linspace(entity.t0, entity.t1, samples + 1)
-            pts = np.stack([np.asarray(entity.eval(t), dtype=float)
-                            for t in ts])
+            pts = np.stack([np.asarray(entity.eval(t), dtype=float) for t in ts])
             s = np.concatenate(
-                [[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0),
-                                                 axis=1))])
+                [[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+            )
             if s[-1] <= 0.0:
                 raise ValueError("Edge has zero arc length")
             self._table = (s / s[-1], ts)
@@ -483,16 +484,16 @@ class Edge:
         p = np.asarray(self.entity.eval(self._tau(t)), dtype=float)
         return Vector3(p[0], p[1])
 
-    def place_node(self, t: float, param: str = "frac",
-                   *, fixed: bool = False) -> "Node":
+    def place_node(
+        self, t: float, param: str = "frac", *, fixed: bool = False
+    ) -> "Node":
         """Grid node placed on this edge at parameter t.
 
         ``param`` as in :meth:`point_at`; the node's ``t`` attribute is
         always stored fractionally. ``fixed=True`` pins the node when used
         as a topology corner.
         """
-        return Node(self, self._as_frac_param(t, param, self._frac),
-                    fixed=fixed)
+        return Node(self, self._as_frac_param(t, param, self._frac), fixed=fixed)
 
     def point_at_native(self, t: float) -> Vector3:
         """Convenience for ``point_at(t, param="native")``."""

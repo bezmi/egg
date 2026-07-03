@@ -22,9 +22,12 @@ def _lr_grid(res=(4, 4)):
     """
     b = TopologyBuilder(d=2)
     for name, pos in [
-        ("A", (0.0, 0.0)), ("D", (0.0, 2.0)),
-        ("B", (2.0, 0.0)), ("C", (2.0, 2.0)),
-        ("E", (4.0, 0.0)), ("F", (4.0, 2.0)),
+        ("A", (0.0, 0.0)),
+        ("D", (0.0, 2.0)),
+        ("B", (2.0, 0.0)),
+        ("C", (2.0, 2.0)),
+        ("E", (4.0, 0.0)),
+        ("F", (4.0, 2.0)),
     ]:
         b.add_corner(name, pos, fixed=True)
     b.add_block("L", ("A", "D", "B", "C"), res)
@@ -104,7 +107,9 @@ def _padded_coords_with_halo(grid, sc, bi):
         if int(sc.halo_dst_block[e]) != bi:
             continue
         sb = int(sc.halo_src_block[e])
-        src_logical = tuple(int(c) - 1 for c in sc.halo_src_padded[e])  # padded -> interior
+        src_logical = tuple(
+            int(c) - 1 for c in sc.halo_src_padded[e]
+        )  # padded -> interior
         flat = int(np.ravel_multi_index(src_logical, sc.interior_shapes[sb]))
         coord = gn[sc.block_global_dof[sb][flat]]
         padded[tuple(int(c) for c in sc.halo_dst_padded[e])] = coord

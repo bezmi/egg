@@ -51,15 +51,25 @@ def sign(artifact: Path) -> None:
     cert = artifact.with_name(artifact.name + ".pem")
     print(f">> signing {artifact}")
     subprocess.run(
-        ["cosign", "sign-blob", "--yes", str(artifact),
-         "--output-signature", str(sig), "--output-certificate", str(cert)],
+        [
+            "cosign",
+            "sign-blob",
+            "--yes",
+            str(artifact),
+            "--output-signature",
+            str(sig),
+            "--output-certificate",
+            str(cert),
+        ],
         check=True,
     )
 
 
 def main() -> None:
     if shutil.which("cosign") is None:
-        sys.exit("error: cosign not found. Install it: https://docs.sigstore.dev/cosign/installation/")
+        sys.exit(
+            "error: cosign not found. Install it: https://docs.sigstore.dev/cosign/installation/"
+        )
 
     artifacts = resolve_artifacts(sys.argv[1:])
     for a in artifacts:
@@ -71,7 +81,9 @@ def main() -> None:
         print(f"    --signature {a.name}.sig --certificate {a.name}.pem \\")
         print(f"    --certificate-identity {IDENTITY} \\")
         print(f"    --certificate-oidc-issuer {OIDC_ISSUER}")
-    print("\nPublish the .sig and .pem next to each artifact (e.g. as GitHub Release assets).")
+    print(
+        "\nPublish the .sig and .pem next to each artifact (e.g. as GitHub Release assets)."
+    )
 
 
 if __name__ == "__main__":

@@ -32,11 +32,13 @@ template <int D> class StructuredExecutorT
     ///               BlockStructuredContext.
     /// @param topo   block halo tables over the same packed layout; an empty
     ///               topology makes the per-sweep exchange a no-op (single block).
-    StructuredExecutorT(const sycl::queue& queue, const SweepContextHostT<D>& host,
+    StructuredExecutorT(const sycl::queue& queue,
+                        const SweepContextHostT<D>& host,
                         BlockTopologyDevice<D> topo) :
-        q_(sycl::queue(queue.get_context(), queue.get_device(),
-          {sycl::property::queue::in_order(),
-           sycl::property::queue::AdaptiveCpp_coarse_grained_events{}})),
+        q_(sycl::queue(queue.get_context(),
+                       queue.get_device(),
+                       {sycl::property::queue::in_order(),
+                        sycl::property::queue::AdaptiveCpp_coarse_grained_events {}})),
         ctx_(q_, host), topo_(std::move(topo))
     {
     }
@@ -50,13 +52,20 @@ template <int D> class StructuredExecutorT
     /// @p report_every throttles the energy/min-det reduction cadence
     /// (see @ref run_block_jacobi); default preserves the legacy per-sweep contract.
     std::pair<std::vector<real>, std::vector<real>>
-      run_jacobi(int n_sweeps, const ObjectiveKindT<D>& kind = ShapeObjectiveT<D> {},
-                 real omega = 1.0_r, int report_every = 1)
+      run_jacobi(int n_sweeps,
+                 const ObjectiveKindT<D>& kind = ShapeObjectiveT<D> {},
+                 real omega = 1.0_r,
+                 int report_every = 1)
     {
         return std::visit(
           [&](auto objective) {
-              return run_block_jacobi<D>(q_, ctx_, objective, n_sweeps, halo_hook(),
-                                        omega, report_every);
+              return run_block_jacobi<D>(q_,
+                                         ctx_,
+                                         objective,
+                                         n_sweeps,
+                                         halo_hook(),
+                                         omega,
+                                         report_every);
           },
           kind);
     }
@@ -67,9 +76,7 @@ template <int D> class StructuredExecutorT
     /// sweep) in one launch (see @ref fused_halo_broadcast).
     auto halo_hook()
     {
-        return [this](sycl::queue& q, real* X) {
-            fused_halo_broadcast<D>(q, X, topo_);
-        };
+        return [this](sycl::queue& q, real* X) { fused_halo_broadcast<D>(q, X, topo_); };
     }
 
     sycl::queue q_;

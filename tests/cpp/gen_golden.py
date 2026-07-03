@@ -41,20 +41,21 @@ def _arr(vals) -> str:
 # golden_metric.hpp — shape_2d value/grad/Hessian on curated T-matrices.
 # ===========================================================================
 
+
 def _rot(theta: float) -> np.ndarray:
     c, s = np.cos(theta), np.sin(theta)
     return np.array([[c, -s], [s, c]])
 
 
 _METRIC_CASES: list[np.ndarray] = [
-    np.array([[1.0, 0.0], [0.0, 1.0]]),       # identity
-    np.array([[2.0, 0.0], [0.0, 2.0]]),       # uniform scale
-    np.array([[1.5, 0.0], [0.0, 0.5]]),       # anisotropic scale
-    _rot(0.6),                                  # pure rotation
-    np.array([[1.0, 0.4], [0.0, 1.0]]),       # shear
-    np.array([[1.2, -0.3], [0.5, 0.9]]),      # general
-    _rot(2.3) @ np.diag([1.7, 0.6]),          # rotated anisotropic
-    np.array([[1.0, 0.95], [0.95, 1.0]]),     # near-singular (det = 0.0975)
+    np.array([[1.0, 0.0], [0.0, 1.0]]),  # identity
+    np.array([[2.0, 0.0], [0.0, 2.0]]),  # uniform scale
+    np.array([[1.5, 0.0], [0.0, 0.5]]),  # anisotropic scale
+    _rot(0.6),  # pure rotation
+    np.array([[1.0, 0.4], [0.0, 1.0]]),  # shear
+    np.array([[1.2, -0.3], [0.5, 0.9]]),  # general
+    _rot(2.3) @ np.diag([1.7, 0.6]),  # rotated anisotropic
+    np.array([[1.0, 0.95], [0.95, 1.0]]),  # near-singular (det = 0.0975)
 ]
 
 
@@ -106,6 +107,7 @@ inline constexpr std::array<Sample, {len(_METRIC_CASES)}> kSamples = {{{{
 # [t00 t01 t02 t10 t11 t12 t20 t21 t22].
 # ===========================================================================
 
+
 def _rotz(theta: float) -> np.ndarray:
     c, s = np.cos(theta), np.sin(theta)
     return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
@@ -117,20 +119,32 @@ def _rotx(theta: float) -> np.ndarray:
 
 
 _METRIC_CASES_3D: list[np.ndarray] = [
-    np.eye(3),                                          # identity (mu = 0)
-    np.diag([2.0, 2.0, 2.0]),                           # uniform scale (mu = 0)
-    np.diag([2.0, 0.5, 1.0]),                           # anisotropic stretch
-    _rotz(0.6) @ _rotx(-0.4),                           # pure rotation (mu = 0)
-    np.array([[1.0, 0.3, 0.0],                          # shear
-              [0.0, 1.0, 0.2],
-              [0.0, 0.0, 1.0]]),
+    np.eye(3),  # identity (mu = 0)
+    np.diag([2.0, 2.0, 2.0]),  # uniform scale (mu = 0)
+    np.diag([2.0, 0.5, 1.0]),  # anisotropic stretch
+    _rotz(0.6) @ _rotx(-0.4),  # pure rotation (mu = 0)
+    np.array(
+        [
+            [1.0, 0.3, 0.0],  # shear
+            [0.0, 1.0, 0.2],
+            [0.0, 0.0, 1.0],
+        ]
+    ),
     _rotz(1.1) @ np.diag([1.7, 0.6, 1.2]) @ _rotx(0.5),  # rotated anisotropic
-    np.array([[1.2, -0.3, 0.1],                         # general well-conditioned
-              [0.2, 0.9, -0.2],
-              [0.05, 0.15, 1.1]]),
-    np.array([[1.0, 0.0, 0.0],                          # near-singular (det small)
-              [0.0, 1.0, 0.0],
-              [0.0, 0.0, 0.05]]),
+    np.array(
+        [
+            [1.2, -0.3, 0.1],  # general well-conditioned
+            [0.2, 0.9, -0.2],
+            [0.05, 0.15, 1.1],
+        ]
+    ),
+    np.array(
+        [
+            [1.0, 0.0, 0.0],  # near-singular (det small)
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.05],
+        ]
+    ),
 ]
 
 
@@ -178,10 +192,14 @@ inline constexpr std::array<Sample3D, {len(_METRIC_CASES_3D)}> kSamples3D = {{{{
 # golden_geometry.hpp — project / tangent_space per entity, curated points.
 # ===========================================================================
 
+
 def gen_geometry() -> str:
     # TAG_* constants and PARAM_PAD_SIZE live on the host-side encoding module.
     from egg.geometry.entity_encoding import (
-        TAG_FREE, TAG_LINESEG, TAG_CIRCLE, TAG_ELLIPSE,
+        TAG_FREE,
+        TAG_LINESEG,
+        TAG_CIRCLE,
+        TAG_ELLIPSE,
         PARAM_PAD_SIZE,
     )
 
@@ -192,28 +210,30 @@ def gen_geometry() -> str:
 
     # (name, tag, params, point) covering on-curve, off-curve, and degenerate
     # (p == center / zero-length) inputs per entity.
-    line = pad([0.0, 0.0, 2.0, 1.0])        # start (0,0) -> end (2,1)
-    circ = pad([0.5, -0.3, 2.0])             # center (0.5,-0.3), r=2
-    elli = pad([0.0, 0.0, 3.0, 1.0])        # center (0,0), radii (3,1)
+    line = pad([0.0, 0.0, 2.0, 1.0])  # start (0,0) -> end (2,1)
+    circ = pad([0.5, -0.3, 2.0])  # center (0.5,-0.3), r=2
+    elli = pad([0.0, 0.0, 3.0, 1.0])  # center (0,0), radii (3,1)
 
     # The 2D entity set is curves only; Sphere/Plane are 3D surfaces (not part of the 2D golden set).
     cases = [
         ("free", TAG_FREE, np.zeros(PARAM_PAD_SIZE), [0.3, -0.7]),
         ("lineseg-mid", TAG_LINESEG, line, [1.0, 1.5]),
-        ("lineseg-before", TAG_LINESEG, line, [-1.0, -1.0]),   # clips to start
-        ("lineseg-after", TAG_LINESEG, line, [5.0, 4.0]),      # clips to end
+        ("lineseg-before", TAG_LINESEG, line, [-1.0, -1.0]),  # clips to start
+        ("lineseg-after", TAG_LINESEG, line, [5.0, 4.0]),  # clips to end
         ("circle-out", TAG_CIRCLE, circ, [3.0, 2.0]),
         ("circle-in", TAG_CIRCLE, circ, [0.6, -0.2]),
-        ("circle-center", TAG_CIRCLE, circ, [0.5, -0.3]),      # p == center
+        ("circle-center", TAG_CIRCLE, circ, [0.5, -0.3]),  # p == center
         ("ellipse-out", TAG_ELLIPSE, elli, [2.0, 2.0]),
-        ("ellipse-center", TAG_ELLIPSE, elli, [0.0, 0.0]),     # p == center
+        ("ellipse-center", TAG_ELLIPSE, elli, [0.0, 0.0]),  # p == center
     ]
 
     rows: list[str] = []
     for _name, tag, params, p in cases:
         p_arr = np.asarray(p, dtype=np.float64)
         proj = np.asarray(cpp_core.geometry_project(p_arr, int(tag), params))
-        tang = np.asarray(cpp_core.geometry_tangent(p_arr, int(tag), params)).reshape(-1)
+        tang = np.asarray(cpp_core.geometry_tangent(p_arr, int(tag), params)).reshape(
+            -1
+        )
         rows.append(
             "    {"
             f"\n      .tag = {int(tag)},"
@@ -302,22 +322,31 @@ def _build_patch_case(P: int, tag: int, params: np.ndarray, roles, rng):
         if r == 0:
             gc[p] = 0
             corner_pos = node0
-            gn0[p] = len(nodes); nodes.append(nbr0_pos)
-            gn1[p] = len(nodes); nodes.append(nbr1_pos)
+            gn0[p] = len(nodes)
+            nodes.append(nbr0_pos)
+            gn1[p] = len(nodes)
+            nodes.append(nbr1_pos)
         elif r == 1:
             gn0[p] = 0
             nbr0_pos = node0
-            gc[p] = len(nodes); nodes.append(corner_pos)
-            gn1[p] = len(nodes); nodes.append(nbr1_pos)
+            gc[p] = len(nodes)
+            nodes.append(corner_pos)
+            gn1[p] = len(nodes)
+            nodes.append(nbr1_pos)
         elif r == 2:
             gn1[p] = 0
             nbr1_pos = node0
-            gc[p] = len(nodes); nodes.append(corner_pos)
-            gn0[p] = len(nodes); nodes.append(nbr0_pos)
+            gc[p] = len(nodes)
+            nodes.append(corner_pos)
+            gn0[p] = len(nodes)
+            nodes.append(nbr0_pos)
         else:  # absent (-1): all three nodes fresh
-            gc[p] = len(nodes); nodes.append(corner_pos)
-            gn0[p] = len(nodes); nodes.append(nbr0_pos)
-            gn1[p] = len(nodes); nodes.append(nbr1_pos)
+            gc[p] = len(nodes)
+            nodes.append(corner_pos)
+            gn0[p] = len(nodes)
+            nodes.append(nbr0_pos)
+            gn1[p] = len(nodes)
+            nodes.append(nbr1_pos)
         # Re-derive positions so A is exactly s*(nbr - corner).
         s0[p] = 1.0 if rng.random() > 0.3 else -1.0
         s1[p] = 1.0 if rng.random() > 0.3 else -1.0
@@ -339,19 +368,36 @@ def _build_patch_case(P: int, tag: int, params: np.ndarray, roles, rng):
             else:
                 nodes[gn1[p]] = nbr1_pos
         # Mildly anisotropic W_inv (still keeps T well-conditioned).
-        W_inv[p] = np.array([[1.0, 0.1], [0.0, 0.9]]) + 0.02 * rng.standard_normal((2, 2))
+        W_inv[p] = np.array([[1.0, 0.1], [0.0, 0.9]]) + 0.02 * rng.standard_normal(
+            (2, 2)
+        )
 
     X = np.array(nodes)
     J = make_chain_J(s0, s1, W_inv)
     pos = X[0].copy()
-    return dict(X=X, gc=gc, gn0=gn0, gn1=gn1, s0=s0, s1=s1, W_inv=W_inv,
-               role=role, J=J, tag=int(tag), params=params, pos=pos)
+    return dict(
+        X=X,
+        gc=gc,
+        gn0=gn0,
+        gn1=gn1,
+        s0=s0,
+        s1=s1,
+        W_inv=W_inv,
+        role=role,
+        J=J,
+        tag=int(tag),
+        params=params,
+        pos=pos,
+    )
 
 
 def gen_patch() -> str:
     # TAG_* constants and PARAM_PAD_SIZE live on the host-side encoding module.
     from egg.geometry.entity_encoding import (
-        TAG_FREE, TAG_LINESEG, TAG_CIRCLE, PARAM_PAD_SIZE,
+        TAG_FREE,
+        TAG_LINESEG,
+        TAG_CIRCLE,
+        PARAM_PAD_SIZE,
     )
 
     def pad(vals):
@@ -364,7 +410,7 @@ def gen_patch() -> str:
         # (tag, params, roles)
         (TAG_FREE, np.zeros(PARAM_PAD_SIZE), [0, 0, 0, 0]),
         (TAG_FREE, np.zeros(PARAM_PAD_SIZE), [0, 1, 2, 0, 1, 2]),  # mixed roles
-        (TAG_FREE, np.zeros(PARAM_PAD_SIZE), [0, 1, -1, 2]),        # with absent
+        (TAG_FREE, np.zeros(PARAM_PAD_SIZE), [0, 1, -1, 2]),  # with absent
         (TAG_CIRCLE, pad([0.5, -0.3, 2.0]), [0, 0, 0, 0]),
         (TAG_LINESEG, pad([0.0, 0.0, 2.0, 1.0]), [0, 1, 2, 0]),
     ]
@@ -383,17 +429,24 @@ def gen_patch() -> str:
         J = np.ascontiguousarray(c["J"], dtype=np.float64)
 
         grad, hess, energy, mindet = cpp_core.patch_eval(
-            X, gc, gn0, gn1, s0, s1, W_inv, role, J)
+            X, gc, gn0, gn1, s0, s1, W_inv, role, J
+        )
         e2, md2 = cpp_core.energy_mindet(X, gc, gn0, gn1, s0, s1, W_inv)
         delta = cpp_core.newton_step(
-            np.asarray(grad), np.asarray(hess),
+            np.asarray(grad),
+            np.asarray(hess),
             np.ascontiguousarray(c["pos"], dtype=np.float64),
             int(c["tag"]),
-            np.ascontiguousarray(c["params"], dtype=np.float64))
+            np.ascontiguousarray(c["params"], dtype=np.float64),
+        )
         c["expected"] = dict(
-            grad=np.asarray(grad), hess=np.asarray(hess).reshape(-1),
-            energy=float(energy), mindet=float(mindet),
-            energy2=float(e2), mindet2=float(md2), delta=np.asarray(delta),
+            grad=np.asarray(grad),
+            hess=np.asarray(hess).reshape(-1),
+            energy=float(energy),
+            mindet=float(mindet),
+            energy2=float(e2),
+            mindet2=float(md2),
+            delta=np.asarray(delta),
         )
         cases.append(c)
 
@@ -477,10 +530,12 @@ inline constexpr std::array<PatchSample, {len(cases)}> kPatchSamples = {{{{
 
 def main() -> None:
     here = Path(__file__).parent
-    for name, gen in (("golden_metric.hpp", gen_metric),
-                      ("golden_metric_3d.hpp", gen_metric_3d),
-                      ("golden_geometry.hpp", gen_geometry),
-                      ("golden_patch.hpp", gen_patch)):
+    for name, gen in (
+        ("golden_metric.hpp", gen_metric),
+        ("golden_metric_3d.hpp", gen_metric_3d),
+        ("golden_geometry.hpp", gen_geometry),
+        ("golden_patch.hpp", gen_patch),
+    ):
         dest = here / name
         dest.write_text(gen())
         print(f"wrote {dest}")

@@ -48,6 +48,7 @@ from egg.geometry.surfaces3d import BSplineSurface
 from egg.smoothing.flat_context import build_flat_context
 from sphere_in_cube import build_grid  # noqa: F401  (same lattice; re-exported for the driver)
 
+
 def nurbs_sphere(r0, center=(0.0, 0.0, 0.0)):
     """Exact NURBS sphere of radius ``r0`` as a surface of revolution.
 
@@ -59,11 +60,15 @@ def nurbs_sphere(r0, center=(0.0, 0.0, 0.0)):
     ``BSplineSurfaceParam`` device project — the point of this benchmark.
     """
     s2 = np.sqrt(2.0) / 2.0
-    circ = np.array([(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0),
-                     (-1, -1), (0, -1), (1, -1), (1, 0)], dtype=float)
+    circ = np.array(
+        [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1), (1, 0)],
+        dtype=float,
+    )
     wc = np.array([1, s2, 1, s2, 1, s2, 1, s2, 1], dtype=float)
     knots_u = np.array([0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4], dtype=float)
-    merid = np.array([(0, 1), (1, 1), (1, 0), (1, -1), (0, -1)], dtype=float)  # (radius, height)
+    merid = np.array(
+        [(0, 1), (1, 1), (1, 0), (1, -1), (0, -1)], dtype=float
+    )  # (radius, height)
     wm = np.array([1, s2, 1, s2, 1], dtype=float)
     knots_v = np.array([0, 0, 0, 1, 1, 2, 2, 2], dtype=float)
     nu, nv = 9, 5
@@ -162,4 +167,5 @@ if __name__ == "__main__":
 
     main_sphere_in_cube(
         sys.modules[__name__],
-        banner="d=3: NURBS sphere in a cube (6-block O-grid) → TMOP smooth")
+        banner="d=3: NURBS sphere in a cube (6-block O-grid) → TMOP smooth",
+    )

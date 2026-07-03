@@ -135,7 +135,9 @@ def build_structured_context_from_block_maps(
         id array; ``.shape`` is its interior node-count shape).
     """
     interior_shapes = [tuple(int(s) for s in b.shape) for b in block_global_dof]
-    flat_dof = [np.ascontiguousarray(b.reshape(-1), dtype=np.int32) for b in block_global_dof]
+    flat_dof = [
+        np.ascontiguousarray(b.reshape(-1), dtype=np.int32) for b in block_global_dof
+    ]
 
     empty_i = np.zeros((0,), dtype=np.int32)
     empty_rows = np.zeros((0, d), dtype=np.int32)
@@ -193,7 +195,9 @@ def build_block_structured_context(grid: MultiBlockGrid) -> BlockStructuredConte
 
     # Per-block {global_dof: logical_idx} for nodes on a given (axis, side) face,
     # so a face node in block A can locate its twin (same global DOF) in block B.
-    def face_dof_to_logical(bi: int, axis: int, side: int) -> dict[int, tuple[int, ...]]:
+    def face_dof_to_logical(
+        bi: int, axis: int, side: int
+    ) -> dict[int, tuple[int, ...]]:
         spec = topo.block_specs[block_names[bi]]
         shape = spec.logical_shape
         fixed = 0 if side == 0 else shape[axis] - 1
@@ -213,7 +217,9 @@ def build_block_structured_context(grid: MultiBlockGrid) -> BlockStructuredConte
     src_padded: list[tuple[int, ...]] = []
     dst_padded: list[tuple[int, ...]] = []
 
-    def ghost_padded(logical: tuple[int, ...], axis: int, side: int, shape) -> tuple[int, ...]:
+    def ghost_padded(
+        logical: tuple[int, ...], axis: int, side: int, shape
+    ) -> tuple[int, ...]:
         """Padded index of the ghost one step *outside* `logical`'s shared face."""
         idx = [c + 1 for c in logical]  # interior -> padded
         idx[axis] = 0 if side == 0 else shape[axis] + 1  # step into the ghost shell
@@ -356,8 +362,11 @@ class CppStructuredSweepSession:
             ``ceil(n_sweeps / k)`` (or ``1`` when ``report_every <= 0``).
         """
         return self._session.run(
-            n_sweeps, phase=phase, delta=delta,
-            omega=omega, report_every=report_every,
+            n_sweeps,
+            phase=phase,
+            delta=delta,
+            omega=omega,
+            report_every=report_every,
         )
 
     def get_X(self) -> np.ndarray:
@@ -440,9 +449,16 @@ def cpp_structured_sweep(
     X_flat = np.ascontiguousarray(X, dtype=np.float64).ravel()
 
     X_out_flat, energies, mindets = cpp_core.cpp_structured_sweep(
-        ctx_arrays, structured, X_flat, n_sweeps,
-        device=device, phase=phase, delta=delta, dim=ctx.d,
-        omega=omega, report_every=report_every,
+        ctx_arrays,
+        structured,
+        X_flat,
+        n_sweeps,
+        device=device,
+        phase=phase,
+        delta=delta,
+        dim=ctx.d,
+        omega=omega,
+        report_every=report_every,
     )
 
     return X_out_flat.reshape(X.shape), energies, mindets
@@ -514,8 +530,9 @@ def cpp_untangle(
     delta = delta0_factor * max(abs(md), 1e-12)
     outer_iters = 0
     for _ in range(max_outer):
-        _e, mds = session.run(sweeps_per_delta, phase="untangle", delta=delta,
-                              omega=omega)
+        _e, mds = session.run(
+            sweeps_per_delta, phase="untangle", delta=delta, omega=omega
+        )
         outer_iters += 1
         md = float(np.asarray(mds)[-1])
         if md > margin:

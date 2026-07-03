@@ -129,8 +129,14 @@ def _block_cells(dof_map: np.ndarray, d: int) -> np.ndarray:
         offsets = [(0, 0), (1, 0), (1, 1), (0, 1)]
     else:
         offsets = [
-            (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
-            (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1),
+            (0, 0, 0),
+            (1, 0, 0),
+            (1, 1, 0),
+            (0, 1, 0),
+            (0, 0, 1),
+            (1, 0, 1),
+            (1, 1, 1),
+            (0, 1, 1),
         ]
     cell_shape = tuple(n - 1 for n in dof_map.shape)
     cols = [

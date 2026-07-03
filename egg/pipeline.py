@@ -118,15 +118,23 @@ class PipelineReport:
 
 def _min_det(grid, energy_stencil) -> float:
     from .smoothing.untangle import grid_min_det
+
     return grid_min_det(grid.global_nodes, energy_stencil)
 
 
 def _energy(grid, energy_stencil) -> float:
     from .smoothing.objective import assemble_energy_vec
+
     es = energy_stencil
     return assemble_energy_vec(
-        grid.global_nodes, es["gc"], es["gn0"], es["gn1"],
-        es["s0"], es["s1"], es["W_inv"])
+        grid.global_nodes,
+        es["gc"],
+        es["gn0"],
+        es["gn1"],
+        es["s0"],
+        es["s1"],
+        es["W_inv"],
+    )
 
 
 def _sync(grid, X) -> None:
@@ -136,8 +144,9 @@ def _sync(grid, X) -> None:
         blk.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]
 
 
-def generate_steps(grid, target=None, config: PipelineConfig | None = None,
-                   **overrides):
+def generate_steps(
+    grid, target=None, config: PipelineConfig | None = None, **overrides
+):
     """Step-wise pipeline on the C++ backend; mutates ``grid`` in place.
 
     Parameters
@@ -194,8 +203,11 @@ def generate_steps(grid, target=None, config: PipelineConfig | None = None,
     from .smoothing.untangle import grid_min_det
     from .projection.project import project_nodes
 
-    cfg = replace(config, **overrides) if config is not None \
+    cfg = (
+        replace(config, **overrides)
+        if config is not None
         else PipelineConfig(**overrides)
+    )
     margin, device = cfg.margin, cfg.device
     tmop_chunk, omega, report_every = cfg.tmop_chunk, cfg.omega, cfg.report_every
 
@@ -227,37 +239,61 @@ def generate_steps(grid, target=None, config: PipelineConfig | None = None,
         untangle_omega = 0.5
         if cfg.untangle_direct:
             from .smoothing.cpp_backend import cpp_untangle
+
             X_out, md, outer_iters, delta_final = cpp_untangle(
-                ctx_iso, grid, grid.global_nodes,
+                ctx_iso,
+                grid,
+                grid.global_nodes,
                 sweeps_per_delta=cfg.sweeps_per_delta,
                 delta0_factor=cfg.delta0_factor,
                 shrink=cfg.untangle_shrink,
                 max_outer=cfg.max_outer,
                 device=device,
                 margin=margin,
-                omega=untangle_omega)
+                omega=untangle_omega,
+            )
             _sync(grid, X_out)
-            yield ("untangle", {"min_det": md, "converged": md > margin,
-                                "direct": True, "outer_iters": outer_iters,
-                                "delta": delta_final})
+            yield (
+                "untangle",
+                {
+                    "min_det": md,
+                    "converged": md > margin,
+                    "direct": True,
+                    "outer_iters": outer_iters,
+                    "delta": delta_final,
+                },
+            )
         else:
             from .smoothing.cpp_backend import (
-                CppStructuredSweepSession, build_block_structured_context)
+                CppStructuredSweepSession,
+                build_block_structured_context,
+            )
+
             bsc = build_block_structured_context(grid)
             session = CppStructuredSweepSession(
-                ctx_iso, bsc, grid.global_nodes, device=device)
+                ctx_iso, bsc, grid.global_nodes, device=device
+            )
             delta = cfg.delta0_factor * max(abs(md), 1e-12)
             for it in range(cfg.max_outer):
                 _e, mds = session.run(
-                    cfg.sweeps_per_delta, phase="untangle", delta=delta,
+                    cfg.sweeps_per_delta,
+                    phase="untangle",
+                    delta=delta,
                     omega=untangle_omega,
                     report_every=report_every,
                 )
                 md = float(np.asarray(mds)[-1])
                 _sync(grid, session.get_X())
                 converged = md > margin
-                yield ("untangle", {"min_det": md, "delta": delta,
-                                    "outer_iter": it + 1, "converged": converged})
+                yield (
+                    "untangle",
+                    {
+                        "min_det": md,
+                        "delta": delta,
+                        "outer_iter": it + 1,
+                        "converged": converged,
+                    },
+                )
                 if converged:
                     break
                 delta *= cfg.untangle_shrink
@@ -270,10 +306,12 @@ def generate_steps(grid, target=None, config: PipelineConfig | None = None,
     # Block-Jacobi over the halo-padded structured store, built from the grid's
     # BlockTopology; one merged double-buffered launch per sweep, SOR weight omega.
     from .smoothing.cpp_backend import (
-        CppStructuredSweepSession, build_block_structured_context)
+        CppStructuredSweepSession,
+        build_block_structured_context,
+    )
+
     bsc = build_block_structured_context(grid)
-    session = CppStructuredSweepSession(
-        tmop_ctx, bsc, grid.global_nodes, device=device)
+    session = CppStructuredSweepSession(tmop_ctx, bsc, grid.global_nodes, device=device)
     run_kwargs = {"omega": omega}
     done = 0
     while done < tmop_sweeps:
@@ -281,9 +319,14 @@ def generate_steps(grid, target=None, config: PipelineConfig | None = None,
         energies, _mds = session.run(k, report_every=report_every, **run_kwargs)
         done += k
         _sync(grid, session.get_X())
-        yield ("tmop", {"energy": float(np.asarray(energies)[-1]),
-                        "min_det": grid_min_det(grid.global_nodes, es),
-                        "sweeps": done})
+        yield (
+            "tmop",
+            {
+                "energy": float(np.asarray(energies)[-1]),
+                "min_det": grid_min_det(grid.global_nodes, es),
+                "sweeps": done,
+            },
+        )
     project_nodes(grid, grid.dof_constraints)
     score_es = tmop_ctx.energy_stencil
 
@@ -292,27 +335,38 @@ def generate_steps(grid, target=None, config: PipelineConfig | None = None,
         from .smoothing.respace import respace_first_layers
 
         pinned = respace_first_layers(grid, grid.topology)
-        yield ("pin", {"n_dofs": int(pinned.size),
-                       "min_det": grid_min_det(grid.global_nodes, es)})
+        yield (
+            "pin",
+            {
+                "n_dofs": int(pinned.size),
+                "min_det": grid_min_det(grid.global_nodes, es),
+            },
+        )
         if pinned.size:
             # Rebuild the context so the pinned DOFs are compiled out of the
             # update set, then re-equilibrate the free grid (warm start).
-            pin_ctx = build_sweep_context(
-                grid, iso if target is None else target)
+            pin_ctx = build_sweep_context(grid, iso if target is None else target)
             session = CppStructuredSweepSession(
-                pin_ctx, build_block_structured_context(grid),
-                grid.global_nodes, device=device)
+                pin_ctx,
+                build_block_structured_context(grid),
+                grid.global_nodes,
+                device=device,
+            )
             total = max((cfg.pin_sweeps // tmop_chunk) * tmop_chunk, tmop_chunk)
             done = 0
             while done < total:
                 k = min(tmop_chunk, total - done)
-                energies, _mds = session.run(
-                    k, report_every=report_every, **run_kwargs)
+                energies, _mds = session.run(k, report_every=report_every, **run_kwargs)
                 done += k
                 _sync(grid, session.get_X())
-                yield ("tmop", {"energy": float(np.asarray(energies)[-1]),
-                                "min_det": grid_min_det(grid.global_nodes, es),
-                                "sweeps": done})
+                yield (
+                    "tmop",
+                    {
+                        "energy": float(np.asarray(energies)[-1]),
+                        "min_det": grid_min_det(grid.global_nodes, es),
+                        "sweeps": done,
+                    },
+                )
             project_nodes(grid, grid.dof_constraints)
             score_es = pin_ctx.energy_stencil
 
@@ -320,21 +374,26 @@ def generate_steps(grid, target=None, config: PipelineConfig | None = None,
     if cfg.respace:
         from .smoothing.respace import enforce_boundary_layer_spacing
 
-        enforce_boundary_layer_spacing(grid, grid.topology,
-                                       straighten_columns=False)
+        enforce_boundary_layer_spacing(grid, grid.topology, straighten_columns=False)
         yield ("respace", {"min_det": grid_min_det(grid.global_nodes, es)})
 
     # Terminal summary AFTER the closing boundary snap, so the reported/plotted
     # final numbers reflect the snapped mesh. Energy is scored on the SAME
     # context TMOP optimised — for a BL/anisotropic target the isotropic
     # stencil reports a different (higher) objective on the same mesh.
-    yield ("final", {"min_det": grid_min_det(grid.global_nodes, es),
-                     "energy": _energy(grid, score_es)})
+    yield (
+        "final",
+        {
+            "min_det": grid_min_det(grid.global_nodes, es),
+            "energy": _energy(grid, score_es),
+        },
+    )
 
 
 def _fmt_info(info: dict) -> str:
-    parts = [f"{k}={v:.4e}" if isinstance(v, float) else f"{k}={v}"
-             for k, v in info.items()]
+    parts = [
+        f"{k}={v:.4e}" if isinstance(v, float) else f"{k}={v}" for k, v in info.items()
+    ]
     return " ".join(parts)
 
 
@@ -357,9 +416,16 @@ def drain_steps(steps, *, mindet_history=None, energy_history=None, verbose=True
             energy_history.append(info["energy"])
 
 
-def run_pipeline(grid, target=None, config: PipelineConfig | None = None, *,
-                 mindet_history=None, energy_history=None, verbose=True,
-                 **overrides):
+def run_pipeline(
+    grid,
+    target=None,
+    config: PipelineConfig | None = None,
+    *,
+    mindet_history=None,
+    energy_history=None,
+    verbose=True,
+    **overrides,
+):
     """Batch convenience: :func:`drain_steps` over :func:`generate_steps`.
 
     Same options and in-place ``grid`` mutation as :func:`generate_steps`;
@@ -392,29 +458,38 @@ def generate(topology, config: PipelineConfig | None = None) -> MultiBlockGrid:
     tmop_sweeps_done = 0
     try:
         for phase, info in generate_steps(
-                grid, config.target_fn, config, untangle_direct=True):
+            grid, config.target_fn, config, untangle_direct=True
+        ):
             if phase == "init":
                 report.add("init", min_det=info["min_det"])
             elif phase == "untangle":
                 report.untangled = True
                 report.untangle_converged = bool(info["converged"])
-                report.add("untangle", min_det=info["min_det"],
-                           converged=info["converged"])
+                report.add(
+                    "untangle", min_det=info["min_det"], converged=info["converged"]
+                )
             elif phase == "tmop":
                 tmop_sweeps_done = info["sweeps"]
             elif phase == "final":
                 report.final_min_det = info["min_det"]
                 report.final_energy = info["energy"]
-                report.add("tmop", min_det=info["min_det"],
-                           energy=info["energy"], sweeps=tmop_sweeps_done)
+                report.add(
+                    "tmop",
+                    min_det=info["min_det"],
+                    energy=info["energy"],
+                    sweeps=tmop_sweeps_done,
+                )
     except KeyboardInterrupt:
         # Grid is synced after each step; report what we have.
-        print(f"\n[interrupted after {tmop_sweeps_done} TMOP sweeps; "
-              "progress preserved]")
+        print(
+            f"\n[interrupted after {tmop_sweeps_done} TMOP sweeps; progress preserved]"
+        )
 
     if config.verbose:
-        print(f"[pipeline] final: min det A={report.final_min_det:.3e} "
-              f"energy={report.final_energy:.4f}")
+        print(
+            f"[pipeline] final: min det A={report.final_min_det:.3e} "
+            f"energy={report.final_energy:.4f}"
+        )
 
     grid.pipeline_report = report
     return grid

@@ -27,8 +27,10 @@ def build_blob_in_rectangle():
     # Inner body: closed cubic spline through a wavy-radius point ring.
     theta = np.linspace(0.0, 2.0 * np.pi, 17)[:-1]
     r = 0.8 + 0.12 * np.sin(3.0 * theta)
-    ring = [Vector3(2.0 + ri * np.cos(th), 2.0 + ri * np.sin(th))
-            for th, ri in zip(theta, r)]
+    ring = [
+        Vector3(2.0 + ri * np.cos(th), 2.0 + ri * np.sin(th))
+        for th, ri in zip(theta, r)
+    ]
     blob = Spline(ring, closed=True)
 
     # Outer walls, wrapped as parametric grid edges.
@@ -81,8 +83,12 @@ def build_blob_in_rectangle():
         b.tag_boundary("blob", blk, 1, 1)
     # Wall associations of the e_* blocks are inferred (place_node corners);
     # markers for SU2 export stay explicit.
-    wall_names = {id(bottom): "bottom", id(right): "right",
-                  id(top): "top", id(left): "left"}
+    wall_names = {
+        id(bottom): "bottom",
+        id(right): "right",
+        id(top): "top",
+        id(left): "left",
+    }
     for blk, ent in [("e_s", bottom), ("e_e", right), ("e_n", top), ("e_w", left)]:
         b.tag_boundary(wall_names[id(ent)], blk, 1, 0)
     for blk, a0, a1 in [
@@ -128,8 +134,15 @@ def main():
     )
     steps = generate_steps(grid, None, cfg, untangle_direct=not a.plot_live)
 
-    finish(grid, topo, ents, steps, a, title="spline blob",
-           mindet_title="min det A (TMOP only)")
+    finish(
+        grid,
+        topo,
+        ents,
+        steps,
+        a,
+        title="spline blob",
+        mindet_title="min det A (TMOP only)",
+    )
 
 
 if __name__ == "__main__":

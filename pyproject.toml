@@ -78,3 +78,8 @@ if.state = "editable"
 cmake.define.EGG_BUILD_TESTS = "ON"
 build.targets = []                  # [] = build the default (all) target, not just cpp_core
 
+
+# Python formatting/linting: ruff with default settings.
+# C++ formatting/linting: .clang-format / .clang-tidy.
+[tool.ruff]
+line-length = 88
