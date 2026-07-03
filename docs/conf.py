@@ -10,8 +10,8 @@
 # Build: uv run --group docs sphinx-build -b html docs docs/_build/html
 
 project = "egg"
-copyright = "2026, egg developers"
-author = "egg developers"
+copyright = "2026, Shahzeb Imran and Egg contributors"
+author = "Shahzeb Imran and Egg contributors"
 release = "0.1.0"
 
 extensions = [
