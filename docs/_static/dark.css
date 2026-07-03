@@ -64,12 +64,13 @@ html[data-theme="dark"] a {
   text-decoration-color: #e8eaec;
 }
 
-/* flask.css accent: #004b6b links, #6d4100 hover -> lightened */
+/* flask.css accent: #004b6b links, #6d4100 hover -> light green to match
+   the dark palette's keyword green (#6EBF26) */
 html[data-theme="dark"] a,
 html[data-theme="dark"] a.reference,
 html[data-theme="dark"] a.footnote-reference {
-  color: #79b8d6;
-  text-decoration-color: #79b8d6;
+  color: #93c775;
+  text-decoration-color: #93c775;
 }
 
 html[data-theme="dark"] a:hover {
@@ -84,6 +85,24 @@ html[data-theme="dark"] h4,
 html[data-theme="dark"] h5,
 html[data-theme="dark"] h6 {
   color: #e8eaec;
+}
+
+/* inline code: drop pocoo's light chip (#e8eff0 behind #222 text); bold
+   white, mirroring light mode's bold black. Code links keep the theme's
+   dotted underline, drawn in white. */
+html[data-theme="dark"] code {
+  color: #d5d8db;
+  background: transparent;
+  font-weight: bold;
+}
+
+html[data-theme="dark"] a:has(> code) {
+  color: #d5d8db;
+  text-decoration-color: #d5d8db;
+}
+
+html[data-theme="dark"] a:has(> code):hover {
+  text-decoration-color: #d9a860;
 }
 
 html[data-theme="dark"] a.headerlink {
@@ -145,13 +164,6 @@ html[data-theme="dark"] p.version-warning {
   background-color: #00344a;
 }
 
-/* -- code displays ------------------------------------------------------ */
-
-html[data-theme="dark"] code {
-  color: #d8dcdf;
-  background: #263038;
-}
-
 /* -- tables ------------------------------------------------------------- */
 
 html[data-theme="dark"] table.docutils {
@@ -171,6 +183,23 @@ html[data-theme="dark"] table.field-list {
 html[data-theme="dark"] table.footnote {
   border-color: #3a3f44;
   background-color: #222528;
+}
+
+/* -- C/C++ API signature tokens ----------------------------------------- */
+/* Sphinx's basic.css hardcodes light-theme colors for pygments token
+   classes inside .sig declarations (outside .highlight blocks); re-map
+   them to the "native" dark palette used below. */
+html[data-theme="dark"] .sig.c   .k, html[data-theme="dark"] .sig.c   .kt,
+html[data-theme="dark"] .sig.cpp .k, html[data-theme="dark"] .sig.cpp .kt {
+  color: #6EBF26;
+}
+html[data-theme="dark"] .sig.c   .m,
+html[data-theme="dark"] .sig.cpp .m {
+  color: #B5CEA8;
+}
+html[data-theme="dark"] .sig.c   .s, html[data-theme="dark"] .sig.c   .sc,
+html[data-theme="dark"] .sig.cpp .s, html[data-theme="dark"] .sig.cpp .sc {
+  color: #ED9D13;
 }
 
 /* -- generated pygments dark style (do not edit below) ------------------ */

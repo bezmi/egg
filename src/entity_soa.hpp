@@ -119,7 +119,7 @@ inline constexpr int kMaxSoASeg = 4;
 /// Per-entity SoA storage trait; specialize per entity type (see above).
 template <class E> struct EntitySoA;
 
-/// E models the @ref EntitySoA trait: tag, Host, View, load, load_into,
+/// E models the `EntitySoA` trait: tag, Host, View, load, load_into,
 /// tie_view with the exact types. A mis-shaped specialization fails here
 /// rather than deep inside a kernel.
 template <class E>
@@ -138,7 +138,7 @@ concept HasEntitySoA = requires(const typename EntitySoA<E>::View v,
 };
 
 /// F is invocable as `f.template operator()<E>()` — gates
-/// @ref dispatch_entity_type so a malformed callable fails at the concept
+/// `dispatch_entity_type` so a malformed callable fails at the concept
 /// rather than deep in instantiation.
 template <class F, class E>
 concept EntityDispatchFn = requires(F f) {

@@ -7,10 +7,10 @@
 // For commercial licensing, contact s.imran@tuta.io
 
 /// @file dual.hpp
-/// Forward-mode AD: Dual<N> (value + gradient) and Dual2<N> (forward-over-
+/// Forward-mode AD: `Dual<N>` (value + gradient) and `Dual2<N>` (forward-over-
 /// forward "hyperdual": value + gradient + symmetric Hessian in one pass).
-/// Seed with seed_dual{,2}<N>(x, i) (unit i-th partial), build the input with
-/// each component seeded on its own direction, evaluate once, read .g / .h.
+/// Seed with `seed_dual{,2}<N>(x, i)` (unit i-th partial), build the input with
+/// each component seeded on its own direction, evaluate once, read `.g` / `.h`.
 /// Used by the delta-continuation untangle; will matter for the 3D mu.
 /// T defaults to egg::real so AD carries src/ precision without a
 /// double<->real seam; T needs the usual arithmetic plus sycl::sqrt.

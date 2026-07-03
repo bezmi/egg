@@ -51,6 +51,7 @@ template <int D> class BlockTopologyDevice
 
     /// Build from the host halo + singularity tables.
     ///
+    /// @param q            SYCL queue (owns the device tables).
     /// @param layout       packing geometry (turns padded/logical indices into
     ///                     buffer offsets).
     /// @param src_block    (E,) block of each source interior node.

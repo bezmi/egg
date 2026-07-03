@@ -39,7 +39,9 @@
       apply(next);
     });
     const side = document.querySelector("div.sphinxsidebarwrapper");
-    if (side) side.insertBefore(btn, side.firstChild);
+    const home = side && side.querySelector("h3.home-link");
+    if (home) home.after(btn);
+    else if (side) side.insertBefore(btn, side.firstChild);
     else document.body.appendChild(btn);
     apply(root.getAttribute("data-theme") || preferred());
   });

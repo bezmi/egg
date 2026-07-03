@@ -1,0 +1,39 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
+# XML-only Doxygen run consumed by Breathe (see conf.py, which invokes this
+# automatically at the start of every Sphinx build). Paths are relative to
+# docs/. Only non-default settings are listed.
+
+PROJECT_NAME           = egg
+PROJECT_NUMBER         = 0.1.0
+INPUT                  = ../src
+FILE_PATTERNS          = *.hpp *.cpp
+OUTPUT_DIRECTORY       = _doxygen
+
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+GENERATE_XML           = YES
+XML_PROGRAMLISTING     = NO
+
+# Document everything, including undocumented and static/file-local entities —
+# the core is expert-facing and signatures alone carry information.
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+
+# /// comments: first sentence becomes the brief.
+JAVADOC_AUTOBRIEF      = YES
+
+# Strip GCC attributes: doxygen otherwise mis-parses the declarations that
+# follow them, and Sphinx's C++ domain can't parse __attribute__ at all.
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+PREDEFINED             = "__attribute__(x)="
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO

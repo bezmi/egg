@@ -227,6 +227,36 @@ ctest --test-dir build_cpp --output-on-failure
 > `ACPP_VISIBILITY_MASK=omp ctest --test-dir <build-dir>`.
 ---
 
+## Documentation
+
+The docs site (Sphinx) covers the Python API (autodoc/napoleon, numpy-style
+docstrings) and the C++ core (Doxygen -> Breathe, from the `///` comments in
+`src/`). Configuration lives in `docs/conf.py` and `docs/Doxyfile`.
+
+Requires the `doxygen` binary on PATH (distro package; not a Python dep).
+Everything else comes from the `docs` dependency group:
+
+```bash
+uv run --group docs sphinx-build -W -b html docs docs/_build/html
+```
+
+`conf.py` runs Doxygen automatically at the start of every build, so there is
+no separate Doxygen step. `-W` (warnings are errors) is the CI-intended mode —
+keep it clean. Note that autodoc imports `egg`, so the extension gets built if
+sources changed (first run may take a while).
+
+View the result:
+
+```bash
+python -m http.server -d docs/_build/html   # http://localhost:8000
+```
+
+(or just open `docs/_build/html/index.html` in a browser). If output looks
+stale after theme/config changes, `rm -rf docs/_build docs/_doxygen` and
+rebuild.
+
+---
+
 ## Install the library in-tree (not recommended)
 
 ```bash

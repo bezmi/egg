@@ -410,12 +410,14 @@ static_assert(Parametrization<LineParam>);
 /// @f$ f'(t) = \lVert C'(t)\rVert^2 + (C(t) - q)\cdot C''(t) @f$. The unclamped
 /// parameter is returned; the entity's `Trim<1>` clamps it onto the live range.
 /// @tparam C Curve type exposing `eval`, `deriv`, and `deriv2` on a `Param<1>`.
+/// @param c Curve.
+/// @param q Query point.
 /// @param t_lo,t_hi Natural parameter domain to seed over.
+/// @param seed Warm-start parameter (e.g. the previous sweep's foot).
+/// @param has_seed Skip the coarse-sample search and start Newton from @p seed.
 /// @param n_seed Number of coarse samples for the seed.
 /// @param iters Newton iterations.
 /// @return The nearest-foot parameter @f$ t @f$.
-// Seeded variant: when @p has_seed, skip the coarse-sample search and start
-// Newton from @p seed (warm start, e.g. the previous sweep's foot parameter).
 template <class C>
 inline real project_param_seeded(const C& c,
                                  const PtN<2>& q,
@@ -565,9 +567,13 @@ struct CubicBezierParam {
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& t) const { return {deriv(t)}; }
 };
 
+#ifndef EGG_MAX_BSPLINE_DEGREE
+    /// Compile-time override for @ref egg::kMaxBSplineDegree.
+    #define EGG_MAX_BSPLINE_DEGREE 3
+#endif
 /// Largest B-spline *surface* degree the fixed-size de Boor work arrays support.
 ///
-/// Sizes the surface de Boor work arrays (`ndu`, `du`, `dv`, the `A*/w*` sums).
+/// Sizes the surface de Boor work arrays (`ndu`, `du`, `dv`, the `A*`/`w*` sums).
 /// Defaulted to 3 (bicubic — the de-facto CAD NURBS surface standard, covering
 /// virtually all 3D STEP) to keep the boundary projection's scratch footprint
 /// small: at degree 7 the boundary sweep kernel spilled ~3.3 KB; degree 3 cuts
@@ -575,25 +581,23 @@ struct CubicBezierParam {
 /// is kept tight on purpose. Override with `-DEGG_MAX_BSPLINE_DEGREE=N` for
 /// higher-degree surface models. A surface whose degree exceeds it is rejected at
 /// context build (see `bspline_degree_guard` in the `load_into` encoders).
-#ifndef EGG_MAX_BSPLINE_DEGREE
-    #define EGG_MAX_BSPLINE_DEGREE 3
-#endif
 inline constexpr int kMaxBSplineDegree = EGG_MAX_BSPLINE_DEGREE;
 /// Leading dimension of the *surface* de Boor work arrays.
 inline constexpr int kBSplineCap = kMaxBSplineDegree + 1;
 
+#ifndef EGG_MAX_BSPLINE_CURVE_DEGREE
+    /// Compile-time override for @ref egg::kMaxBSplineCurveDegree.
+    #define EGG_MAX_BSPLINE_CURVE_DEGREE 7
+#endif
 /// Largest B-spline *curve* degree the de Boor work arrays support.
 ///
-/// Decoupled from @ref kMaxBSplineDegree: 2D profile/trim curves (and curve
+/// Decoupled from @ref kMaxBSplineDegree — 2D profile/trim curves (and curve
 /// sub-segments nested in composites) routinely exceed degree 3 — e.g. a degree-4
 /// Bézier arch — whereas 3D surfaces are bicubic in practice. The curve de Boor
 /// is not in the VGPR-pinned 3D boundary surface kernel, so its work arrays can
 /// carry generous headroom (default 7) without touching the surface scratch the
 /// boundary kernel's register budget depends on. Override with
 /// `-DEGG_MAX_BSPLINE_CURVE_DEGREE=N`.
-#ifndef EGG_MAX_BSPLINE_CURVE_DEGREE
-    #define EGG_MAX_BSPLINE_CURVE_DEGREE 7
-#endif
 inline constexpr int kMaxBSplineCurveDegree = EGG_MAX_BSPLINE_CURVE_DEGREE;
 /// Leading dimension of the *curve* de Boor work arrays.
 inline constexpr int kBSplineCurveCap = kMaxBSplineCurveDegree + 1;
@@ -1007,28 +1011,26 @@ struct BSplineSurfaceParam {
     /// are valid — `nd=0`→`S00`; `nd=1`→ adds `S10,S01`; `nd=2`→ adds
     /// `S11,S20,S02`. `nd=1` (no second-order trio) is the **warm**
     /// projection's Gauss-Newton path (@ref newton_foot, the steady-state
-    /// hot path) and @ref frame; `nd=2` is the **cold** exact-Newton path
+    /// hot path) and `frame`; `nd=2` is the **cold** exact-Newton path
     /// (first sweep / far queries, not register-critical).
     struct SurfDers {
         PtN<3> S00 {}, S10 {}, S01 {}, S20 {}, S02 {}, S11 {};
     };
 
-    /// Fused evaluation of just the @ref SurfDers partials.
+    /// Fused compile-time-`nd` evaluation of just the @ref SurfDers partials.
     ///
     /// Flat accumulation: only the homogeneous sums for the six consumed partials
     /// (no full `A[3][3]`/`w[3][3]`/`S[3][3]` grid — that 9-entry nd=2 machinery
     /// was the boundary kernel's 256-VGPR pin). The bivariate quotient rule
     /// (rational case) and the unweighted pass-through are applied inline.
-    /// Compile-time-`nd` fused @ref SurfDers evaluation (F2 Lever A).
     ///
-    /// Identical numerically to the runtime @ref ders for `nd == ND`, but with
-    /// `ND` static `if constexpr` elides the nd≥1 / nd≥2 homogeneous-sum rows
-    /// and their `A*/w*` accumulators (and, via the templated de Boor, the
-    /// derivative recurrence and the extra `du/dv` rows). On the SSCP path a
-    /// runtime `nd` kept the nd=2 trio (`A11/A20/A02`, the 9-entry grid's
-    /// residue) live across the whole inlined kernel — the boundary kernel's
-    /// 256-VGPR pin. Routing the warm GN path through `ders_nd<1>` keeps those
-    /// out of the warm kernel; the cold path keeps `ders_nd<2>`.
+    /// A static `ND` with `if constexpr` elides the nd≥1 / nd≥2 homogeneous-sum
+    /// rows and their `A*`/`w*` accumulators (and, via the templated de Boor, the
+    /// derivative recurrence and the extra `du`/`dv` rows). A runtime `nd` would
+    /// keep the nd=2 trio (`A11`/`A20`/`A02`, the 9-entry grid's residue) live
+    /// across the whole inlined kernel — the boundary kernel's 256-VGPR pin.
+    /// Routing the warm GN path through `ders_nd<1>` keeps those out of the warm
+    /// kernel; the cold path keeps `ders_nd<2>`.
     template <int ND> [[nodiscard]] SurfDers ders_nd(const Param<2>& q) const
     {
         const int su = bspline_find_span(pu, nu, knots_u, q[0]);
@@ -1135,6 +1137,10 @@ struct BSplineSurfaceParam {
     ///     steady-state hot path). GN is *not* robust for large residuals (the
     ///     curvature is then first-order), hence the cold path keeps `Exact`.
     ///
+    /// @param p Query point.
+    /// @param q Start parameter (warm seed or coarse-grid winner).
+    /// @param u0,u1 Live u-domain (iterates are clamped to it).
+    /// @param v0,v1 Live v-domain.
     /// @param frame_out If non-null, receives the raw tangent frame
     ///   `{S_u, S_v}` from the **last** Newton iterate — at convergence this is
     ///   `< tol::newton` in parameter from the returned foot, so it reuses the
@@ -1535,7 +1541,7 @@ static_assert(HasEntitySoA<Free<2>>);
 // segmented types.
 // ---------------------------------------------------------------------------
 
-/// SoA schema for @ref LineSeg: packed `(sx, sy, ex, ey)` records.
+/// SoA schema for @ref LineSeg — packed `(sx, sy, ex, ey)` records.
 template <> struct EntitySoA<LineSeg> {
     static constexpr EntityTag tag = EntityTag::LineSeg;
     static constexpr int kFields = 4;
@@ -1569,7 +1575,7 @@ template <> struct EntitySoA<LineSeg> {
     { return View {.records = soa}; }
 };
 
-/// SoA schema for @ref Circle: packed `(cx, cy, r)` records.
+/// SoA schema for @ref Circle — packed `(cx, cy, r)` records.
 template <> struct EntitySoA<Circle> {
     static constexpr EntityTag tag = EntityTag::Circle;
     static constexpr int kFields = 3;
@@ -1597,7 +1603,7 @@ template <> struct EntitySoA<Circle> {
     { return View {.records = soa}; }
 };
 
-/// SoA schema for @ref Ellipse: packed `(cx, cy, rx, ry)` records.
+/// SoA schema for @ref Ellipse — packed `(cx, cy, rx, ry)` records.
 template <> struct EntitySoA<Ellipse> {
     static constexpr EntityTag tag = EntityTag::Ellipse;
     static constexpr int kFields = 4;
@@ -2209,7 +2215,7 @@ static_assert(HasEntitySoA<TrimmedEntity<BSplineSurfaceParam>>);
 /// Host-side tag -> concrete entity TYPE dispatch for the 2D entity set.
 ///
 /// Invokes `f.template operator()<E>()` with the entity type `E` that
-/// @ref make_entity produces for @p tag. This is the launch-granularity
+/// @ref decode_entity decodes for @p tag. This is the launch-granularity
 /// counterpart to the per-element `std::visit`: it lets the sweep instantiate a
 /// kernel for ONE entity type per launch (no all-alternatives inlining, no
 /// per-lane dispatch). The type list mirrors the per-dimension entity set
@@ -2320,6 +2326,7 @@ inline Frame<2, 1> CompositePath::project_frame(const Pt& p) const
 /// Builds the concrete entity monomorphically via @ref dispatch_entity_type +
 /// @ref decode_entity<E> (no `std::visit`, no entity variant). Cold oracle path
 /// (the `geometry_project` binding); fixed-size entities only (no arena).
+/// @param p Query point.
 /// @param tag Entity type tag.
 /// @param params Flat parameter blob.
 inline Pt project(const Pt& p, Tag tag, const real* params)
@@ -2335,6 +2342,7 @@ inline Pt project(const Pt& p, Tag tag, const real* params)
 /// The first column of the entity tangent basis (the single tangent for a curve;
 /// @f$ e_0 @f$ for Free). Built monomorphically via @ref dispatch_entity_type +
 /// @ref decode_entity<E> (no `std::visit`, no entity variant).
+/// @param p Query point.
 /// @param tag Entity type tag.
 /// @param params Flat parameter blob.
 /// @return The tangent column.

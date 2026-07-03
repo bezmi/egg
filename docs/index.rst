@@ -16,3 +16,5 @@ set-ups.
    api/topology
    api/pipeline
    api/smoothing
+   api/bindings
+   api/core

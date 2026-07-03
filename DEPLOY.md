@@ -154,7 +154,8 @@ wheel (ABI). After updating, tell users to clear the acpp JIT cache.
   JIT don't fit manylinux). Ship source + a documented acpp prereq, or a
   devcontainer.
 
-See [DEVELOPING.md](DEVELOPING.md) for the build/dev side.
+See [DEVELOPING.md](DEVELOPING.md) for the build/dev side, including
+[building the documentation site](DEVELOPING.md#documentation).
 
 ---
 

@@ -26,6 +26,7 @@ dependencies = [
 docs = [
   "sphinx>=8.2",
   "pallets-sphinx-themes>=2.3",
+  "breathe>=4.36",
 ]
 
 [tool.scikit-build]

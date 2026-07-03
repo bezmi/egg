@@ -110,11 +110,11 @@ template <int D> struct SweepContextHostT {
 /// std::visit, no const void* erasure. seg views are null for fixed-size
 /// types.
 struct PartitionView {
-    static constexpr int kMaxSeg =
-      kMaxSoASeg;         ///< Max segmented slots (matches EntitySoA<E>::View).
-    EntityTag tag;        ///< Entity type of this partition.
-    std::size_t ndof;     ///< Number of DOFs in this partition.
-    const int* dof_list;  ///< Group-local DOF indices, length @c ndof.
+    /// Max segmented slots (matches EntitySoA<E>::View).
+    static constexpr int kMaxSeg = kMaxSoASeg;
+    EntityTag tag;                                 ///< Entity type of this partition.
+    std::size_t ndof;                              ///< Number of DOFs in this partition.
+    const int* dof_list;                           ///< Group-local DOF indices, length @c ndof.
     SoAView<const real> soa_view {nullptr, 0, 0};  ///< Packed records (ndof, kFields).
     SegmentedView<real> seg[kMaxSeg] {};           ///< CSR fields (null for fixed-size).
 };
@@ -1029,9 +1029,13 @@ inline void sweep_kernel(sycl::queue& q,
 /// its own kernel (interior 144 VGPR → ~88 here + ~80 in the update kernel,
 /// both under the gfx1030 128-VGPR 2-wave tier).
 ///
+/// @param q         SYCL queue.
+/// @param g         Group view (DOF lists, patches, block layout).
+/// @param X         Node coordinates (read).
 /// @param grad_buf  [num_nodes * D]    dE/dpos per node.
 /// @param hess_buf  [num_nodes * D*D]  contracted Hessian per node (row-major).
 /// @param e0_buf    [num_nodes]        baseline patch energy per node.
+/// @param objective Metric objective functor.
 template <int D, class Obj>
 inline void metric_kernel(sycl::queue& q,
                           const GroupViewT<D>& g,
@@ -1068,9 +1072,13 @@ inline void metric_kernel(sycl::queue& q,
 /// projection — the step is plain solveNxN<D> and the trial is the raw step.
 /// Trial energy reads neighbours from @p X, the frozen block-Jacobi snapshot.
 ///
-/// @param X      Read buffer (frozen snapshot).
-/// @param X_out  Write buffer (null = in place).
-/// @param omega  Relaxation weight (1.0 = undamped).
+/// @param q         SYCL queue.
+/// @param g         Group view (DOF lists, patches, block layout).
+/// @param X         Read buffer (frozen snapshot).
+/// @param X_out     Write buffer (null = in place).
+/// @param omega     Relaxation weight (1.0 = undamped).
+/// @param grad_buf,hess_buf,e0_buf Metric buffers from @ref metric_kernel.
+/// @param objective Metric objective functor.
 template <int D, class Obj>
 inline void interior_update_kernel(sycl::queue& q,
                                    const GroupViewT<D>& g,
