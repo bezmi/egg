@@ -1,3 +1,11 @@
+// Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+//
+// PolyForm Noncommercial License 2.0.0-pre.2
+// https://github.com/bezmi/egg/blob/main/LICENSE.md
+// Free to use and redistribute for personal and noncommercial purposes.
+// See the license for details.
+// For commercial licensing, contact s.imran@tuta.io
+
 // test_patch.cpp — host-side parity of per-DOF patch evaluation (src/patch.hpp)
 // vs the JAX oracle (egg.smoothing.batch_jax): patch_eval (grad/hess/energy/
 // mindet), patch_energy_mindet, and the tangent-reduced newton_delta. Golden

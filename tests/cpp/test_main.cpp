@@ -1,3 +1,11 @@
+// Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+//
+// PolyForm Noncommercial License 2.0.0-pre.2
+// https://github.com/bezmi/egg/blob/main/LICENSE.md
+// Free to use and redistribute for personal and noncommercial purposes.
+// See the license for details.
+// For commercial licensing, contact s.imran@tuta.io
+
 // test_main.cpp — entry point for the combined cpp_tests executable.
 //
 // The metric/solve tests register themselves as Boost.UT `suite`s at namespace

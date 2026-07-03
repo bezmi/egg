@@ -1,3 +1,11 @@
+// Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+//
+// PolyForm Noncommercial License 2.0.0-pre.2
+// https://github.com/bezmi/egg/blob/main/LICENSE.md
+// Free to use and redistribute for personal and noncommercial purposes.
+// See the license for details.
+// For commercial licensing, contact s.imran@tuta.io
+
 /// @file solve.hpp
 /// Closed-form tiny linear solves for the Newton step, with the JAX fallback
 /// (batch_jax._solve_with_fallback): step = -solve(H, g); non-finite ->

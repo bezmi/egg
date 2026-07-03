@@ -1,3 +1,11 @@
+// Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+//
+// PolyForm Noncommercial License 2.0.0-pre.2
+// https://github.com/bezmi/egg/blob/main/LICENSE.md
+// Free to use and redistribute for personal and noncommercial purposes.
+// See the license for details.
+// For commercial licensing, contact s.imran@tuta.io
+
 // test_patch_device.cpp — SYCL device parity of per-DOF patch evaluation
 // (src/patch.hpp): patch_eval, patch_energy_mindet, and newton_delta, run on
 // EVERY visible device (the AMD GPU and the OpenMP host/CPU device) against the

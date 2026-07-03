@@ -1,3 +1,11 @@
+// Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+//
+// PolyForm Noncommercial License 2.0.0-pre.2
+// https://github.com/bezmi/egg/blob/main/LICENSE.md
+// Free to use and redistribute for personal and noncommercial purposes.
+// See the license for details.
+// For commercial licensing, contact s.imran@tuta.io
+
 // test_structured_field_device.cpp — SYCL device test of BlockFieldStructured<D>
 // (src/structured_smoother.hpp): the StructuredField adapter that
 // composes the BlockField store with the BlockTopologyDevice halo tables and
