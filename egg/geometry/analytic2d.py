@@ -104,7 +104,7 @@ class LineSegment(GeometryEntity):
         return self.start + t * ab
 
     def tangent_space(self, q: np.ndarray) -> np.ndarray:
-        """Unit direction vector (end - start) / |end - start|. Shape (2, 1)."""
+        """Unit direction vector ``(end - start) / |end - start|``. Shape (2, 1)."""
         ab = self.end - self.start
         norm = np.linalg.norm(ab)
         if norm < 1e-15:

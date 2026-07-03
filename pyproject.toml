@@ -21,6 +21,13 @@ dependencies = [
   "scipy>=1.17.1",
 ]
 
+[dependency-groups]
+# Docs build: `uv run --group docs sphinx-build -b html docs docs/_build/html`
+docs = [
+  "sphinx>=8.2",
+  "pallets-sphinx-themes>=2.3",
+]
+
 [tool.scikit-build]
 cmake.version = ">=3.25"
 cmake.build-type = "Release"

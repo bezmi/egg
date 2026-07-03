@@ -1,0 +1,4 @@
+Pipeline
+========
+
+.. automodule:: egg.pipeline
