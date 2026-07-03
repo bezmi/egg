@@ -71,6 +71,7 @@ class _TrimmedCurve(GeometryEntity):
         return 1
 
     def invert(self, q: np.ndarray) -> float:
+        """Unclamped nearest-foot parameter of q (seeded Newton)."""
         lo, hi = sorted((self.t0, self.t1))
         return _newton_foot(self, np.asarray(q, dtype=float), lo, hi)
 
@@ -83,9 +84,11 @@ class _TrimmedCurve(GeometryEntity):
         return float(np.clip(t, lo, hi))
 
     def project(self, p: np.ndarray) -> np.ndarray:
+        """Closest point on the trimmed curve to p (invert -> clamp -> eval)."""
         return self.eval(self._clamp(self.invert(np.asarray(p, dtype=float))))
 
     def tangent_space(self, q: np.ndarray) -> np.ndarray:
+        """Normalized C'(t) at the clamped inverse of q. Shape (2, 1)."""
         t = self._clamp(self.invert(np.asarray(q, dtype=float)))
         d = self.deriv(t)
         norm = np.linalg.norm(d)
@@ -94,6 +97,7 @@ class _TrimmedCurve(GeometryEntity):
         return (d / norm).reshape(2, 1)
 
     def normal(self, q: np.ndarray) -> np.ndarray:
+        """Tangent rotated 90 deg CCW. Shape (2,)."""
         t = self.tangent_space(q)[:, 0]
         return np.array([-t[1], t[0]])
 
@@ -113,13 +117,16 @@ class CircleArc(_TrimmedCurve):
         self.t0, self.t1, self.closed = float(t0), float(t1), bool(closed)
 
     def invert(self, q) -> float:
+        """Angle of q about the centre, in (-pi, pi] (closed-form atan2)."""
         d = np.asarray(q, dtype=float) - self.center
         return float(np.arctan2(d[1], d[0]))
 
     def eval(self, t: float) -> np.ndarray:
+        """Point at angle t (radians)."""
         return self.center + self.radius * np.array([np.cos(t), np.sin(t)])
 
     def deriv(self, t: float) -> np.ndarray:
+        """d/dt of :meth:`eval`."""
         return self.radius * np.array([-np.sin(t), np.cos(t)])
 
 
@@ -137,15 +144,19 @@ class EllipseArc(_TrimmedCurve):
         return np.array([cp * x - sp * y, sp * x + cp * y])
 
     def eval(self, t: float) -> np.ndarray:
+        """Point at parametric angle t (radians)."""
         return self.center + self._rot(self.a * np.cos(t), self.b * np.sin(t))
 
     def deriv(self, t: float) -> np.ndarray:
+        """d/dt of :meth:`eval`."""
         return self._rot(-self.a * np.sin(t), self.b * np.cos(t))
 
     def deriv2(self, t: float) -> np.ndarray:
+        """d2/dt2 of :meth:`eval`."""
         return self._rot(-self.a * np.cos(t), -self.b * np.sin(t))
 
     def invert(self, q) -> float:
+        """Nearest-foot parameter over the full period (seeded Newton)."""
         return _newton_foot(self, np.asarray(q, dtype=float), 0.0, 2.0 * np.pi)
 
 
@@ -157,13 +168,16 @@ class QuadBezier(_TrimmedCurve):
         self.t0, self.t1, self.closed = float(t0), float(t1), False
 
     def eval(self, t: float) -> np.ndarray:
+        """Point at parameter t."""
         u = 1.0 - t
         return u * u * self.p[0] + 2 * u * t * self.p[1] + t * t * self.p[2]
 
     def deriv(self, t: float) -> np.ndarray:
+        """d/dt of :meth:`eval`."""
         return 2 * (1 - t) * (self.p[1] - self.p[0]) + 2 * t * (self.p[2] - self.p[1])
 
     def deriv2(self, t: float) -> np.ndarray:
+        """d2/dt2 of :meth:`eval` (constant)."""
         return 2 * (self.p[2] - 2 * self.p[1] + self.p[0])
 
 
@@ -175,17 +189,20 @@ class CubicBezier(_TrimmedCurve):
         self.t0, self.t1, self.closed = float(t0), float(t1), False
 
     def eval(self, t: float) -> np.ndarray:
+        """Point at parameter t."""
         u = 1.0 - t
         return (u ** 3 * self.p[0] + 3 * u * u * t * self.p[1]
                 + 3 * u * t * t * self.p[2] + t ** 3 * self.p[3])
 
     def deriv(self, t: float) -> np.ndarray:
+        """d/dt of :meth:`eval`."""
         u = 1.0 - t
         return (3 * u * u * (self.p[1] - self.p[0])
                 + 6 * u * t * (self.p[2] - self.p[1])
                 + 3 * t * t * (self.p[3] - self.p[2]))
 
     def deriv2(self, t: float) -> np.ndarray:
+        """d2/dt2 of :meth:`eval`."""
         u = 1.0 - t
         return (6 * u * (self.p[2] - 2 * self.p[1] + self.p[0])
                 + 6 * t * (self.p[3] - 2 * self.p[2] + self.p[1]))
@@ -231,12 +248,14 @@ class BSplineCurve(_TrimmedCurve):
         self.closed = False
 
     def eval(self, t: float) -> np.ndarray:
+        """Point at knot-space parameter t."""
         A = np.asarray(self._spl(t), dtype=float)
         if self.weights is None:
             return A
         return A / float(self._w(t))
 
     def deriv(self, t: float) -> np.ndarray:
+        """d/dt of :meth:`eval` (quotient rule for the rational form)."""
         A1 = np.asarray(self._d1(t), dtype=float)
         if self.weights is None:
             return A1
@@ -244,6 +263,7 @@ class BSplineCurve(_TrimmedCurve):
         return (A1 - float(self._w1(t)) * self.eval(t)) / w
 
     def deriv2(self, t: float) -> np.ndarray:
+        """d2/dt2 of :meth:`eval` (quotient rule for the rational form)."""
         A2 = np.asarray(self._d2(t), dtype=float)
         if self.weights is None:
             return A2
@@ -314,10 +334,12 @@ class CompositePath(GeometryEntity):
         return seg, seg.t0 + u * (seg.t1 - seg.t0), scale
 
     def eval(self, t: float) -> np.ndarray:
+        """Point at global parameter t in [0, 1]."""
         seg, tl, _ = self._locate(t)
         return seg.eval(tl)
 
     def deriv(self, t: float) -> np.ndarray:
+        """d/dt of :meth:`eval` (segment derivative, chain-rule scaled)."""
         seg, tl, scale = self._locate(t)
         return seg.deriv(tl) * scale
 
@@ -332,10 +354,13 @@ class CompositePath(GeometryEntity):
         return best
 
     def project(self, p: np.ndarray) -> np.ndarray:
+        """Closest point over all segments."""
         return self._nearest(p).project(p)
 
     def tangent_space(self, q: np.ndarray) -> np.ndarray:
+        """Tangent space of the segment nearest to q."""
         return self._nearest(q).tangent_space(q)
 
     def normal(self, q: np.ndarray) -> np.ndarray:
+        """Normal of the segment nearest to q."""
         return self._nearest(q).normal(q)

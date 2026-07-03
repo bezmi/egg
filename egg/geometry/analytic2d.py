@@ -1,8 +1,9 @@
 """2D analytic geometry primitives: Circle, LineSegment, Ellipse.
 
-Each entity also carries a standalone-Python parametric form ``eval(t)`` /
-``deriv(t)`` over ``[t0, t1]`` (with ``closed`` marking periodic curves) so
-grid edges can place nodes along it without touching the C++ core.
+Each entity implements both protocols of
+:class:`~egg.geometry.base.GeometryEntity`; the parametric form is
+standalone Python, so grid edges can place nodes along it without touching
+the C++ core.
 """
 
 import numpy as np
@@ -31,9 +32,11 @@ class Circle(GeometryEntity):
         self.radius = float(radius)
 
     def eval(self, t: float) -> np.ndarray:
+        """Point at angle t (radians)."""
         return self.center + self.radius * np.array([np.cos(t), np.sin(t)])
 
     def deriv(self, t: float) -> np.ndarray:
+        """d/dt of :meth:`eval`."""
         return self.radius * np.array([-np.sin(t), np.cos(t)])
 
     def project(self, p: np.ndarray) -> np.ndarray:
@@ -82,9 +85,11 @@ class LineSegment(GeometryEntity):
         self.end = np.asarray(end, dtype=float)
 
     def eval(self, t: float) -> np.ndarray:
+        """Point at parameter t in [0, 1]."""
         return self.start + t * (self.end - self.start)
 
     def deriv(self, t: float) -> np.ndarray:
+        """d/dt of :meth:`eval` (constant)."""
         return self.end - self.start
 
     def project(self, p: np.ndarray) -> np.ndarray:
@@ -134,9 +139,11 @@ class Ellipse(GeometryEntity):
         self.ry = float(ry)
 
     def eval(self, t: float) -> np.ndarray:
+        """Point at parametric angle t (radians)."""
         return self.center + np.array([self.rx * np.cos(t), self.ry * np.sin(t)])
 
     def deriv(self, t: float) -> np.ndarray:
+        """d/dt of :meth:`eval`."""
         return np.array([-self.rx * np.sin(t), self.ry * np.cos(t)])
 
     def project(self, p: np.ndarray) -> np.ndarray:

@@ -1,18 +1,18 @@
 """Hard wall-normal respacing: exact first-cell height and growth rate.
 
-TMOP targets are soft — the optimiser trades them off against grid quality,
-so a :class:`~egg.smoothing.targets.BoundaryLayerTarget` only approximates
-the requested ``first_height``/``growth``. This post-pass enforces them
-exactly: for every block face recorded via ``builder.set_boundary_layer``,
-each wall-normal grid line is re-sampled along its own polyline so the
-first ``n_layers`` cells follow ``s(k) = first_height · growth**k`` to
-machine precision, and the remaining cells continue with a single stretch
-ratio solved so the line's far endpoint (shared with the neighbouring
-block) does not move.
+TMOP targets are soft — the optimiser trades them off against grid
+quality, so a :class:`~egg.smoothing.targets.BoundaryLayerTarget` only
+approximates the requested ``first_height``/``growth``. These post-passes
+enforce them exactly for every block face recorded via
+``builder.set_boundary_layer``: each wall-normal grid line is re-sampled
+along its own polyline so the first ``n_layers`` cells follow
+``s(k) = first_height * growth**k`` to machine precision, with the
+remaining cells continuing at a single stretch ratio solved so the line's
+far endpoint (shared with the neighbouring block) does not move.
 
-Lines keep their shape — nodes only slide along the existing polyline — so
-boundary-snapped nodes stay on their geometry and interfaces shared between
-adjacent wall blocks (which are respaced identically from either side)
+Lines keep their shape — nodes only slide along the existing polyline —
+so boundary-snapped nodes stay on their geometry, and interfaces shared
+between adjacent wall blocks (respaced identically from either side)
 remain conforming.
 """
 
@@ -264,11 +264,22 @@ def first_layer_heights(grid, topology=None,
 
     For each column of each block face recorded via
     ``builder.set_boundary_layer``, the distance from the first off-wall
-    node to the wall entity. Compare against the spec's ``first_height`` to
-    see what the smoother (or a pinned re-run) actually delivered. With
-    ``relative`` each height is divided by its own spec's ``first_height``
-    (1.0 = exact), which keeps the numbers comparable when several walls
-    carry different specs.
+    node to the wall entity — compare against the spec's ``first_height``
+    to see what the smoother (or a pinned re-run) actually delivered.
+
+    Parameters
+    ----------
+    grid : MultiBlockGrid
+    topology : BlockTopology, optional
+        Defaults to ``grid.topology``.
+    relative : bool, optional
+        Divide each height by its own spec's ``first_height`` (1.0 =
+        exact), keeping the numbers comparable when several walls carry
+        different specs.
+
+    Returns
+    -------
+    ndarray
     """
     topology = topology if topology is not None else grid.topology
     heights = []
@@ -320,30 +331,48 @@ def respace_first_layers(grid, topology=None, n: int | None = None,
 
     Each wall column's rows ``1..n`` slide along the existing (smoothed)
     column polyline to the points whose perpendicular distance to the wall
-    entity equals the cumulative layer heights ``Σ first_height·growth**k``
-    (clamped by the spec's ``max_height``) — the column keeps its shape,
-    and no other node moves. ``n`` defaults to each spec's recorded
-    ``n_fixed`` (see ``builder.set_boundary_layer``; 1 if absent). With
-    ``pin`` (default) the moved DOFs are also cleared in ``grid.free_mask``,
-    removing them from subsequent optimisation: a follow-up TMOP pass
-    (which rebuilds its sweep context from the mask) re-equilibrates
-    everything above the pinned band while the fixed layers stay exact.
+    entity equals the cumulative layer heights ``sum first_height *
+    growth**k`` (clamped by the spec's ``max_height``) — the column keeps
+    its shape, and no other node moves.
 
+    Parameters
+    ----------
+    grid : MultiBlockGrid
+    topology : BlockTopology, optional
+        Defaults to ``grid.topology``.
+    n : int, optional
+        Defaults to each spec's recorded ``n_fixed`` (see
+        ``builder.set_boundary_layer``; 1 if absent).
+    pin : bool, optional
+        Also clear the moved DOFs in ``grid.free_mask``, removing them
+        from subsequent optimisation: a follow-up TMOP pass (which
+        rebuilds its sweep context from the mask) re-equilibrates
+        everything above the pinned band while the fixed layers stay
+        exact. Default True.
+
+    Returns
+    -------
+    ndarray
+        The moved DOF indices.
+
+    Notes
+    -----
     Free rows that end up below the pinned band (a requested band taller
     than the smoothed equilibrium delivered) are re-placed just above it —
-    still free — so the pin cannot invert the cells above the band and the
-    follow-up pass starts valid.
+    still free — so the pin cannot invert the cells above the band and
+    the follow-up pass starts valid.
 
     Nodes carrying a sliding geometry constraint (columns on a domain
-    boundary) are projected back onto their entity after the move; already
-    non-free DOFs are left untouched. Returns the moved DOF indices.
+    boundary) are projected back onto their entity after the move;
+    already non-free DOFs are left untouched.
 
     TODO(3D): wall junctions. In 3D two walls with specs can meet along an
     edge; a node near it belongs to columns of both walls and must satisfy
     both height laws — place it on the intersection of the two offset
     surfaces (cf. how ``build_dof_constraints`` fixes corners where two
     entities meet). The ``moved``-set dedup below currently makes this
-    first-association-wins, which is only correct for a single wall entity.
+    first-association-wins, which is only correct for a single wall
+    entity.
     """
     topology = topology if topology is not None else grid.topology
     moved: set[int] = set()
@@ -434,31 +463,31 @@ def enforce_boundary_layer_spacing(grid, topology=None,
                                    straighten_columns: bool = True) -> None:
     """Exactly enforce recorded boundary-layer specs on ``grid`` (in place).
 
-    @param grid      A (smoothed) MultiBlockGrid; ``grid.global_nodes`` is
-                     updated in place.
-    @param topology  Defaults to ``grid.topology``; must carry
-                     ``boundary_layer_specs`` recorded by
-                     ``builder.set_boundary_layer`` and the wall associations.
-    @param extend_through_neighbours
-                     Continue each respaced line into the block behind the
-                     wall block (when one is glued there), so the stretch
-                     tail relaxes over both blocks instead of compressing
-                     against the first shared interface.
-    @param relax_boundary_normals
-                     Near a domain boundary that meets the wall obliquely,
-                     shear the straightened columns along the boundary's
-                     direction instead of forcing them onto the wall normal
-                     (heights stay exact). Off, columns stay wall-normal up
-                     to the boundary, which can fan or invert cells against
-                     an inward-leaning boundary.
-    @param straighten_columns
-                     Re-anchor the clustered rows onto straight wall-normal
-                     rays (see :func:`_orthogonalise_columns`). Off, nodes
-                     only slide *along* their smoothed column paths — layer
-                     heights are still exact (they are enforced in
-                     perpendicular wall distance), and the columns keep the
-                     smoother's lean, staying as close as possible to the
-                     TMOP equilibrium.
+    Parameters
+    ----------
+    grid : MultiBlockGrid
+        A (smoothed) grid; ``grid.global_nodes`` is updated in place.
+    topology : BlockTopology, optional
+        Defaults to ``grid.topology``; must carry ``boundary_layer_specs``
+        recorded by ``builder.set_boundary_layer`` and the wall
+        associations.
+    extend_through_neighbours : bool, optional
+        Continue each respaced line into the block behind the wall block
+        (when one is glued there), so the stretch tail relaxes over both
+        blocks instead of compressing against the first shared interface.
+    relax_boundary_normals : bool, optional
+        Near a domain boundary that meets the wall obliquely, shear the
+        straightened columns along the boundary's direction instead of
+        forcing them onto the wall normal (heights stay exact). Off,
+        columns stay wall-normal up to the boundary, which can fan or
+        invert cells against an inward-leaning boundary.
+    straighten_columns : bool, optional
+        Re-anchor the clustered rows onto straight wall-normal rays (see
+        :func:`_orthogonalise_columns`). Off, nodes only slide *along*
+        their smoothed column paths — layer heights are still exact (they
+        are enforced in perpendicular wall distance), and the columns keep
+        the smoother's lean, staying as close as possible to the TMOP
+        equilibrium.
     """
     topology = topology if topology is not None else grid.topology
     specs = getattr(topology, "boundary_layer_specs", {})

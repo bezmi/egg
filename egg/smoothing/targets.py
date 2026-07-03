@@ -1,7 +1,8 @@
-"""W constructors (identity, anisotropic, reference-mesh).
+"""TMOP target-matrix (W) constructors.
 
-All targets return a d×d matrix W with det(W) > 0, encoding the desired
-local cell shape/orientation at each sample point.
+All targets return a d x d matrix W with det(W) > 0, encoding the desired
+local cell shape/orientation at each sample point. Called as
+``target(bi, block, cell_base, corner_offset) -> (d, d)``.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ __all__ = [
 
 
 def IdentityTarget(d: int) -> Callable[..., np.ndarray]:
-    """Return a target function that always yields W = I (isotropic).
+    """Target function that always yields W = I (isotropic).
 
     Parameters
     ----------
@@ -30,7 +31,6 @@ def IdentityTarget(d: int) -> Callable[..., np.ndarray]:
     Returns
     -------
     target_fn : callable
-        Signature: target_fn(cell_base, corner_offset) -> ndarray of shape (d, d)
     """
     W = np.eye(d)
 
@@ -47,19 +47,17 @@ def _smoothstep(t: float) -> float:
 
 
 class BoundaryLayerTarget:
-    """Oriented, layer-indexed wall-clustering target ``W`` for one ring block.
+    """Oriented, layer-indexed wall-clustering target W for one ring block.
 
     Realises boundary-layer clustering purely through the TMOP target: the
     wall-normal target spacing grows geometrically away from the wall
-    (``s_n(k) = first_height · growth**k``) until it reaches the wall-tangential
-    spacing ``s_t``, where it is capped — so far-from-wall cells ask for an
-    isotropic ``W ∝ I`` that matches the default :func:`IdentityTarget` of
-    neighbouring blocks (the shape metric is scale-invariant, so only the
-    ``s_n/s_t`` ratio acts). Orientation comes from the geometry **entity**
-    (stable even while the working mesh is folded during untangling).
-
-    Called as ``target(bi, block, cell_base, corner_offset) -> (d, d)`` with
-    ``det W = s_t · s_n > 0``.
+    (``s_n(k) = first_height * growth**k``) until capped at the
+    wall-tangential spacing ``s_t`` — far-from-wall cells then ask for an
+    isotropic ``W`` matching the :func:`IdentityTarget` of neighbouring
+    blocks (the shape metric is scale-invariant, so only the ``s_n/s_t``
+    ratio acts). Orientation comes from the geometry *entity*, which stays
+    stable even while the working mesh is folded during untangling.
+    ``det W = s_t * s_n > 0``.
 
     Parameters
     ----------
@@ -140,6 +138,7 @@ class BoundaryLayerTarget:
         return min(s_geo, self.interior_spacing)
 
     def _layer_index(self, block, cell_base) -> int:
+        """Off-wall layer index of a cell (plus ``k_offset``)."""
         n_cells = block.logical_shape[self.wall_axis] - 1
         c = int(cell_base[self.wall_axis])
         k = c if self.wall_side == 0 else (n_cells - 1 - c)
@@ -159,6 +158,7 @@ class BoundaryLayerTarget:
         return np.asarray(block.nodes[tuple(idx)], dtype=float)
 
     def __call__(self, bi, block, cell_base, corner_offset) -> np.ndarray:
+        """Target matrix W for one (cell, corner) sample. Shape (d, d)."""
         k = self._layer_index(block, cell_base)
         s_n = self.normal_spacing(k)
         s_t = self.tangential_spacing
@@ -230,6 +230,7 @@ class MultiBlockTarget:
         self.per_block = dict(per_block or {})
 
     def __call__(self, bi, block, cell_base, corner_offset) -> np.ndarray:
+        """Dispatch to block ``bi``'s target (or ``default``)."""
         fn = self.per_block.get(bi, self.default)
         return fn(bi, block, cell_base, corner_offset)
 
@@ -289,36 +290,50 @@ def build_boundary_layer_target(topology, grid=None, default=None,
                                 relax_orthogonality=()):
     """Build a :class:`MultiBlockTarget` from a topology's boundary-layer specs.
 
-    For every association whose entity carries a spec recorded via
-    ``builder.set_boundary_layer``, the corresponding block gets a
-    :class:`BoundaryLayerTarget` oriented on that entity with the recorded
-    ``first_height``/``growth``. Blocks without a spec fall back to ``default``
-    (an :class:`IdentityTarget` of the topology's dimension if not given).
+    Every block whose face association carries a spec recorded via
+    ``builder.set_boundary_layer`` gets a :class:`BoundaryLayerTarget`
+    oriented on that entity with the recorded ``first_height``/``growth``.
 
-    Unless the spec pins ``tangential_spacing``, each wall block uses its own
-    natural face spacing (face corner separation / cell count), so blocks of
-    different sizes along the wall keep their node distribution instead of
-    fighting over a global value. The wall-normal growth is capped at that
-    spacing, making far-from-wall cells isotropic like the default target.
+    Parameters
+    ----------
+    topology : BlockTopology
+    grid : MultiBlockGrid, optional
+    default : callable, optional
+        Target for blocks without a spec; defaults to
+        :func:`IdentityTarget` of the topology's dimension.
+    interior_spacing : float, optional
+        Cap on the wall-normal growth (isotropic far field).
+    blend_neighbours : bool, optional
+        A block sitting behind a wall block continues the clustering
+        profile across their shared interface (via ``k_offset``) instead
+        of jumping straight to ``default`` — removes the cell-size
+        discontinuity there when the clustering has not decayed to
+        isotropic within the wall block. Default on.
+    relax_orthogonality : sequence of entities or Edges, optional
+        Domain boundaries that meet the wall obliquely: near each, the
+        per-block targets shear the wall-normal column into the boundary's
+        own direction (see ``BoundaryLayerTarget.boundary_shear``), so the
+        optimiser follows the boundary with uniformly sheared
+        parallelograms instead of rotating the near-wall cells orthogonal
+        to it and losing the layer heights. Unlisted boundaries keep the
+        plain orthogonal target. Defaults to the entities declared via
+        ``builder.set_boundary_layer(relax_orthogonality=...)``; passing
+        the argument here overrides that declaration.
 
-    With ``blend_neighbours`` (default on), a block sitting behind a wall
-    block continues the clustering profile across their shared interface
-    (via ``k_offset``) instead of jumping straight to the default target —
-    this removes the cell-size discontinuity at that interface when the
-    clustering has not decayed to isotropic within the wall block.
+    Returns
+    -------
+    target_fn : callable
+        ``default`` itself when the topology has no specs (so callers can
+        use this unconditionally).
 
-    ``relax_orthogonality`` names domain-boundary entities (or Edges) that
-    meet the wall obliquely: near each, the per-block targets shear the
-    wall-normal column into the boundary's own direction (see
-    ``BoundaryLayerTarget.boundary_shear``), so the optimiser follows the
-    boundary with uniformly sheared parallelograms instead of rotating the
-    near-wall cells orthogonal to it and losing the layer heights.
-    Boundaries not listed keep the plain orthogonal target. By default the
-    entities declared via ``builder.set_boundary_layer(relax_orthogonality=…)``
-    are used; passing the argument here overrides that declaration.
-
-    Returns the assembled ``target_fn``; if the topology has no specs it
-    returns ``default`` (so callers can use it unconditionally).
+    Notes
+    -----
+    Unless a spec pins ``tangential_spacing``, each wall block uses its
+    own natural face spacing (face corner separation / cell count), so
+    blocks of different sizes along the wall keep their node distribution
+    instead of fighting over a global value; the wall-normal growth is
+    capped at that spacing, making far-from-wall cells isotropic like the
+    default target.
     """
     d = topology.d
     if default is None:
@@ -416,20 +431,19 @@ def build_boundary_layer_target(topology, grid=None, default=None,
 
 
 def AnisotropicTarget(spacings: tuple[float, ...]) -> Callable[..., np.ndarray]:
-    """Return a target that yields a diagonal W with prescribed cell spacing.
+    """Target yielding a constant diagonal W with prescribed cell spacings.
 
-    W = diag(s0, s1, ..., s_{d-1})  where s_i is the desired spacing
-    (cell edge length in physical space) along logical axis i.
+    ``W = diag(s0, ..., s_{d-1})``, ``s_i`` the desired physical cell edge
+    length along logical axis i.
 
     Parameters
     ----------
     spacings : tuple of float
-        Desired cell edge lengths per logical axis. Length = d.
+        Length d.
 
     Returns
     -------
     target_fn : callable
-        Signature: target_fn(cell_base, corner_offset) -> ndarray of shape (d, d)
     """
     d = len(spacings)
     W = np.diag(list(spacings))

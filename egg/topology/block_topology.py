@@ -1,4 +1,8 @@
-"""Corners, edges, connectivity, associations, singularities."""
+"""Multiblock topology data model: corners, blocks, connectivity, associations.
+
+Usually constructed via :class:`egg.topology.builder.TopologyBuilder` rather
+than directly.
+"""
 
 from __future__ import annotations
 
@@ -57,6 +61,7 @@ class BlockSpec:
 
     @property
     def node_count(self) -> int:
+        """Total node count of the block."""
         return int(np.prod(self.logical_shape))
 
     def _corner_logical_indices(self, d: int) -> list[tuple[int, ...]]:
@@ -113,7 +118,13 @@ class Singularity:
 
 
 class BlockTopology:
-    """The full topology specification: corners, blocks, connectivity, associations."""
+    """Validated topology: corners, blocks, connectivity, associations.
+
+    Construction validates connections and boundary tags, resolves
+    interface orientations, builds the shared-DOF map (union-find over
+    interface nodes), and detects singularities. :meth:`initialize_grid`
+    then produces the TFI-initialised :class:`~egg.core.types.MultiBlockGrid`.
+    """
 
     def __init__(
         self,

@@ -1,14 +1,11 @@
-"""Orchestrates the full pipeline run.
-
-``generate`` wires the end-to-end flow promised by the project:
+"""End-to-end grid-generation pipeline.
 
     rough topology -> TFI init -> boundary snap -> untangle (delta-continuation)
         -> TMOP quality opt (projection) -> validity check -> MultiBlockGrid
 
-It runs on the C++ backend (barrier sweep + delta-untangle sweep via
-``egg._cpp.cpp_core``) and attaches a small
-:class:`PipelineReport` (per-phase ``min det A`` / energy) to the returned grid
-for tests and demos.
+Runs on the C++ backend (barrier sweep + delta-untangle sweep via
+``egg._cpp.cpp_core``). :func:`generate` attaches a :class:`PipelineReport`
+(per-phase ``min det A`` / energy) to the returned grid.
 """
 
 from __future__ import annotations
@@ -32,44 +29,74 @@ __all__ = [
 
 @dataclass
 class PipelineConfig:
-    """Pipeline options: per-phase caps, schedule params, and backend choices.
+    """Pipeline options: per-phase caps, schedule params, and backend choice.
 
     Consumed by :func:`generate_steps` / :func:`run_pipeline` (field names
     match their keyword overrides) and by :func:`generate`.
+
+    Attributes
+    ----------
+    target_fn : callable, optional
+        TMOP target; defaults to ``IdentityTarget(d)``.
+    metric : str
+        TMOP quality metric.
+    margin : float
+        Validity gate: the grid counts as untangled when
+        ``min det A > margin``.
+    sweeps_per_delta : int
+        Untangle sweeps per delta level.
+    delta0_factor : float
+        Initial delta = ``delta0_factor * |min det A|``.
+    untangle_shrink : float
+        Delta shrink per outer iteration. Gentle by default: block-Jacobi
+        untangle smooths less per sweep than a sequential relaxation, so
+        it needs more delta levels to clear a fold.
+    max_outer : int
+        Cap on delta levels.
+    untangle_direct : bool
+        True = the whole delta-continuation in one C++ call; False yields
+        per delta so live views can animate the unfolding.
+    tmop_sweeps, tmop_chunk : int
+        Total TMOP sweeps and sweeps per yielded chunk.
+    omega : float
+        Block-Jacobi SOR/damping weight for the TMOP phase.
+    report_every : int
+        Energy/min-det reduction throttle for the resident session: 0 =
+        chunk-end only (lowest-launch default for the small-n GPU regime),
+        1 = per-sweep (for live energy-curve plots), k > 1 = every k-th
+        plus final.
+    pin_sweeps : int
+        TMOP sweeps after pinning the first boundary layers (0 = skip the
+        pin phase; see :func:`generate_steps`).
+    respace : bool
+        Run the exact wall-respacing post-pass at the end.
+    device : str
+        ``"cpu"``, ``"gpu"``, or ``"auto"``.
+    verbose : bool
     """
 
-    target_fn: Callable[..., np.ndarray] | None = None  # default: IdentityTarget(d)
+    target_fn: Callable[..., np.ndarray] | None = None
     metric: str = "shape_2d"
 
     # Validity gate / untangle schedule.
     margin: float = 1e-9
     sweeps_per_delta: int = 20
     delta0_factor: float = 2.0
-    # Gentle δ shrink: block-Jacobi untangle smooths less per sweep than a
-    # sequential relaxation, so it needs more δ levels to clear a fold.
     untangle_shrink: float = 0.8
     max_outer: int = 60
-    # Direct = the whole δ-continuation in one C++ call; stepped (False)
-    # yields per δ so live views can animate the unfolding.
     untangle_direct: bool = True
 
     # TMOP quality phase.
     tmop_sweeps: int = 40
     tmop_chunk: int = 10
-    omega: float = 0.8  # block-Jacobi SOR/damping weight for the TMOP phase
-    # report_every throttle for the resident session's energy/min-det reduction
-    # (0 = chunk-end, 1 = per-sweep, k > 1 = every k-th plus final). 0 is the
-    # lowest-launch default for the small-n GPU regime; set 1 for live plots
-    # that animate per-sweep energy curves.
+    omega: float = 0.8
     report_every: int = 0
 
-    # Optional boundary-layer phases (see :func:`generate_steps`).
+    # Optional boundary-layer phases (see generate_steps).
     pin_sweeps: int = 0
     respace: bool = False
 
-    # Backend.
     device: str = "cpu"
-
     verbose: bool = False
 
 
@@ -84,6 +111,7 @@ class PipelineReport:
     final_energy: float = float("nan")
 
     def add(self, name: str, **stats: Any) -> None:
+        """Append a per-phase stats entry."""
         entry = {"phase": name, **stats}
         self.phases.append(entry)
 
@@ -112,41 +140,54 @@ def generate_steps(grid, target=None, config: PipelineConfig | None = None,
                    **overrides):
     """Step-wise pipeline on the C++ backend; mutates ``grid`` in place.
 
-    All options come from ``config`` (a :class:`PipelineConfig`; defaults are
-    used when omitted); keyword ``overrides`` update a copy of it, so
-    ``generate_steps(grid, target, cfg, untangle_direct=False)`` reuses one
-    config across call sites. Unknown override names raise.
+    Parameters
+    ----------
+    grid : MultiBlockGrid
+        Initialised grid (``topology.initialize_grid()``); mutated in place.
+    target : callable, optional
+        TMOP target function. None uses an isotropic quality target.
+        Untangling always runs on the isotropic context: geometric validity
+        is target-independent, and a strongly anisotropic target can stall
+        the continuation.
+    config : PipelineConfig, optional
+        Defaults are used when omitted. Keyword ``overrides`` update a copy
+        of it, so one config can be reused across call sites; unknown
+        override names raise.
 
-    Yields ``(phase, info)`` after each unit of work so callers can animate the
-    folded → untangled → smoothed transition or collect per-step convergence
-    history. :func:`generate` drains this to do a batch run; the live demos
-    drive it from a PyVista timer (see :func:`egg.io.visualize.animate_pipeline`).
+    Yields
+    ------
+    (phase, info) : (str, dict)
+        After each unit of work, so callers can animate the folded ->
+        untangled -> smoothed transition or collect convergence history.
+        Phase order: ``init`` (once) -> ``untangle`` (only if folded) ->
+        ``tmop`` (per chunk) -> ``pin`` + ``tmop`` (with ``pin_sweeps``) ->
+        ``respace`` (with ``respace``) -> ``final`` (once, after the
+        closing boundary snap). :func:`generate` drains this for a batch
+        run; the live demos drive it from a PyVista timer (see
+        :func:`egg.io.visualize.animate_pipeline`).
+
+    Notes
+    -----
+    Both the TMOP and untangle phases relax block-Jacobi over the
+    halo-padded structured store (one merged double-buffered launch per
+    sweep; ``omega`` is the TMOP SOR weight); X stays device-resident
+    throughout.
 
     The TMOP phase always steps per chunk (``tmop_chunk`` sweeps each); set
-    ``tmop_chunk == tmop_sweeps`` to run it in one direct call. Both the TMOP
-    and untangle phases relax block-Jacobi over the halo-padded structured store
-    (one merged double-buffered launch per sweep; ``omega`` is the TMOP SOR
-    weight). The untangle
-    phase by default runs **direct** — the whole δ-continuation
-    in one ``cpp_untangle`` call (the analogue of TMOP chunk == sweeps), yielding
-    a single ``untangle`` event. Pass ``untangle_direct=False`` to step per δ
-    instead, yielding each δ so a live view can animate the unfolding. Either way
-    X stays device-resident. ``target=None`` uses an isotropic quality target;
-    untangling always runs on the isotropic context (geometric validity is
-    target-independent and a strongly anisotropic target can stall the
-    continuation).
+    ``tmop_chunk == tmop_sweeps`` for one direct call. The untangle phase
+    by default runs *direct* — the whole delta-continuation in one
+    ``cpp_untangle`` call (the analogue of chunk == sweeps), yielding a
+    single ``untangle`` event; ``untangle_direct=False`` steps and yields
+    per delta so a live view can animate the unfolding.
 
-    With ``pin_sweeps > 0``, after the TMOP phase each boundary-layer spec's
-    first ``n_fixed`` layers are set to their exact geometric heights and
-    pinned (:func:`egg.smoothing.respace_first_layers`), the sweep context is
-    rebuilt so the pinned DOFs leave the update set, and ``pin_sweeps`` more
-    TMOP sweeps re-equilibrate the free grid. With ``respace`` the exact wall
-    respacing post-pass (:func:`egg.smoothing.enforce_boundary_layer_spacing`,
-    nodes sliding along their smoothed columns) runs at the end instead.
-
-    Phases: ``init`` (once) → ``untangle`` (per δ, only if folded) → ``tmop``
-    (per chunk) → ``pin`` + ``tmop`` (with ``pin_sweeps``) → ``respace``
-    (with ``respace``) → ``final`` (once, after the closing boundary snap).
+    With ``pin_sweeps > 0``, after the TMOP phase each boundary-layer
+    spec's first ``n_fixed`` layers are set to their exact geometric
+    heights and pinned (:func:`egg.smoothing.respace_first_layers`), the
+    sweep context is rebuilt so the pinned DOFs leave the update set, and
+    ``pin_sweeps`` more TMOP sweeps re-equilibrate the free grid. With
+    ``respace`` the exact wall-respacing post-pass
+    (:func:`egg.smoothing.enforce_boundary_layer_spacing`, nodes sliding
+    along their smoothed columns) runs at the end instead.
     """
     from .smoothing.solver import build_sweep_context
     from .smoothing.targets import IdentityTarget
@@ -300,8 +341,8 @@ def _fmt_info(info: dict) -> str:
 def drain_steps(steps, *, mindet_history=None, energy_history=None, verbose=True):
     """Run a :func:`generate_steps` generator to completion (headless).
 
-    Optionally collects per-step ``min_det`` / ``energy`` into the supplied lists
-    (for convergence plots) and prints one line per step.
+    Collects per-step ``min_det`` / ``energy`` into the supplied lists (for
+    convergence plots) and, when ``verbose``, prints one line per step.
     """
     last_phase = None
     for phase, info in steps:
@@ -321,12 +362,10 @@ def run_pipeline(grid, target=None, config: PipelineConfig | None = None, *,
                  **overrides):
     """Batch convenience: :func:`drain_steps` over :func:`generate_steps`.
 
-    Options come from ``config`` (a :class:`PipelineConfig`) with keyword
-    ``overrides`` applied on top, exactly as in :func:`generate_steps`
-    (which mutates ``grid`` in place); the history lists collect per-step
-    ``min_det`` / ``energy``. Use :func:`generate_steps` directly when you
-    need to drive the steps yourself
-    (e.g. :func:`egg.io.visualize.animate_pipeline`).
+    Same options and in-place ``grid`` mutation as :func:`generate_steps`;
+    the history lists collect per-step ``min_det`` / ``energy``. Use
+    :func:`generate_steps` directly to drive the steps yourself (e.g.
+    :func:`egg.io.visualize.animate_pipeline`).
     """
     drain_steps(
         generate_steps(grid, target, config, **overrides),

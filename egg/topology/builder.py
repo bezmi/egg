@@ -1,4 +1,4 @@
-"""Programmatic API to declare a rough topology."""
+"""Programmatic API to declare a rough multiblock topology."""
 
 from __future__ import annotations
 
@@ -21,7 +21,20 @@ __all__ = ["TopologyBuilder"]
 
 
 class TopologyBuilder:
-    """Fluent API for declaring a multiblock topology."""
+    """Fluent API for declaring a multiblock topology.
+
+    Declare corners and blocks (:meth:`add_corner`, :meth:`add_block`,
+    :meth:`add_block_array`), geometry attachments (:meth:`associate`,
+    :meth:`set_boundary_layer`, :meth:`tag_boundary`), and explicit face
+    sharing (:meth:`connect`); :meth:`build` validates everything, infers
+    undeclared connections/associations, and returns the
+    :class:`~egg.topology.block_topology.BlockTopology`.
+
+    Parameters
+    ----------
+    d : int
+        Spatial dimension (default 2).
+    """
 
     def __init__(self, d: int = 2):
         self._d = d
@@ -103,28 +116,23 @@ class TopologyBuilder:
     ) -> "TopologyBuilder":
         """Declare a structured block.
 
-        Two forms are supported:
-
-        - positional: ``add_block(name, corners, resolutions)`` with 2**d
-          corner references in product((0,1), repeat=d) order;
-        - compass (2D): ``add_block(sw=, se=, nw=, ne=, res=, name=...)``.
-
-        Corner references may be registered corner names (str) or
-        :class:`~egg.geometry.frontend2d.Vector3` /
-        :class:`~egg.geometry.frontend2d.Node` objects; objects are
-        deduplicated by identity and auto-registered, so sharing an object
-        between two blocks makes it the same grid corner. ``name`` is
-        auto-generated when omitted.
+        Two forms: positional ``add_block(name, corners, resolutions)``, or
+        compass (2D only) ``add_block(sw=, se=, nw=, ne=, res=, name=...)``.
 
         Parameters
         ----------
-        name : str or None
-            Block name (auto-generated as ``blk<i>`` if omitted).
-        corners : tuple of str/Vector3/Node, optional
-            2**d corner references in product((0,1), repeat=d) order.
+        name : str, optional
+            Auto-generated as ``blk<i>`` if omitted.
+        corners : tuple of str or Vector3 or Node, optional
+            2**d corner references in ``product((0,1), repeat=d)`` order.
+            Objects are deduplicated by identity and auto-registered, so
+            sharing an object between two blocks makes it the same grid
+            corner; strings must name registered corners.
         resolutions, res : tuple of int
-            Per-axis cell counts: (n_cells_0, ..., n_cells_{d-1}); ``res``
-            is an alias for use with the compass form.
+            Per-axis cell counts ``(n_cells_0, ..., n_cells_{d-1})``;
+            ``res`` is an alias for the compass form.
+        sw, se, nw, ne : str or Vector3 or Node, optional
+            Compass-form corner references.
         """
         compass = (sw, nw, se, ne)  # product((0,1), repeat=2) order
         if corners is None:
@@ -171,16 +179,18 @@ class TopologyBuilder:
     ) -> "TopologyBuilder":
         """Declare that two block faces are shared.
 
+        Usually unnecessary: :meth:`build` infers connections from shared
+        corners. Orientation is auto-detected by corner-name matching at
+        build time.
+
         Parameters
         ----------
         block_a, block_b : str
             Block names.
         axis_a, axis_b : int
-            Which logical axis the face lies on (0..d-1).
+            Logical axis the face lies on (0..d-1).
         side_a, side_b : int
             0 = low side, 1 = high side.
-
-        Orientation is auto-detected from corner name matching at build() time.
         """
         for name in (block_a, block_b):
             if name not in self._block_specs:
@@ -203,11 +213,14 @@ class TopologyBuilder:
     ) -> "TopologyBuilder":
         """Tag a block face as lying on a geometry entity.
 
+        Face nodes are snapped/slid on the entity during initialisation and
+        smoothing.
+
         Parameters
         ----------
         block_name : str
-        axis : int
-        side : int
+        axis, side : int
+            Face selector (axis 0..d-1; side 0 = low, 1 = high).
         entity : GeometryEntity or Edge
             An :class:`~egg.geometry.frontend2d.Edge` is unwrapped to its
             underlying entity, so the pure-Python wrapper never reaches the
@@ -232,16 +245,16 @@ class TopologyBuilder:
         """Tag a block face with a named boundary marker (e.g. for export).
 
         Several faces may carry the same tag; exporters group them into one
-        marker (an SU2 ``MARKER_TAG``, say) for boundary-condition assignment.
+        marker (an SU2 ``MARKER_TAG``, say) for boundary-condition
+        assignment.
 
         Parameters
         ----------
         name : str
             Marker name, e.g. ``"inlet"`` or ``"wall"``.
         block_name : str
-        axis : int
-        side : int
-            0 = low side, 1 = high side.
+        axis, side : int
+            Face selector (side 0 = low, 1 = high).
         """
         if block_name not in self._block_specs:
             raise ValueError(f"tag_boundary() references unknown block '{block_name}'")
@@ -268,23 +281,39 @@ class TopologyBuilder:
 
         The Eilmer ``registerFluidGridArray`` analogue: sub-block corners
         are placed parametrically on the bounding edges (sliding nodes) and
-        by bilinear TFI in the interior; blocks share the corner objects, so
-        block-to-block connectivity is inferred at :meth:`build`, and the
-        outer block faces are associated with their bounding edges.
+        by bilinear TFI in the interior. Blocks share the corner objects,
+        so block-to-block connectivity is inferred at :meth:`build`, and
+        the outer block faces are associated with their bounding edges.
 
-        ``south``/``north`` are parameterised west -> east, ``west``/``east``
-        south -> north; axis 0 of every block runs west -> east and axis 1
-        south -> north. ``res`` is the TOTAL cell count across the array
-        ``(n_axis0, n_axis1)``, split as evenly as possible into per-block
-        resolutions. With ``fixed_corners`` the four patch-corner nodes are
-        pinned. Corners are registered as ``c{i}_{j}`` (i: 0=west..nib=east,
-        j: 0=south..njb=north) and blocks as ``b{i}_{j}`` so
-        ``--plot-topology`` labels stay readable.
+        Parameters
+        ----------
+        south, north : Edge
+            Parameterised west -> east; axis 0 of every block runs west ->
+            east.
+        west, east : Edge
+            Parameterised south -> north; axis 1 runs south -> north.
+        nib, njb : int
+            Block counts along axis 0 / axis 1.
+        res : tuple of int
+            TOTAL cell count across the array ``(n_axis0, n_axis1)``, split
+            as evenly as possible into per-block resolutions.
+        fixed_corners : bool, optional
+            Pin the four patch-corner nodes (default True).
+        corner_prefix, block_prefix : str, optional
+            Corners register as ``c{i}_{j}`` (i: 0=west..nib=east, j:
+            0=south..njb=north) and blocks as ``b{i}_{j}``, keeping
+            ``--plot-topology`` labels readable.
 
-        Returns ``(corner, block_names)``: the shared corner objects keyed
-        ``(i, j)`` and the block-name grid ``block_names[i][j]``, for
-        tagging boundaries or attaching further structure.
+        Returns
+        -------
+        corner : dict
+            Shared corner objects keyed ``(i, j)``.
+        block_names : list of list of str
+            Block-name grid ``block_names[i][j]``, for tagging boundaries
+            or attaching further structure.
 
+        Notes
+        -----
         TODO(3D): the hexahedral analogue is a block array over a patch
         bounded by six faces, with edge/face/interior corners placed by the
         corresponding 1D/2D/3D transfinite interpolations.
@@ -346,26 +375,40 @@ class TopologyBuilder:
     ) -> "TopologyBuilder":
         """Request wall-normal clustering on every block face lying on ``entity``.
 
-        Consumed later (e.g. by ``targets.build_boundary_layer_target``) to build
-        a :class:`~egg.smoothing.targets.BoundaryLayerTarget` per ring block,
-        oriented from ``entity`` with the geometric near-wall spacing
-        ``s_n(k) = first_height · growth**k``. An
-        :class:`~egg.geometry.frontend2d.Edge` is unwrapped to its underlying
-        entity (matching :meth:`associate`).
+        Consumed later (e.g. by
+        :func:`~egg.smoothing.targets.build_boundary_layer_target`) to
+        build a :class:`~egg.smoothing.targets.BoundaryLayerTarget` per
+        ring block, oriented from ``entity``.
 
-        ``n_fixed`` is the number of near-wall layers to pin at their exact
-        geometric heights, consumed by
-        :func:`egg.smoothing.respace_first_layers`: after a TMOP pass, rows
-        ``1..n_fixed`` slide along their smoothed columns to the exact
-        cumulative heights and are removed from further optimisation, so a
-        follow-up TMOP pass smooths only the grid above them.
-
-        ``relax_orthogonality`` names domain-boundary entities (or Edges)
-        that meet this wall obliquely: near each, the clustering target
-        shears the wall-normal direction into the boundary's own direction
-        so the smoother follows it with sheared parallelograms instead of
-        rotating the near-wall cells orthogonal to it and trading away the
-        layer heights (see ``targets.build_boundary_layer_target``).
+        Parameters
+        ----------
+        entity : GeometryEntity or Edge
+            The wall; an Edge is unwrapped to its underlying entity
+            (matching :meth:`associate`).
+        first_height : float
+            Wall-normal height of the first off-wall layer.
+        growth : float
+            Geometric growth ratio: ``s_n(k) = first_height * growth**k``.
+        n_layers : int, optional
+        max_height : float, optional
+            Clamp on the wall-normal spacing.
+        tangential_spacing : float, optional
+            Wall-tangential target spacing; defaults to each block's
+            natural face spacing.
+        n_fixed : int, optional
+            Number of near-wall layers to pin at their exact geometric
+            heights, consumed by
+            :func:`egg.smoothing.respace_first_layers`: after a TMOP pass,
+            rows ``1..n_fixed`` slide along their smoothed columns to the
+            exact cumulative heights and leave the optimisation, so a
+            follow-up TMOP pass smooths only the grid above them.
+        relax_orthogonality : tuple of entities or Edges, optional
+            Domain-boundary entities that meet this wall obliquely: near
+            each, the clustering target shears the wall-normal direction
+            into the boundary's own direction, so the smoother follows it
+            with sheared parallelograms instead of rotating the near-wall
+            cells orthogonal to it and trading away the layer heights (see
+            :func:`~egg.smoothing.targets.build_boundary_layer_target`).
         """
         if isinstance(entity, Edge):
             entity = entity.entity
@@ -468,12 +511,12 @@ class TopologyBuilder:
         return inferred
 
     def build(self) -> BlockTopology:
-        """Construct the validated BlockTopology with DOF map and singularities.
+        """Construct the validated :class:`BlockTopology` (DOF map, singularities).
 
-        Connections and associations not declared explicitly are inferred:
-        faces of two blocks sharing both corners are connected, and boundary
-        faces whose corners are Nodes on a common Edge are associated with
-        that edge's entity.
+        Undeclared connections and associations are inferred: faces of two
+        blocks sharing all corners are connected, and boundary faces whose
+        corners are Nodes on a common Edge are associated with that edge's
+        entity.
         """
         connections = self._connections + self._infer_connections()
         associations = self._associations + self._infer_associations(connections)

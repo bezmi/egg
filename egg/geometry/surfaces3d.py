@@ -157,9 +157,11 @@ class BSplineSurface(GeometryEntity):
         return out
 
     def eval(self, u: float, v: float) -> np.ndarray:
+        """Surface point S(u, v). Shape (3,)."""
         return self._eval_ders(u, v, 0)[0, 0]
 
     def frame(self, u: float, v: float) -> tuple[np.ndarray, np.ndarray]:
+        """First partials (S_u, S_v) at (u, v)."""
         S = self._eval_ders(u, v, 1)
         return S[1, 0], S[0, 1]
 
