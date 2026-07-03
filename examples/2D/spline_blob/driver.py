@@ -65,7 +65,7 @@ def finish(grid, topo, ents, steps, a, *, title,
         drain_steps(steps, mindet_history=mindet_history,
                     energy_history=energy_history)
 
-    if getattr(a, "pin_layers", 0) > 0 and             getattr(topo, "boundary_layer_specs", None):
+    if getattr(topo, "boundary_layer_specs", None):
         from egg.smoothing import first_layer_heights
 
         # Height / its own spec target per wall column (1.0 = exact).
