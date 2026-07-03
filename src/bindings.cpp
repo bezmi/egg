@@ -821,7 +821,7 @@ PYBIND11_MODULE(cpp_core, m)
     // The compiled precision of egg::real (float vs double). Cross-precision
     // parity tests read this to floor their double-tuned tolerances at the fp32
     // level in the float build (see tests/real_tol.py, the mirror of
-    // tests/cpp/real_tol.hpp). True when built with -DEGG_REAL_IS_FLOAT=ON.
+    // tests/cpp/real_tol.hpp). True when built with -DEGG_REAL_IS_FP32=ON.
     m.attr("REAL_IS_FLOAT") = (sizeof(egg::real) == 4);
 
 

@@ -65,7 +65,7 @@ a profiling pass faster.
 
 ## Switching precision (double ↔ fp32)
 
-The project supports building with `egg::real = float` via `-DEGG_REAL_IS_FLOAT=ON`.
+The project supports building with `egg::real = float` via `-DEGG_REAL_IS_FP32=ON`.
 By default (`uv sync`) the extension builds in **double** precision. Profile
 changes in register pressure / occupancy between the two builds.
 
@@ -73,14 +73,14 @@ changes in register pressure / occupancy between the two builds.
 
 ```
 uv sync --force-reinstall \
-  -C cmake.define.EGG_REAL_IS_FLOAT=ON
+  -C cmake.define.EGG_REAL_IS_FP32=ON
 ```
 
 Or, if you only want the extension and don't need the device test suite:
 
 ```
 uv sync --force-reinstall \
-  -C cmake.define.EGG_REAL_IS_FLOAT=ON \
+  -C cmake.define.EGG_REAL_IS_FP32=ON \
   -C cmake.define.EGG_BUILD_TESTS=OFF
 ```
 

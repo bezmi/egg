@@ -139,14 +139,14 @@ CPMAddPackage(
 # ---------------------------------------------------------------------------
 # Core compute library.
 # ---------------------------------------------------------------------------
-# Precision knob: -DEGG_REAL_IS_FLOAT=ON selects float for egg::real (see
+# Precision knob: -DEGG_REAL_IS_FP32=ON selects float for egg::real (see
 # src/core.hpp). Default OFF => double (the bit-for-bit baseline). Use a
 # directory-level definition (not a target INTERFACE one) so it reaches the
 # AdaptiveCpp-wrapped compile of bindings.cpp / the SYCL tests too — acpp's
 # add_sycl_to_target does not reliably propagate INTERFACE compile definitions.
-option(EGG_REAL_IS_FLOAT "Use float (fp32) as egg::real instead of double" OFF)
-if(EGG_REAL_IS_FLOAT)
-  add_compile_definitions(EGG_REAL_IS_FLOAT=1)
+option(EGG_REAL_IS_FP32 "Use float (fp32) as egg::real instead of double" OFF)
+if(EGG_REAL_IS_FP32)
+  add_compile_definitions(EGG_REAL_IS_FP32=1)
   message(STATUS "egg::real = float (fp32 build)")
 endif()
 
@@ -318,8 +318,8 @@ if(EGG_BUILD_TESTS)
     include(ExternalProject)
     # Propagate the precision macro so the internal build picks it up.
     set(_acpp_float_arg "")
-    if(EGG_REAL_IS_FLOAT)
-      set(_acpp_float_arg "-DEGG_REAL_IS_FLOAT=ON")
+    if(EGG_REAL_IS_FP32)
+      set(_acpp_float_arg "-DEGG_REAL_IS_FP32=ON")
     endif()
     ExternalProject_Add(cpp_tests_acpp_proj
       SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}"

@@ -1,14 +1,14 @@
 // real_tol.hpp — precision-aware comparison tolerance for the C++ tests.
 //
 // The golden tables (golden_*.hpp) and the in-test reference math are computed
-// in double. When the build selects egg::real = float (-DEGG_REAL_IS_FLOAT=ON),
+// in double. When the build selects egg::real = float (-DEGG_REAL_IS_FP32=ON),
 // the device/library results only match those references to ~1e-4..1e-6, so the
 // double-tuned literal tolerances (1e-9 .. 1e-12) would spuriously fail. real_tol
 // floors a tolerance at the fp32 parity level in the float build and is the
 // identity in the double build (so the double build keeps its exact thresholds).
 #pragma once
 
-#include "core.hpp"  // egg::real, EGG_REAL_IS_FLOAT
+#include "core.hpp"  // egg::real, EGG_REAL_IS_FP32
 
 #include <array>
 #include <cstddef>
@@ -18,7 +18,7 @@ namespace egg_test
 {
 
 // True when the build selects egg::real = float.
-#if defined(EGG_REAL_IS_FLOAT) && EGG_REAL_IS_FLOAT
+#if defined(EGG_REAL_IS_FP32) && EGG_REAL_IS_FP32
 inline constexpr bool kRealIsFloat = true;
 #else
 inline constexpr bool kRealIsFloat = false;
@@ -70,7 +70,7 @@ inline std::vector<egg::real> to_real(const double* p, std::size_t n)
 // egg::real == float; identity otherwise.
 inline constexpr double real_tol(double tol_f64)
 {
-#if defined(EGG_REAL_IS_FLOAT) && EGG_REAL_IS_FLOAT
+#if defined(EGG_REAL_IS_FP32) && EGG_REAL_IS_FP32
     constexpr double kFp32Floor = 5e-4;  // relative parity vs the double reference
     return tol_f64 < kFp32Floor ? kFp32Floor : tol_f64;
 #else

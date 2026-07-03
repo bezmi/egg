@@ -2,7 +2,7 @@
 
 The mirror of ``tests/cpp/real_tol.hpp``. The cross-precision parity tests
 compare the C++/device results against a double-precision NumPy reference. When
-the extension is built with ``egg::real = float`` (``-DEGG_REAL_IS_FLOAT=ON``)
+the extension is built with ``egg::real = float`` (``-DEGG_REAL_IS_FP32=ON``)
 those results only agree with the double reference to ~1e-4..1e-6, so the
 double-tuned tolerances (1e-9..1e-12) would spuriously fail. :func:`real_tol`
 floors a tolerance at the fp32 parity level in the float build and is the

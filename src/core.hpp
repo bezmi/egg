@@ -11,13 +11,13 @@ namespace egg
 {
 
 // ---------------------------------------------------------------------------
-// Precision knob. Default `double`; -DEGG_REAL_IS_FLOAT=1 selects `float`.
+// Precision knob. Default `double`; -DEGG_REAL_IS_FP32=1 selects `float`.
 // `egg::real` is the single value type every numeric in src/ is expressed in,
 // so flipping this macro halves the register/memory footprint of every working
 // set without touching call sites. The `double` build must stay bit-for-bit
 // identical to the pre-refactor code (the macro off => the same codegen).
 // ---------------------------------------------------------------------------
-#if defined(EGG_REAL_IS_FLOAT) && EGG_REAL_IS_FLOAT
+#if defined(EGG_REAL_IS_FP32) && EGG_REAL_IS_FP32
 using real = float;
 #else
 using real = double;
@@ -41,7 +41,7 @@ constexpr real r(long double v) { return static_cast<real>(v); }
 namespace tol
 {
 inline constexpr real eps = std::numeric_limits<real>::epsilon();  // ~2.2e-16 / 1.2e-7
-#if defined(EGG_REAL_IS_FLOAT) && EGG_REAL_IS_FLOAT
+#if defined(EGG_REAL_IS_FP32) && EGG_REAL_IS_FP32
 inline constexpr real tiny = 1e-20_r;    // det/denominator floor
 inline constexpr real znorm = 1e-7_r;    // "is this vector zero" guard
 inline constexpr real newton = 1e-5_r;   // projection |Δq| break
