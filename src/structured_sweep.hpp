@@ -1,19 +1,14 @@
 #pragma once
 
-// structured_sweep.hpp — the block-Jacobi sweep driven over a halo-padded
-// structured store.
-//
-// StructuredExecutorT<D> composes SweepDeviceContextT<D> (the uploaded patch
-// tables + X store), run_block_jacobi, and reduce_energy_mindet, but the
-// SweepContextHostT it carries uses STRUCTURED node indices: gc/gn index into the
-// packed BlockField buffer (built host-side via structured_patch.hpp), and X IS
-// that packed buffer (interior slots filled through the block scatter map, ghost
-// slots refreshed by the halo exchange). The structured path adds a per-sweep
-// halo_exchange + broadcast_shared, injected as the run_block_jacobi before-sweep
-// hook — cadence 1.4b (additive Schwarz / frozen halos): cross-block neighbours
-// read the previous sweep's halo and non-owner copies of shared interface nodes
-// are refreshed from their owner, so every free DOF relaxes from the same
-// snapshot.
+/// @file structured_sweep.hpp
+/// Block-Jacobi sweep over a halo-padded structured store.
+/// StructuredExecutorT<D> composes SweepDeviceContextT<D>, run_block_jacobi
+/// and reduce_energy_mindet, with STRUCTURED node indices: gc/gn index the
+/// packed BlockField buffer (built via structured_patch.hpp) and X IS that
+/// buffer (interior slots filled through the block scatter map, ghosts by the
+/// halo exchange). A per-sweep fused halo_exchange + broadcast_shared runs as
+/// the before-sweep hook — additive Schwarz / frozen halos: every free DOF
+/// relaxes from the same snapshot.
 
 #include "structured_halo.hpp"
 #include "sweep.hpp"
@@ -67,11 +62,9 @@ template <int D> class StructuredExecutorT
     }
 
   private:
-    /// The per-sweep hook: refresh the cross-block ghost shell and the non-owner
-    /// copies of shared interface nodes on the read buffer (frozen for the sweep —
-    /// cadence 1.4b).
-    /// Fused into a single launch — the two passes write disjoint slots, so
-    /// fusion preserves behaviour (see @ref fused_halo_broadcast).
+    /// Per-sweep hook: refresh the cross-block ghost shell and the non-owner
+    /// copies of shared interface nodes on the read buffer (frozen for the
+    /// sweep) in one launch (see @ref fused_halo_broadcast).
     auto halo_hook()
     {
         return [this](sycl::queue& q, real* X) {

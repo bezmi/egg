@@ -1,4 +1,5 @@
-// sweep.hpp — device-resident block-Jacobi barrier/untangle sweep.
+/// @file sweep.hpp
+/// Device-resident block-Jacobi barrier/untangle sweep.
 #pragma once
 
 #include "device.hpp"
@@ -23,21 +24,17 @@
 namespace egg
 {
 
-// The block-Jacobi kernels build the per-corner stencil through the
-// D-neighbour PatchViewT<D> and take the D×D Newton step. The A→T→detA math is
-// single-sourced in patch.hpp::assemble_vecT; everything here is generic over D,
-// and only the dimensions whose math exists (D=2 in Phase 1) are instantiated.
+// The kernels build the per-corner stencil through PatchViewT<D> and take the
+// D×D Newton step; the A→T→detA math is single-sourced in
+// patch.hpp::assemble_vecT. Everything is generic over D.
 
-/// @brief Per-partition typed SoA host data (one per entity type present in the
-///        group). Populated by `unpack_context` from the Python `entities`
-///        sub-dicts (Phase 1b-B); the `SweepDeviceContextT` ctor uploads these
-///        to USM and constructs the `PartitionView::soa_view` + `seg` views.
-///        All SoA views share the one `SoAView<const real>` type for records,
-///        so this struct is type-erased at the host level (the interpretation is
-///        per-`E` in `load`). The `seg` vector carries variable-length CSR
-///        payloads (B-spline knots/ctrl) — empty for fixed-size types.
+/// Per-partition typed SoA host data (one per entity type in the group).
+/// Populated by `unpack_context` from the Python `entities` sub-dicts; the
+/// SweepDeviceContextT ctor uploads to USM and builds PartitionView's
+/// soa_view + seg views. Type-erased at host level (interpretation is per-E
+/// in `load`); `seg` carries CSR payloads, empty for fixed-size types.
 struct SoAHostRecord {
-    /// @brief One segmented (CSR) field: flat data + offset table.
+    /// One segmented (CSR) field: flat data + offset table.
     struct SegmentedField {
         std::vector<real> data;
         std::vector<int> off;  ///< Length count+1, off[0]==0.
@@ -98,21 +95,12 @@ template <int D> struct SweepContextHostT {
     std::vector<int> nstride;    // [num_blocks * D] or empty
 };
 
-/// @brief One (EntityTag) partition of a group: a contiguous
-///        list of group-local DOF indices sharing the same entity type.
-///
-/// Trivially copyable (captured by value into the SYCL kernel lambda). The
-/// `dof_list` points at device USM; `ndof` is the partition's DOF count. The
-/// sweep instantiates one monomorphic kernel per partition, indexing the
-/// group's typed SoA via `dof_list[i]` — no per-DOF `std::visit`.
-///
-/// `soa_view` is the packed-record SoA view (extents `(ndof, kFields)`); `seg`
-/// carries the segmented (CSR) views for variable-length fields (B-spline
-/// knots/ctrl, composite records) — null for fixed-size types. The kernel calls
-/// `tie_view(soa_view, seg)` + `load` to build the concrete entity (every 2D
-/// type has an @ref egg::HasEntitySoA specialization since Phase 4 retired the
-/// positional blob). All SoA views share the one typed `SoAView<const real>`
-/// — no `const void*`, no type erasure, no cast.
+/// One EntityTag partition of a group: a contiguous list of group-local DOF
+/// indices sharing an entity type. Trivially copyable (captured by value into
+/// the kernel); dof_list points at device USM. The kernel calls
+/// tie_view(soa_view, seg) + load to build the concrete entity — no per-DOF
+/// std::visit, no const void* erasure. seg views are null for fixed-size
+/// types.
 struct PartitionView {
     static constexpr int kMaxSeg = kMaxSoASeg;  ///< Max segmented slots (matches EntitySoA<E>::View).
     EntityTag tag;                 ///< Entity type of this partition.
@@ -254,13 +242,10 @@ template <int D> class SweepDeviceContextT
             dg.sample_id = {q, group_sid[gi]};
             dg.role = {q, g.role};
 
-            // Each SoAHostRecord in g.soa is one EntityTag partition:
-            // its dof_local is the group-local DOF list, its records/seg the
-            // already-typed SoA (built in Python by group_entities_by_type, or by
-            // the C++ golden test's blob→SoA helper). The upload is a direct copy
-            // — no per-DOF blob decode, no tag scan (Phase 4 retired the blob).
-            // The monomorphic kernel iterates one partition per launch, indexing
-            // its typed SoA via dof_list.
+            // Each SoAHostRecord is one EntityTag partition: dof_local is the
+            // group-local DOF list, records/seg the already-typed SoA (built in
+            // Python by group_entities_by_type or the C++ golden helper). The
+            // upload is a direct copy — no per-DOF blob decode, no tag scan.
             dg.partitions.reserve(g.soa.size());
             for (const auto& rec : g.soa) {
                 DevicePartition dp;
@@ -294,11 +279,11 @@ template <int D> class SweepDeviceContextT
                 }
             }
 
-            // Free-first reorder: permute the per-DOF arrays so every Free
-            // (interior) DOF precedes the non-Free (boundary) ones, making the
-            // two classes contiguous sub-ranges of one view. The per-sample
-            // arrays are untouched — sample_offset still indexes them. A DOF is
-            // Free iff its owning partition's tag is Free. Plan #1 step 2.
+            // Free-first reorder: per-DOF arrays permuted so Free (interior)
+            // DOFs precede non-Free (boundary) ones — two contiguous
+            // sub-ranges of one view. Per-sample arrays untouched
+            // (sample_offset still indexes them). Free iff the owning
+            // partition's tag is Free.
             const auto is_free = [&](std::size_t d) {
                 const int p = part_of[d];
                 return p >= 0 && g.soa[static_cast<std::size_t>(p)].tag == EntityTag::Free;
@@ -390,20 +375,14 @@ template <int D> class SweepDeviceContextT
     real* X() const { return X_.data(); }
     std::size_t x_size() const { return X_.size(); }
     std::size_t num_nodes() const { return num_nodes_; }
-    /// @brief Per-node warm-start seed cache (stride @ref kSeedStride), persisted
-    ///        across sweeps. Forwarded to the block-Jacobi kernel; null-equivalent
-    ///        cold path passes nullptr.
+    /// Per-node warm-start seed cache (stride @ref kSeedStride), persisted
+    /// across sweeps; nullptr disables warm starts.
     real* seeds() { return seeds_.data(); }
 
-    /// @brief A single GroupViewT over all free DOFs, for the block-Jacobi launch.
-    ///
-    /// Under frozen halos every free DOF updates from the same snapshot, so all
-    /// DOFs run in **one launch** (the Free-first reorder + boundary bucketing done
-    /// here drive the interior/boundary split). Built lazily on first use and
-    /// cached: the bulk per-sample arrays are concatenated by device-to-device
-    /// copy; the small per-DOF index arrays are rebuilt with the running
-    /// sample/partition offsets; the partition list (entity SoA pointers) is
-    /// concatenated unchanged.
+    /// Single GroupViewT over all free DOFs for the block-Jacobi launch (under
+    /// frozen halos every free DOF updates from the same snapshot). Lazily
+    /// built and cached; the Free-first reorder + boundary bucketing here
+    /// drive the interior/boundary split.
     const GroupViewT<D>& merged_group_view()
     {
         if (!merged_built_) {
@@ -413,14 +392,11 @@ template <int D> class SweepDeviceContextT
         return merged_view_;
     }
 
-    /// @brief One monomorphic boundary launch descriptor: a single (entity-type)
-    ///        partition's list of **Free-first-reordered DOF positions** into the
-    ///        merged view (§4.7). Kernels A/C launch over `positions[0..count)`;
-    ///        for each position `d` they recover the patch (`merged.patch(d)`), the
-    ///        global node (`merged.dof_idx[d]`), and the SoA row (`merged.row_of[d]`)
-    ///        exactly as the subrange kernel does — but with the entity type fixed
-    ///        at launch (`tag`/`pv.soa_view`), so `dispatch_entity_type` collapses
-    ///        to one arm and the +144 control-flow union is gone.
+    /// One monomorphic boundary launch descriptor: a single entity-type
+    /// partition's list of Free-first-reordered DOF positions into the merged
+    /// view. Launching over positions[0..count) with the entity type fixed at
+    /// launch collapses dispatch_entity_type to one arm (no control-flow
+    /// union).
     struct BoundaryLaunch {
         EntityTag tag;          ///< Entity type of this partition (drives monomorphization).
         PartitionView pv;       ///< Entity SoA view (records + seg) for this partition.
@@ -428,10 +404,9 @@ template <int D> class SweepDeviceContextT
         const int* positions;   ///< Device USM: reordered positions into the merged view.
     };
 
-    /// @brief The per-partition boundary launch descriptors (§4.7 / S1). Built
-    ///        lazily alongside the merged view; one entry per boundary partition
-    ///        actually present (~1–2 for sphere_in_cube). The union of every
-    ///        entry's positions is exactly `[merged.n_free, merged.ndof)`.
+    /// Per-partition boundary launch descriptors, built lazily with the merged
+    /// view; one entry per boundary partition present. Their positions exactly
+    /// tile [merged.n_free, merged.ndof).
     const std::vector<BoundaryLaunch>& boundary_launches()
     {
         merged_group_view();  // ensure built
@@ -595,10 +570,9 @@ template <int D> class SweepDeviceContextT
         }
         q_.wait();
 
-        // Global Free-first reorder across all merged DOFs (each group is already
-        // Free-first internally, but the concatenation interleaves the classes).
-        // The single block-Jacobi launch is then split at n_free into the lean
-        // interior kernel and the full boundary kernel. Plan #1 step 2.
+        // Global Free-first reorder across merged DOFs (each group is already
+        // Free-first internally; concatenation interleaves the classes). The
+        // launch is split at n_free into interior and boundary kernels.
         const auto merged_is_free = [&](std::size_t i) {
             const int p = part_of[i];
             return p >= 0 && merged_pvs[static_cast<std::size_t>(p)].tag == EntityTag::Free;
@@ -640,14 +614,11 @@ template <int D> class SweepDeviceContextT
             m_interior_logical_ = UsmBuffer<int> {q_, ril};
         }
 
-        // Per-partition reordered-position lists for the boundary tail (§4.7 / S1).
-        // Bucket every boundary position [merged_n_free, total_ndof) by its merged
-        // partition; each non-empty bucket becomes one monomorphic launch. The
-        // interior prefix [0, merged_n_free) stays a single entity-agnostic launch
-        // and is intentionally not bucketed. Reserve up front so the position
-        // UsmBuffers never reallocate (BoundaryLaunch::positions holds raw pointers
-        // into them; a vector reallocation would move-construct each buffer — the
-        // device pointer survives a move, but reserving keeps the invariant simple).
+        // Per-partition reordered-position lists for the boundary tail: bucket
+        // every boundary position by merged partition; each non-empty bucket is
+        // one monomorphic launch. The interior prefix stays one entity-agnostic
+        // launch. Reserve up front so the position UsmBuffers never reallocate
+        // (BoundaryLaunch::positions holds raw pointers into them).
         std::vector<std::vector<int>> buckets(total_parts);
         for (std::size_t i = merged_n_free; i < total_ndof; ++i) {
             buckets[static_cast<std::size_t>(r_part_of[i])].push_back(static_cast<int>(i));
@@ -663,9 +634,8 @@ template <int D> class SweepDeviceContextT
         std::size_t bnd_total = 0;
         for (std::size_t p = 0; p < total_parts; ++p) {
             if (buckets[p].empty()) { continue; }
-            // Every boundary position must belong to a non-Free partition (the
-            // Free DOFs are exactly the [0, merged_n_free) prefix). This is the S1
-            // unit-check that the reordered positions ↔ partition mapping holds.
+            // Boundary positions must belong to non-Free partitions (Free DOFs
+            // are exactly the [0, merged_n_free) prefix).
             assert(merged_pvs[p].tag != EntityTag::Free);
             bnd_total += buckets[p].size();
             m_part_positions_.emplace_back(q_, buckets[p]);
@@ -863,36 +833,11 @@ template <int D> class SweepDeviceContextT
     std::vector<BoundaryLaunch> boundary_launches_;
 };
 
-/// @brief Cold boundary sweep kernel (block-Jacobi, SoA-backed).
-///
-/// One kernel over the group's constrained (non-Free) DOFs. The heavy body
-/// (patch eval, backtracking, energy/min-det assembly) is **entity-agnostic** and
-/// compiled exactly once; the only entity-specific steps — the tangent-reduced
-/// Newton delta and the per-trial projection — are isolated behind @ref
-/// with_entity, a single cheap `switch` over the DOF's tag that loads the concrete
-/// entity from its SoA slot and runs a *small* callable (never inlining all entity
-/// variants into the body, so no `std::visit` occupancy collapse). Race-free:
-/// distinct DOFs are distinct nodes, so the scatter never collides.
-/// Double-buffered: reads (patch eval, trial-loop node substitution, current
-/// position) use @p X — the frozen snapshot — while the final scatter writes
-/// @p X_out, so every DOF updates from the same snapshot (no intra-sweep
-/// dependency). The relaxation weight @p omega damps the simultaneous update
-/// (`cur = pos + ω·(cur − pos)`); ω=1 is the undamped step.
-///
-/// @tparam D Embedding dimension.
-/// @tparam Obj Objective type.
-/// @param q SYCL queue.
-/// @param g The boundary group view (per-DOF patch arrays + partition list + map).
-/// @param X Global node positions to read (device USM).
-/// @param objective The objective functor.
-/// @param X_out Buffer to scatter into (null → write @p X in place).
-/// @param omega Relaxation weight (1.0 = undamped).
-/// @brief Project @p p onto @p ent, warm-starting from this DOF's parameter
-///        cache when the entity supports it (the iterative B-spline curve /
-///        surface). @p seed_slot points at the (D-1)-real per-node seed
-///        (non-finite ⇒ cold); on return it holds the converged foot parameter
-///        so the next sweep skips the expensive coarse-grid seed. Closed-form
-///        entities have no @c project_seeded and project cold (seed untouched).
+/// Project @p p onto @p ent, warm-starting from this DOF's parameter cache
+/// when the entity supports it (the iterative B-spline curve/surface).
+/// @p seed_slot points at the (D-1)-real per-node seed (non-finite = cold);
+/// on return it holds the converged foot parameter so the next sweep skips
+/// the coarse-grid seed. Closed-form entities project cold (seed untouched).
 template <int D, bool Warm, class E>
 inline PtN<D> project_with_seed(const E& ent, const PtN<D>& p, real* seed_slot)
 {
@@ -913,13 +858,10 @@ inline PtN<D> project_with_seed(const E& ent, const PtN<D>& p, real* seed_slot)
     }
 }
 
-/// @brief Tangent-reduced Newton step that warm-starts the tangent basis from
-///        this DOF's parameter cache when the entity supports it (the iterative
-///        B-spline curve/surface) — so the Newton step's projection skips the
-///        cold coarse-grid solve every sweep, just like @ref project_with_seed
-///        does for the line-search projection. Closed-form / Line3 entities (no
-///        @c tangent_basis_seeded) fall back to the cold @ref newton_delta; the
-///        interior (k==D) case never reaches here (handled by the FreeOnly path).
+/// Tangent-reduced Newton step warm-starting the tangent basis from the seed
+/// cache when the entity supports it (cf. @ref project_with_seed). Closed-form
+/// / Line3 entities fall back to the cold @ref newton_delta; the interior
+/// (k==D) case never reaches here.
 template <int D, bool Warm, class E>
 inline VecN<D> newton_delta_with_seed(
   const VecN<D>& g, const MatN<D>& H, const PtN<D>& pos, const E& ent, real* seed_slot)
@@ -941,15 +883,19 @@ inline VecN<D> newton_delta_with_seed(
     }
 }
 
-/// @param seeds Optional per-node warm-start parameter cache, stride (D-1),
-///        indexed by global node id. Null disables warm starting (cold
-///        projection). Persisted across sweeps by the owning context so the
-///        iterative projections converge in 1–2 Newton steps from the previous
-///        foot instead of the coarse-grid seed.
-///
-/// This is the cold boundary kernel of the interior/boundary split: it runs over
-/// the constrained (non-Free) DOFs, projecting each trial onto its entity. The
-/// interior DOFs are relaxed by the fissioned metric/interior kernels, and the
+/// Cold boundary sweep kernel (block-Jacobi, SoA-backed): one launch over the
+/// constrained (non-Free) DOFs, projecting each trial onto its entity. The
+/// heavy body (patch eval, backtracking, energy/min-det) is entity-agnostic
+/// and compiled once; the entity-specific Newton delta + per-trial projection
+/// are isolated behind @ref with_entity — a cheap tag switch running a small
+/// callable, so entity variants are never all inlined (no std::visit
+/// occupancy collapse). Double-buffered: reads use @p X (frozen snapshot),
+/// the scatter writes @p X_out (null = in place), race-free since distinct
+/// DOFs are distinct nodes. @p omega damps the update
+/// (cur = pos + ω(cur − pos)). @p seeds is the optional per-node warm-start
+/// cache (stride D−1, global node id; null = cold projection), persisted by
+/// the owning context so iterative projections converge in 1–2 Newton steps.
+/// Interior DOFs are relaxed by the fissioned metric/interior kernels; the
 /// warm boundary path is @ref sweep_boundary_paramls_kernel.
 template <int D, class Obj>
 inline void sweep_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, Obj objective,
@@ -1054,22 +1000,17 @@ inline void sweep_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, Obj ob
     });
 }
 
-/// @brief Kernel B — metric eval (§4.3). For each DOF in @p g, run `patch_eval`
-///        and scatter (grad, hess, energy) into the per-node USM buffers, keyed by
-///        **global node id** (`dof_idx[d]`, §5) so the same buffers serve both the
-///        interior subrange launch and the per-partition boundary launches.
+/// Metric-eval kernel: per DOF, patch_eval (or its synthesized twin for
+/// interior-eligible DOFs) scattered into per-node buffers keyed by global
+/// node id, so the same buffers serve the interior subrange and the boundary
+/// launches. The metric half of @ref sweep_kernel hoisted out — no Newton, no
+/// projection, no with_entity — so the metric grad+jhj working set lives in
+/// its own kernel (interior 144 VGPR → ~88 here + ~80 in the update kernel,
+/// both under the gfx1030 128-VGPR 2-wave tier).
 ///
-/// This is exactly the metric half of @ref sweep_kernel hoisted into its
-/// own kernel: the same `patch_eval` (or its synthesized twin for interior DOFs),
-/// no Newton step, no projection, no
-/// `with_entity`. Splitting it out lets the heavy metric grad+jhj working set live
-/// in a kernel of its own (interior 144 → ~88 metric here + ~80 solve in Kernel C,
-/// both under the gfx1030 128-VGPR 2-wave tier). Entity-agnostic: one launch over
-/// the whole subrange regardless of entity type.
-///
-/// @param grad_buf  [num_nodes * D]     dE/dpos per node.
-/// @param hess_buf  [num_nodes * D*D]   contracted Hessian per node (row-major).
-/// @param e0_buf    [num_nodes]         baseline patch energy per node.
+/// @param grad_buf  [num_nodes * D]    dE/dpos per node.
+/// @param hess_buf  [num_nodes * D*D]  contracted Hessian per node (row-major).
+/// @param e0_buf    [num_nodes]        baseline patch energy per node.
 template <int D, class Obj>
 inline void metric_kernel(sycl::queue& q, const GroupViewT<D>& g, const real* X, real* grad_buf,
                           real* hess_buf, real* e0_buf, Obj objective)
@@ -1096,16 +1037,13 @@ inline void metric_kernel(sycl::queue& q, const GroupViewT<D>& g, const real* X,
     });
 }
 
-/// @brief Kernel C (interior / `FreeOnly`) — Newton solve + backtracking + scatter
-///        (§4.4, §4.5), reading the metric (grad, hess, e0) precomputed by
-///        @ref metric_kernel from the per-node buffers. No entity, no projection:
-///        the interior Newton step is the plain `solveNxN<D>` and the line-search
-///        trial is the raw step — structurally the existing interior kernel with
-///        the metric hoisted out. The trial energy recompute reads neighbour
-///        positions from @p X (the frozen snapshot for block-Jacobi).
+/// Interior update kernel: Newton solve + backtracking + scatter, reading the
+/// metric (grad, hess, e0) precomputed by @ref metric_kernel. No entity, no
+/// projection — the step is plain solveNxN<D> and the trial is the raw step.
+/// Trial energy reads neighbours from @p X, the frozen block-Jacobi snapshot.
 ///
-/// @param X      Read buffer (block-Jacobi frozen snapshot x_in).
-/// @param X_out  Write buffer (null → in-place, X_out == X).
+/// @param X      Read buffer (frozen snapshot).
+/// @param X_out  Write buffer (null = in place).
 /// @param omega  Relaxation weight (1.0 = undamped).
 template <int D, class Obj>
 inline void interior_update_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X, real* X_out,
@@ -1189,10 +1127,10 @@ inline void interior_update_kernel(sycl::queue& q, const GroupViewT<D>& g, real*
     });
 }
 
-/// @brief Plain SPD solve `M x = b` (K = 1 or 2), no Newton negation/fallback.
-///        Used for the param-space reduction `Δq = (JᵀJ)⁻¹ Jᵀδ` (§4.1), where
-///        `JᵀJ` is SPD; a near-singular Gram matrix (degenerate frame at a trim
-///        corner) returns 0 so the line search simply does not move that sweep.
+/// Plain SPD solve M x = b (K = 1 or 2), no Newton negation/fallback. Used
+/// for the param-space reduction Δq = (JᵀJ)⁻¹ Jᵀδ; a near-singular Gram
+/// matrix (degenerate frame at a trim corner) returns 0, so the line search
+/// simply does not move that sweep.
 template <int K> inline VecN<K> spd_solve(const MatN<K>& M, const VecN<K>& b)
 {
     if constexpr (K == 1) {
@@ -1206,11 +1144,10 @@ template <int K> inline VecN<K> spd_solve(const MatN<K>& M, const VecN<K>& b)
     }
 }
 
-/// @brief The converged foot parameter `q*` of @p p on @p param, warm-started from
-///        @p seed when the parametrization is iterative (B-spline `invert_seeded`),
-///        else the closed-form `invert`. Mirrors @ref project_with_seed but returns
-///        the **parameter** (not the projected point) — the param-space LS needs
-///        `q*` itself to backtrack in (u,v).
+/// Converged foot parameter q* of @p p on @p param — warm-started
+/// invert_seeded when iterative, else closed-form invert. Mirrors
+/// @ref project_with_seed but returns the parameter, which the param-space
+/// line search backtracks in.
 template <int K, class P>
 inline Param<K> foot_param_seeded(const P& param, const PtN<P::edim>& p, const Param<K>& seed,
                                   bool has_seed)
@@ -1224,12 +1161,10 @@ inline Param<K> foot_param_seeded(const P& param, const PtN<P::edim>& p, const P
     }
 }
 
-/// @brief The converged foot `q*` **and** the raw tangent frame `J` at `q*`.
-///
-/// For an iterative B-spline foot, the frame is harvested from the last
-/// `newton_foot` `ders(nd=1)` (F2 Lever C) — saving the redundant `frame(q*)`
-/// re-evaluation in the param-LS kernel. For closed-form entities (no warm
-/// `invert_seeded` frame out-param) it falls back to `invert` + `frame(q*)`.
+/// Converged foot q* AND the raw tangent frame J at q*. For an iterative
+/// B-spline foot the frame is harvested from the last newton_foot ders(nd=1),
+/// saving a redundant frame(q*) re-evaluation; closed-form entities fall back
+/// to invert + frame(q*).
 template <int K, int D, class P>
 inline std::pair<Param<K>, std::array<VecN<D>, K>>
   foot_and_frame_seeded(const P& param, const PtN<P::edim>& p, const Param<K>& seed, bool has_seed)
@@ -1244,21 +1179,16 @@ inline std::pair<Param<K>, std::array<VecN<D>, K>>
     }
 }
 
-/// @brief Warm boundary sweep kernel with **param-space line search** (§4.1 / S3).
-///
-/// Replaces the per-trial 3D reprojection of @ref sweep_kernel's warm
-/// boundary path with: project ONCE to the foot parameter `q*`, reduce the
-/// tangent-space Newton step `δ_world = B y` to a parametric step
-/// `Δq = (JᵀJ)⁻¹ Jᵀ δ_world` (J = raw frame at `q*`, B = orthonormalize(J)), then
-/// backtrack `q_trial = trim.clamp(q* + αΔq)` with a **value-only** `param.eval`
-/// (de Boor nd=0). The heavy de Boor **derivative** rows (nd=1) are evaluated once
-/// (in `frame`/`invert_seeded`) instead of ≤10× per DOF in the backtracking loop.
-///
-/// Numerically this preserves the constraint exactly (every trial lands on the
-/// geometry via `eval`) and the Δq reduction is exact (`δ_world ∈ span(J)`); the
-/// only difference vs world-space LS is curvature at finite α — gated by the
-/// energy/sph_dev parity check (§7 step 3). Block-Jacobi warm path only (the cold
-/// s==0 pass stays the world-space @ref sweep_kernel that seeds `q*`).
+/// Warm boundary sweep kernel with param-space line search. Replaces the
+/// per-trial reprojection of @ref sweep_kernel's warm path with: project ONCE
+/// to the foot q*, reduce the tangent-space Newton step δ_world = B y to
+/// Δq = (JᵀJ)⁻¹ Jᵀ δ_world (J = raw frame at q*, B = orthonormalize(J)), then
+/// backtrack q_trial = trim.clamp(q* + αΔq) with value-only param.eval
+/// (de Boor nd=0) — the heavy nd=1 derivative rows run once instead of ≤10×
+/// per DOF. The constraint is preserved exactly (every trial lands on the
+/// geometry) and the Δq reduction is exact (δ_world ∈ span(J)); the only
+/// difference vs world-space LS is curvature at finite α. Warm path only —
+/// the cold sweep 0 stays the world-space @ref sweep_kernel that seeds q*.
 template <int D, class Obj>
 inline void sweep_boundary_paramls_kernel(sycl::queue& q, const GroupViewT<D>& g, real* X,
                                           Obj objective, real* X_out, real omega, real* seeds)
@@ -1415,9 +1345,9 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q, const GroupViewT<D>& g
     });
 }
 
-// Per-sweep total energy (Σ μ) and min det A over the energy stencil, written to
-// out_e/out_m (USM scalars). Reduction identities are supplied explicitly, so no
-// host pre-initialisation of the targets is needed.
+/// Per-sweep total energy (Σμ) and min det A over the energy stencil, written
+/// to out_e/out_m (USM scalars). Reduction identities are supplied explicitly,
+/// so the targets need no host pre-initialisation.
 template <int D, class Obj>
 inline void reduce_energy_mindet(sycl::queue& q,
                                  const StencilViewT<D>& es,
@@ -1457,21 +1387,14 @@ inline void reduce_energy_mindet(sycl::queue& q,
                    });
 }
 
-/// @brief Double-buffered block-Jacobi driver: @c n_sweeps of (pre-sweep hook →
-///        one merged Jacobi launch reading X_in, writing X_new → energy/min-det
-///        reduction on X_new → swap).
-///
-/// Issues a **single** launch over the merged group view
-/// (@ref SweepDeviceContextT::merged_group_view): under the frozen-halo cadence
-/// every free DOF reads the previous snapshot, so there is no intra-sweep
-/// dependency. @p before_sweep is the per-sweep halo hook (halo_exchange +
-/// broadcast on the read buffer). @p omega is the SOR/damping weight forwarded to
-/// the kernel.
-///
-/// A second USM buffer (X_new) is allocated once and initialised to a copy of X;
-/// each sweep writes every free DOF, fixed nodes stay constant, and ghosts are
-/// re-exchanged, so no per-sweep full copy is needed. After the loop the canonical
-/// ctx buffer is restored if an odd number of swaps left the result in X_new.
+/// Double-buffered block-Jacobi driver: n_sweeps of (pre-sweep hook → merged
+/// Jacobi launch reading X_in, writing X_new → energy/min-det reduction →
+/// swap). Under the frozen-halo cadence every free DOF reads the previous
+/// snapshot, so there is no intra-sweep dependency. @p before_sweep is the
+/// per-sweep halo hook; @p omega the SOR weight. X_new is allocated once and
+/// copied from X; each sweep writes every free DOF and ghosts are
+/// re-exchanged, so no per-sweep full copy is needed. The canonical ctx
+/// buffer is restored if an odd number of swaps left the result in X_new.
 template <int D, class Obj, class PreSweep>
 inline std::pair<std::vector<real>, std::vector<real>>
   run_block_jacobi(sycl::queue& q, SweepDeviceContextT<D>& ctx, Obj objective, int n_sweeps,
@@ -1485,10 +1408,10 @@ inline std::pair<std::vector<real>, std::vector<real>>
     const std::size_t nbuf = ctx.x_size();
     UsmBuffer<real> x_new_buf(q, nbuf);
 
-    // Per-node metric scratch for the interior B/C split (§5). Sized to num_nodes
-    // and keyed by global node id so the same buffers serve the boundary launches
-    // too; written by Kernel B before Kernel C reads them every sweep, so no
-    // per-sweep memset is needed (stale slots are never read).
+    // Per-node metric scratch for the interior split, keyed by global node id
+    // so the same buffers serve the boundary launches. Written by the metric
+    // kernel before the update kernel reads them each sweep — stale slots are
+    // never read, so no per-sweep memset.
     const std::size_t nn = ctx.num_nodes();
     UsmBuffer<real> grad_buf(q, nn * D);
     UsmBuffer<real> hess_buf(q, nn * D * D);
@@ -1505,32 +1428,29 @@ inline std::pair<std::vector<real>, std::vector<real>>
     std::size_t report_idx = 0;
     for (int s = 0; s < n_sweeps; ++s) {
         before_sweep(q, x_in);  // refresh ghosts + shared-node copies on the read buffer
-        // Interior B/C split (§4.5): Kernel B writes (grad, hess, e0) per node,
-        // Kernel C reads them back and does the Newton solve + backtracking. Both
-        // run over [0, n_free) and read the frozen x_in; C writes disjoint x_out
-        // slots, so block-Jacobi correctness is preserved. The metric and solve
-        // working sets now live in separate kernels (144 → ~88 + ~80 VGPR).
+        // Interior metric/update split: metric_kernel writes (grad, hess, e0)
+        // per node; interior_update_kernel reads them back and does the Newton
+        // solve + backtracking. Both run over [0, n_free) on the frozen x_in;
+        // the update writes disjoint x_out slots, so block-Jacobi correctness
+        // holds. Separate kernels keep the working sets apart (144 → ~88 + ~80
+        // VGPR).
         const GroupViewT<D> interior = mg.dof_subrange(0, mg.n_free);
         metric_kernel<D, Obj>(q, interior, x_in, grad_buf.data(), hess_buf.data(), e0_buf.data(),
                               objective);
         interior_update_kernel<D, Obj>(q, interior, x_in, x_out, omega, grad_buf.data(),
                                        hess_buf.data(), e0_buf.data(), objective);
-        // Boundary cold/warm split: the first sweep runs the robust cold kernel
-        // (8×8 grid + exact Newton nd=2) to project the topologically-placed nodes
-        // onto the geometry and populate the warm-seed cache; every subsequent
-        // sweep runs the lean warm kernel (GN nd=1, no grid / no nd=2 → the heavy
-        // de Boor second-order rows stay out of the hot kernel). NB: per-entity
-        // monomorphization of this boundary kernel was measured to REGRESS it (the
-        // BSpline arm alone is 208 VGPR vs the union's 184 — the runtime switch is
-        // actually more register-efficient than the isolated heavy arm — plus a
-        // per-partition launch explosion), so the boundary stays one union kernel.
+        // Boundary cold/warm split: sweep 0 runs the robust cold kernel (8×8
+        // grid + exact Newton nd=2) to project topologically-placed nodes and
+        // populate the warm-seed cache; later sweeps run the lean warm kernel
+        // (GN nd=1 — the de Boor second-order rows stay out of the hot
+        // kernel). NB: per-entity monomorphization of the boundary kernel was
+        // measured to REGRESS (BSpline arm alone 208 VGPR vs the union's 184,
+        // plus a launch explosion), so the boundary stays one union kernel.
         const GroupViewT<D> bndry = mg.dof_subrange(mg.n_free, mg.ndof - mg.n_free);
         if (s == 0) {
             sweep_kernel<D, Obj>(q, bndry, x_in, objective, x_out, omega, ctx.seeds());
         } else {
-            // Warm path: param-space line search (§4.1 / S3) — project once to the
-            // foot q*, backtrack in (u,v) with value-only de Boor instead of
-            // reprojecting every trial.
+            // Warm path: param-space line search (see kernel doc).
             sweep_boundary_paramls_kernel<D, Obj>(q, bndry, x_in, objective, x_out, omega,
                                                   ctx.seeds());
         }

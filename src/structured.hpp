@@ -1,24 +1,20 @@
 #pragma once
 
-// structured.hpp — host-side geometry of halo-padded structured blocks.
-//
-// Phase 1.1a of the GPU performance plan (gpu-performance-improvement.md). This
-// header is deliberately SYCL-free and allocation-free: it is pure index
-// arithmetic that BlockField<D> (1.1b) consumes to build device mdspans, and the
-// halo builder (1.1c / 1.2) consumes to address face slices. Keeping the layout
-// math in one tested place means the device side never re-derives a stride.
-//
-// Conventions (shared with core.hpp and egg/topology/block_topology.py):
-//   * An "interior shape" is the node count per axis (n0, .., n_{D-1}) — i.e.
-//     BlockSpec.logical_shape, NOT the cell count.
-//   * Every block is padded by one ghost node on each face, so its padded shape
-//     is (n0+2, .., n_{D-1}+2). The ghost layer holds halo copies; an interior
-//     logical index l maps to padded index l + 1 on every axis.
-//   * Storage is row-major over the padded axes with the D coordinate components
-//     innermost and contiguous, matching load_pt/store_pt's X[D*i + k]. So
-//     consecutive nodes along the fastest (last) axis are D doubles apart — the
-//     property Phase 1 relies on for coalesced stencil reads.
-//   * All offsets and strides returned here are in units of DOUBLES.
+/// @file structured.hpp
+/// Host-side geometry of halo-padded structured blocks. Deliberately SYCL- and
+/// allocation-free: pure index arithmetic consumed by BlockField<D> (device
+/// mdspans) and the halo builder (face slices), so the device side never
+/// re-derives a stride.
+///
+/// Conventions (shared with core.hpp and egg/topology/block_topology.py):
+///  - "interior shape" = node count per axis (BlockSpec.logical_shape), NOT cells.
+///  - Each block is padded by one ghost node per face: padded shape (n_k + 2);
+///    interior logical index l maps to padded l + 1 on every axis.
+///  - Storage is row-major over the padded axes, the D coordinate components
+///    innermost and contiguous (matches load_pt/store_pt X[D*i + k]) —
+///    consecutive nodes on the fastest axis are D doubles apart, the property
+///    the coalesced stencil reads rely on.
+///  - All offsets and strides are in units of DOUBLES.
 
 #include "core.hpp"  // egg::real (packed node store element type)
 
@@ -28,9 +24,8 @@
 #include <utility>
 #include <vector>
 
-// Kokkos reference mdspan namespace alias (same as in device.hpp; redeclaring
-// the alias to the same namespace is well-formed when both headers are pulled
-// in together). mdspan itself needs no SYCL, so structured.hpp stays SYCL-free.
+// Same alias as device.hpp (redeclaring to the same namespace is well-formed);
+// mdspan needs no SYCL, so this header stays SYCL-free.
 namespace stdex = std::experimental;
 
 namespace egg
@@ -153,14 +148,10 @@ template <int D> class BlockLayout
     std::vector<std::size_t> offsets_;  // size num_blocks()+1; back() == total
 };
 
-// ---------------------------------------------------------------------------
 // mdspan views over a (host or device) coordinate buffer laid out by a
-// BlockLayout<D>. Both are rank D+1: the D padded/interior spatial axes plus an
-// innermost length-D axis for the coordinate components, so `v(i, …, k)` is
-// coordinate component k of node (i, …). They carry the BlockLayout strides, so
-// the device side never re-derives one — pass a base pointer (USM device
-// pointer in kernels) and the layout, and index with bounds-checked mdspan.
-// ---------------------------------------------------------------------------
+// BlockLayout<D>. Rank D+1: D spatial axes plus an innermost length-D
+// coordinate axis, so v(i, ..., k) is component k of node (i, ...). They carry
+// the BlockLayout strides — pass a base pointer (USM in kernels) + layout.
 
 /// Whole padded block including the ghost layer: extents (n0+2, …, n_{D-1}+2, D),
 /// contiguous row-major (layout_right) since a block occupies one packed run.

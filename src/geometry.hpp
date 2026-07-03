@@ -34,30 +34,25 @@ inline constexpr Tag TAG_LINE3 = 13;        // 3D edge curve
 inline constexpr Tag TAG_BSPLINESURF = 14;  // 3D tensor-product B-spline/NURBS surface
 
 inline constexpr int kParamPad = 12;
-/// @brief Arena record size of one composite-path segment: `[tag, params(kParamPad)]`.
+/// Arena record size of one composite-path segment: [tag, params(kParamPad)].
 inline constexpr int kCompositeRecSize = 1 + kParamPad;
 
 // Pt is the D=2 coordinate type (PtN<2>). The 2D entity set is curves only
 // (Free, line, circle, ellipse, arcs, Béziers); Sphere/Plane are genuine
 // surfaces and live in the 3D entity set, not here.
 
-// ===========================================================================
-// Concept-modelled geometry entities (the single source of truth used by the
-// kernels). Each entity is a trivially-copyable typed value type with its
-// per-shape math inlined (bit-identical to the old raw-pointer free functions).
-// The concrete type is selected per launch by `dispatch_entity_type<2>(tag, f)`
-// and built with `EntitySoA<E>::load` (the device sweep) or `decode_entity<E>`
-// (cold blob/oracle paths) — the kernel body is fully monomorphic in `E`, with
-// no per-DOF `std::visit` and no value-level entity variant (retired in Phase 4).
-// ===========================================================================
+// Concept-modelled geometry entities — the single source of truth for the
+// kernels. Each entity is a trivially-copyable typed value with its per-shape
+// math inlined (bit-identical to the old raw-pointer free functions). The
+// concrete type is selected per launch by dispatch_entity_type<D>(tag, f) and
+// built with EntitySoA<E>::load (device sweep) or decode_entity<E> (cold
+// blob/oracle paths); kernels are fully monomorphic in E — no per-DOF
+// std::visit, no value-level entity variant.
 
-/// @brief Parameter-space coordinate: @f$ (t) @f$ for a curve, @f$ (u,v) @f$ for a surface.
-/// @tparam K Intrinsic dimension of the parametrization.
+/// Parameter-space coordinate: (t) for a curve, (u,v) for a surface.
 template <int K> using Param = std::array<real, K>;
 
-/// @brief The @p D identity columns @f$ e_0 \dots e_{D-1} @f$ (the free-DOF tangent basis).
-/// @tparam D Embedding dimension.
-/// @return The @f$ D @f$ unit basis vectors, one per column.
+/// The D identity columns e_0..e_{D-1} (the free-DOF tangent basis).
 template <int D> inline std::array<VecN<D>, D> identity_columns()
 {
     std::array<VecN<D>, D> b {};
@@ -65,12 +60,8 @@ template <int D> inline std::array<VecN<D>, D> identity_columns()
     return b;
 }
 
-/// @brief Gram–Schmidt orthonormalization of @p K columns embedded in @p D.
-/// @tparam D Embedding dimension.
-/// @tparam K Number of columns (the intrinsic/tangent dimension); @c K==1 reduces
-///           to a single `normalize`.
-/// @param b The raw (non-orthonormal) tangent columns.
-/// @return The orthonormalized columns.
+/// Gram–Schmidt orthonormalization of K columns embedded in D (K==1 reduces
+/// to a single normalize).
 template <int D, int K> inline std::array<VecN<D>, K> orthonormalize(std::array<VecN<D>, K> b)
 {
     for (int i = 0; i < K; ++i) {
@@ -80,9 +71,7 @@ template <int D, int K> inline std::array<VecN<D>, K> orthonormalize(std::array<
     return b;
 }
 
-/// @brief Fused projection result returned by `project_frame`.
-/// @tparam D Embedding dimension.
-/// @tparam K Tangent dimension (number of basis columns).
+/// Fused projection result returned by `project_frame`.
 template <int D, int K> struct Frame {
     PtN<D> pos;                    ///< The projected point.
     std::array<VecN<D>, K> basis;  ///< The orthonormal tangent columns.
@@ -90,10 +79,9 @@ template <int D, int K> struct Frame {
                                    ///< node lands on a trim boundary.
 };
 
-/// @brief A parametrization: an intrinsic-@c idim manifold embedded in @c edim,
-///        given by the three maps `invert` (point → params), `eval`
-///        (params → point), and `frame` (params → the @c idim raw tangent columns).
-/// @tparam P The candidate parametrization type.
+/// A parametrization: an intrinsic-idim manifold embedded in edim, given by
+/// the three maps invert (point → params), eval (params → point), and frame
+/// (params → the idim raw tangent columns).
 template <class P>
 concept Parametrization = requires(const P param, PtN<P::edim> p, Param<P::idim> q) {
     { P::edim } -> std::convertible_to<int>;  // embedding dimension D
@@ -103,11 +91,9 @@ concept Parametrization = requires(const P param, PtN<P::edim> p, Param<P::idim>
     { param.frame(q) } -> std::same_as<std::array<VecN<P::edim>, P::idim>>;
 };
 
-/// @brief A boundary entity: what the constrained sweep actually calls.
-///        `project_frame` is the fused (pos + orthonormal basis + effective tdim)
-///        form; `project` and `tangent_basis` are projections of it used by the
-///        existing call sites.
-/// @tparam E The candidate entity type.
+/// A boundary entity: what the constrained sweep calls. `project_frame` is
+/// the fused (pos + orthonormal basis + effective tdim) form; `project` and
+/// `tangent_basis` are projections of it.
 template <class E>
 concept GeometryEntity = requires(const E& e, const typename E::Pt& p) {
     { E::tdim } -> std::convertible_to<int>;
@@ -118,10 +104,7 @@ concept GeometryEntity = requires(const E& e, const typename E::Pt& p) {
 
 // --- Trim: a k-box / k-region, one specialization per intrinsic dim -----------
 
-/// @brief Wrap @p x into the half-open interval @f$ [a, b) @f$ (for closed curves).
-/// @param x Value to wrap.
-/// @param a,b Interval bounds; if @f$ b \le a @f$, @p x is returned unchanged.
-/// @return The wrapped value.
+/// Wrap @p x into [a, b) (closed curves); returned unchanged if b <= a.
 inline real wrap(real x, real a, real b)
 {
     const real L = b - a;
@@ -131,32 +114,27 @@ inline real wrap(real x, real a, real b)
     return a + t;
 }
 
-/// @brief A k-box / k-region trim in parameter space.
-/// @tparam K Intrinsic dimension; `Trim<1>` is a curve interval, `Trim<2>` a UV region.
+/// k-box / k-region trim in parameter space: Trim<1> a curve interval,
+/// Trim<2> a UV region.
 template <int K> struct Trim;
 
-/// @brief Curve trim: the parameter interval @f$ [t_0, t_1] @f$ (or a closed loop).
+/// Curve trim: the parameter interval [t0, t1] (or a closed loop).
 template <> struct Trim<1> {
     real t0, t1;        ///< Interval bounds.
     bool closed = false;  ///< If set, the curve is periodic and @c contains is always true.
-    /// @brief Whether @p q lies within the interval.
-    /// @param q Parameter to test.
-    /// @return True if inside (always true when closed).
+    /// Inside test (always true when closed).
     [[nodiscard]] bool contains(Param<1> q) const { return closed || (q[0] >= t0 && q[0] <= t1); }
-    /// @brief Clamp @p q onto the interval (wrapping when closed).
-    /// @param q Parameter to clamp.
-    /// @return The clamped (or wrapped) parameter.
+    /// Clamp onto the interval (wrap when closed).
     [[nodiscard]] Param<1> clamp(Param<1> q) const
     { return {closed ? wrap(q[0], t0, t1) : std::clamp(q[0], t0, t1)}; }
 };
 
-/// @brief Surface trim: a UV polygon (outer loop minus holes), arena-backed.
-///        Empty spans mean "untrimmed" (the surface's full natural range).
+/// Surface trim: a UV polygon (outer loop minus holes), arena-backed. Empty
+/// spans mean untrimmed (the surface's full natural range).
 template <> struct Trim<2> {
     std::span<const PtN<2>> verts;  ///< All loop vertices, concatenated.
     std::span<const int> loops;     ///< Offset table: [outer | hole0 | ... | end].
-    /// @brief Even–odd inside test over all loops (outer minus holes).
-    ///        Untrimmed (no loops) always contains.
+    /// Even–odd inside test over all loops; untrimmed always contains.
     [[nodiscard]] bool contains(Param<2> uv) const
     {
         if (loops.size() < 2) { return true; }
@@ -174,7 +152,7 @@ template <> struct Trim<2> {
         }
         return inside;
     }
-    /// @brief Nearest point on the loop polylines (closed loops).
+    /// Nearest point on the loop polylines (closed loops).
     [[nodiscard]] Param<2> clamp(Param<2> uv) const
     {
         Param<2> best = uv;
@@ -200,8 +178,8 @@ template <> struct Trim<2> {
     }
 };
 
-/// @brief The generic trimmed entity: any @ref Parametrization restricted to its k-region trim.
-/// @tparam P The parametrization type (must satisfy @ref Parametrization).
+/// The generic trimmed entity: any @ref Parametrization restricted to its
+/// k-region trim.
 template <Parametrization P> struct TrimmedEntity {
     using Pt = PtN<P::edim>;              ///< Point type in the embedding space.
     using Vec = VecN<P::edim>;            ///< Vector type in the embedding space.
@@ -209,10 +187,8 @@ template <Parametrization P> struct TrimmedEntity {
     P param;                              ///< The underlying parametrization.
     Trim<P::idim> trim;                   ///< The parameter-space trim region.
 
-    /// @brief Project @p p onto the trimmed parametrization, returning the fused frame.
-    /// @param p Query point.
-    /// @return The projected point, orthonormal tangent columns, and effective
-    ///         tdim (one less than @c tdim when @p p lands on the trim boundary).
+    /// Fused frame at the projection of @p p; eff_tdim drops by one when the
+    /// foot lands on the trim boundary.
     [[nodiscard]] Frame<P::edim, tdim> project_frame(const Pt& p) const
     {
         auto q = param.invert(p);
@@ -222,17 +198,13 @@ template <Parametrization P> struct TrimmedEntity {
                 .basis = orthonormalize<P::edim, tdim>(param.frame(q)),
                 .eff_tdim = inside ? tdim : tdim - 1};
     }
-    /// @brief Project @p p onto the trimmed parametrization.
-    /// @param p Query point.
-    /// @return The projected point.
+    /// Projected point.
     [[nodiscard]] Pt project(const Pt& p) const { return project_frame(p).pos; }
 
-    /// @brief Warm-started projection: seed the (Newton-based) inverse from
-    ///        @p seed_io (the previous foot parameter) and write the converged
-    ///        parameter back into @p seed_io for the next call. Only present when
-    ///        the parametrization provides @c invert_seeded (the iterative
-    ///        B-spline curve/surface), so closed-form params fall through to the
-    ///        cold @ref project in the device kernel's seed dispatch.
+    /// Warm-started projection: seed the Newton inverse from @p seed_io (the
+    /// previous foot) and write the converged parameter back. Present only
+    /// when the parametrization provides invert_seeded (iterative B-splines);
+    /// closed-form params fall through to the cold @ref project.
     template <bool Warm = false>
     [[nodiscard]] Pt project_seeded(const Pt& p, Param<tdim>& seed_io, bool has_seed) const
         requires requires(const P& pp, const Pt& pt, Param<tdim>& s, bool b) {
@@ -245,18 +217,13 @@ template <Parametrization P> struct TrimmedEntity {
         if (!inside) { q = trim.clamp(q); }
         return param.eval(q);
     }
-    /// @brief Orthonormal tangent basis at the projection of @p p.
-    /// @param p Query point.
-    /// @return The @c tdim orthonormal tangent columns.
+    /// Orthonormal tangent basis at the projection of @p p.
     [[nodiscard]] std::array<Vec, tdim> tangent_basis(const Pt& p) const
     { return project_frame(p).basis; }
 
-    /// @brief Warm-started tangent basis: seed the (Newton-based) inverse from
-    ///        @p seed_io and write the converged foot back, like @ref
-    ///        project_seeded — so the Newton-step tangent skips the cold
-    ///        coarse-grid solve every sweep. Only present when the parametrization
-    ///        is iterative (B-spline curve/surface); closed-form params fall back
-    ///        to the cold @ref tangent_basis in the kernel's seed dispatch.
+    /// Warm-started tangent basis (cf. @ref project_seeded). Present only for
+    /// iterative parametrizations; closed-form params fall back to the cold
+    /// @ref tangent_basis.
     template <bool Warm = false>
     [[nodiscard]] std::array<Vec, tdim>
       tangent_basis_seeded(const Pt& p, Param<tdim>& seed_io, bool has_seed) const
@@ -271,18 +238,17 @@ template <Parametrization P> struct TrimmedEntity {
     }
 };
 
-/// @brief Interior (free) DOF: intrinsic dimension @c k==D, identity projection.
-/// @tparam D Embedding dimension.
+/// Interior (free) DOF: k==D, identity projection.
 template <int D> struct Free {
     using Pt = PtN<D>;              ///< Point type.
     using Vec = VecN<D>;            ///< Vector type.
     static constexpr int tdim = D;  ///< Tangent dimension equals the embedding dimension.
-    /// @brief Identity projection (a free node moves anywhere).
+    /// Identity projection (a free node moves anywhere).
     [[nodiscard]] Pt project(const Pt& p) const { return p; }
-    /// @brief The full identity tangent basis.
+    /// Full identity tangent basis.
     [[nodiscard]] std::array<Vec, D> tangent_basis(const Pt&) const
     { return identity_columns<D>(); }
-    /// @brief Fused frame: the point itself, identity basis, full @c tdim.
+    /// Fused frame: the point itself, identity basis, full tdim.
     [[nodiscard]] Frame<D, D> project_frame(const Pt& p) const
     { return {.pos = p, .basis = identity_columns<D>(), .eff_tdim = D}; }
 };
@@ -296,7 +262,7 @@ template <int D> struct Free {
 // a trig reparametrization of the circle/ellipse would not be bit-exact.
 // ---------------------------------------------------------------------------
 
-/// @brief A line segment from @f$ (s_x, s_y) @f$ to @f$ (e_x, e_y) @f$, clamped to @f$ [0,1] @f$.
+/// Line segment (sx, sy) -> (ex, ey), clamped to [0, 1].
 struct LineSeg {
     using Pt = PtN<2>;
     using Vec = VecN<2>;
@@ -324,7 +290,7 @@ struct LineSeg {
     [[nodiscard]] Frame<2, 1> project_frame(const Pt& p) const
     { return {.pos = project(p), .basis = {tangent(p)}, .eff_tdim = 1}; }
 };
-/// @brief A circle of radius @p r centred at @f$ (c_x, c_y) @f$; radial projection.
+/// Circle of radius r centred at (cx, cy); radial projection.
 struct Circle {
     using Pt = PtN<2>;
     using Vec = VecN<2>;
@@ -357,7 +323,8 @@ struct Circle {
     [[nodiscard]] Frame<2, 1> project_frame(const Pt& p) const
     { return {.pos = project(p), .basis = {tangent(p)}, .eff_tdim = 1}; }
 };
-/// @brief An axis-aligned ellipse centred at @f$ (c_x, c_y) @f$ with radii @f$ (r_x, r_y) @f$.
+/// Axis-aligned ellipse centred at (cx, cy) with radii (rx, ry);
+/// radial-scaling projection (exact for circles, approximate otherwise).
 struct Ellipse {
     using Pt = PtN<2>;
     using Vec = VecN<2>;
@@ -393,7 +360,8 @@ struct Ellipse {
     { return {.pos = project(p), .basis = {tangent(p)}, .eff_tdim = 1}; }
 };
 
-/// @brief Representative closed-form curve @ref Parametrization that validates the generic stack.
+/// Representative closed-form curve @ref Parametrization validating the
+/// generic stack.
 ///
 /// `LineParam` drives the generic @ref TrimmedEntity pipeline; its `invert`/`eval`
 /// reproduce @ref LineSeg exactly (unclamped @f$ t @f$ from `invert`, @f$ [0,1] @f$
@@ -403,8 +371,7 @@ struct Ellipse {
 struct LineParam {
     static constexpr int edim = 2, idim = 1;
     PtN<2> p0, p1;  ///< Endpoints @f$ P_0 @f$ and @f$ P_1 @f$.
-    /// @brief Foot-of-projection parameter (unclamped; `Trim<1>` does the clamp).
-    /// @param q Query point.
+    /// Foot-of-projection parameter (unclamped; `Trim<1>` does the clamp).
     /// @return @f$ t = (q - P_0)\cdot(P_1 - P_0) / \lVert P_1 - P_0 \rVert^2 @f$.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
     {
@@ -412,12 +379,9 @@ struct LineParam {
         const real ab_sq = dot(ab, ab);
         return {dot(q - p0, ab) / std::fmax(ab_sq, tol::tiny)};
     }
-    /// @brief Evaluate the curve point @f$ P_0 + t(P_1 - P_0) @f$.
-    /// @param t Curve parameter.
-    /// @return The point on the line.
+    /// Evaluate the curve point @f$ P_0 + t(P_1 - P_0) @f$.
     [[nodiscard]] PtN<2> eval(const Param<1>& t) const { return p0 + t[0] * (p1 - p0); }
-    /// @brief The (constant) raw tangent column @f$ P_1 - P_0 @f$.
-    /// @return The single tangent column.
+    /// The (constant) raw tangent column @f$ P_1 - P_0 @f$.
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>&) const { return {p1 - p0}; }
 };
 
@@ -431,15 +395,13 @@ static_assert(Parametrization<LineParam>);
 // does the coarse seed + Newton, and `frame` returns the single C' tangent.
 // ---------------------------------------------------------------------------
 
-/// @brief Seeded-Newton nearest-foot parameter for a curve.
+/// Seeded-Newton nearest-foot parameter for a curve.
 ///
 /// Coarse-samples the curve over @f$ [t_{lo}, t_{hi}] @f$ for a robust seed, then
 /// runs Newton on @f$ f(t) = (C(t) - q)\cdot C'(t) @f$, with
 /// @f$ f'(t) = \lVert C'(t)\rVert^2 + (C(t) - q)\cdot C''(t) @f$. The unclamped
 /// parameter is returned; the entity's `Trim<1>` clamps it onto the live range.
 /// @tparam C Curve type exposing `eval`, `deriv`, and `deriv2` on a `Param<1>`.
-/// @param c The curve.
-/// @param q Query point.
 /// @param t_lo,t_hi Natural parameter domain to seed over.
 /// @param n_seed Number of coarse samples for the seed.
 /// @param iters Newton iterations.
@@ -485,112 +447,112 @@ inline real project_param(
     return project_param_seeded(c, q, t_lo, t_hi, 0.0_r, false, n_seed, iters);
 }
 
-/// @brief A circular arc of radius @p r centred at @f$ (c_x, c_y) @f$, parametrized
-///        by angle; closed-form inverse.
+/// A circular arc of radius @p r centred at @f$ (c_x, c_y) @f$, parametrized
+/// by angle; closed-form inverse.
 struct CircleArcParam {
     static constexpr int edim = 2, idim = 1;
     PtN<2> c;  ///< Centre.
     real r;  ///< Radius.
-    /// @brief Inverse: the polar angle of @p q about the centre.
+    /// Inverse: the polar angle of @p q about the centre.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
     { return {sycl::atan2(q[1] - c[1], q[0] - c[0])}; }
-    /// @brief Evaluate @f$ C + r(\cos t, \sin t) @f$.
+    /// Evaluate @f$ C + r(\cos t, \sin t) @f$.
     [[nodiscard]] PtN<2> eval(const Param<1>& t) const
     { return {c[0] + (r * sycl::cos(t[0])), c[1] + (r * sycl::sin(t[0]))}; }
-    /// @brief The raw tangent column @f$ C'(t) = r(-\sin t, \cos t) @f$.
+    /// The raw tangent column @f$ C'(t) = r(-\sin t, \cos t) @f$.
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& t) const
     { return {VecN<2> {-r * sycl::sin(t[0]), r * sycl::cos(t[0])}}; }
 };
 
-/// @brief A rotated, axis-scaled elliptical arc; nearest foot via Newton.
+/// A rotated, axis-scaled elliptical arc; nearest foot via Newton.
 struct EllipseArcParam {
     static constexpr int edim = 2, idim = 1;
     PtN<2> c;     ///< Centre.
     real a, b;  ///< Semi-axis lengths along the rotated x/y axes.
     real phi;   ///< Rotation of the major axis from +x.
-    /// @brief Evaluate @f$ C + R_\phi (a\cos t, b\sin t) @f$.
+    /// Evaluate @f$ C + R_\phi (a\cos t, b\sin t) @f$.
     [[nodiscard]] PtN<2> eval(const Param<1>& t) const
     {
         const real cp = sycl::cos(phi), sp = sycl::sin(phi);
         const real x = a * sycl::cos(t[0]), y = b * sycl::sin(t[0]);
         return {c[0] + (cp * x) - (sp * y), c[1] + (sp * x) + (cp * y)};
     }
-    /// @brief First derivative @f$ C'(t) = R_\phi (-a\sin t, b\cos t) @f$.
+    /// First derivative @f$ C'(t) = R_\phi (-a\sin t, b\cos t) @f$.
     [[nodiscard]] VecN<2> deriv(const Param<1>& t) const
     {
         const real cp = sycl::cos(phi), sp = sycl::sin(phi);
         const real x = -a * sycl::sin(t[0]), y = b * sycl::cos(t[0]);
         return {(cp * x) - (sp * y), (sp * x) + (cp * y)};
     }
-    /// @brief Second derivative @f$ C''(t) = R_\phi (-a\cos t, -b\sin t) @f$.
+    /// Second derivative @f$ C''(t) = R_\phi (-a\cos t, -b\sin t) @f$.
     [[nodiscard]] VecN<2> deriv2(const Param<1>& t) const
     {
         const real cp = sycl::cos(phi), sp = sycl::sin(phi);
         const real x = -a * sycl::cos(t[0]), y = -b * sycl::sin(t[0]);
         return {(cp * x) - (sp * y), (sp * x) + (cp * y)};
     }
-    /// @brief Inverse: seeded-Newton nearest foot over the full angular range.
+    /// Inverse: seeded-Newton nearest foot over the full angular range.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
     { return {project_param(*this, q, 0.0_r, 2.0_r * std::numbers::pi)}; }
-    /// @brief The raw tangent column @f$ C'(t) @f$.
+    /// The raw tangent column @f$ C'(t) @f$.
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& t) const { return {deriv(t)}; }
 };
 
-/// @brief A quadratic Bézier curve over three control points; nearest foot via Newton.
+/// A quadratic Bézier curve over three control points; nearest foot via Newton.
 struct QuadBezierParam {
     static constexpr int edim = 2, idim = 1;
     std::array<PtN<2>, 3> p;  ///< Control points @f$ P_0, P_1, P_2 @f$.
-    /// @brief Evaluate @f$ (1-t)^2 P_0 + 2(1-t)t P_1 + t^2 P_2 @f$.
+    /// Evaluate @f$ (1-t)^2 P_0 + 2(1-t)t P_1 + t^2 P_2 @f$.
     [[nodiscard]] PtN<2> eval(const Param<1>& t) const
     {
         const real u = 1.0_r - t[0];
         return (u * u) * p[0] + (2.0_r * u * t[0]) * p[1] + (t[0] * t[0]) * p[2];
     }
-    /// @brief First derivative @f$ 2(1-t)(P_1 - P_0) + 2t(P_2 - P_1) @f$.
+    /// First derivative @f$ 2(1-t)(P_1 - P_0) + 2t(P_2 - P_1) @f$.
     [[nodiscard]] VecN<2> deriv(const Param<1>& t) const
     { return (2.0_r * (1.0_r - t[0])) * (p[1] - p[0]) + (2.0_r * t[0]) * (p[2] - p[1]); }
-    /// @brief Second derivative @f$ 2(P_2 - 2P_1 + P_0) @f$ (constant).
+    /// Second derivative @f$ 2(P_2 - 2P_1 + P_0) @f$ (constant).
     [[nodiscard]] VecN<2> deriv2(const Param<1>&) const
     { return 2.0_r * (p[2] - (2.0_r * p[1]) + p[0]); }
-    /// @brief Inverse: seeded-Newton nearest foot over @f$ [0,1] @f$.
+    /// Inverse: seeded-Newton nearest foot over @f$ [0,1] @f$.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
     { return {project_param(*this, q, 0.0_r, 1.0_r)}; }
-    /// @brief The raw tangent column @f$ C'(t) @f$.
+    /// The raw tangent column @f$ C'(t) @f$.
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& t) const { return {deriv(t)}; }
 };
 
-/// @brief A cubic Bézier curve over four control points; nearest foot via Newton.
+/// A cubic Bézier curve over four control points; nearest foot via Newton.
 struct CubicBezierParam {
     static constexpr int edim = 2, idim = 1;
     std::array<PtN<2>, 4> p;  ///< Control points @f$ P_0 \dots P_3 @f$.
-    /// @brief Evaluate the Bernstein form @f$ \sum_i B_i^3(t) P_i @f$.
+    /// Evaluate the Bernstein form @f$ \sum_i B_i^3(t) P_i @f$.
     [[nodiscard]] PtN<2> eval(const Param<1>& t) const
     {
         const real u = 1.0_r - t[0], tt = t[0];
         return (u * u * u) * p[0] + (3.0_r * u * u * tt) * p[1] + (3.0_r * u * tt * tt) * p[2] +
                (tt * tt * tt) * p[3];
     }
-    /// @brief First derivative @f$ 3\sum_i B_i^2(t)(P_{i+1} - P_i) @f$.
+    /// First derivative @f$ 3\sum_i B_i^2(t)(P_{i+1} - P_i) @f$.
     [[nodiscard]] VecN<2> deriv(const Param<1>& t) const
     {
         const real u = 1.0_r - t[0], tt = t[0];
         return (3.0_r * u * u) * (p[1] - p[0]) + (6.0_r * u * tt) * (p[2] - p[1]) +
                (3.0_r * tt * tt) * (p[3] - p[2]);
     }
-    /// @brief Second derivative @f$ 6\big((1-t)(P_2 - 2P_1 + P_0) + t(P_3 - 2P_2 + P_1)\big) @f$.
+    /// Second derivative @f$ 6\big((1-t)(P_2 - 2P_1 + P_0) + t(P_3 - 2P_2 + P_1)\big) @f$.
     [[nodiscard]] VecN<2> deriv2(const Param<1>& t) const
     {
         const real u = 1.0_r - t[0], tt = t[0];
         return (6.0_r * u) * (p[2] - (2.0_r * p[1]) + p[0]) + (6.0_r * tt) * (p[3] - (2.0_r * p[2]) + p[1]);
     }
-    /// @brief Inverse: seeded-Newton nearest foot over @f$ [0,1] @f$.
+    /// Inverse: seeded-Newton nearest foot over @f$ [0,1] @f$.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
     { return {project_param(*this, q, 0.0_r, 1.0_r)}; }
-    /// @brief The raw tangent column @f$ C'(t) @f$.
+    /// The raw tangent column @f$ C'(t) @f$.
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& t) const { return {deriv(t)}; }
 };
 
-/// @brief Largest B-spline *surface* degree the fixed-size de Boor work arrays support.
+/// Largest B-spline *surface* degree the fixed-size de Boor work arrays support.
 ///
 /// Sizes the surface de Boor work arrays (`ndu`, `du`, `dv`, the `A*/w*` sums).
 /// Defaulted to 3 (bicubic — the de-facto CAD NURBS surface standard, covering
@@ -604,10 +566,10 @@ struct CubicBezierParam {
 #define EGG_MAX_BSPLINE_DEGREE 3
 #endif
 inline constexpr int kMaxBSplineDegree = EGG_MAX_BSPLINE_DEGREE;
-/// @brief Leading dimension of the *surface* de Boor work arrays.
+/// Leading dimension of the *surface* de Boor work arrays.
 inline constexpr int kBSplineCap = kMaxBSplineDegree + 1;
 
-/// @brief Largest B-spline *curve* degree the de Boor work arrays support.
+/// Largest B-spline *curve* degree the de Boor work arrays support.
 ///
 /// Decoupled from @ref kMaxBSplineDegree: 2D profile/trim curves (and curve
 /// sub-segments nested in composites) routinely exceed degree 3 — e.g. a degree-4
@@ -620,15 +582,15 @@ inline constexpr int kBSplineCap = kMaxBSplineDegree + 1;
 #define EGG_MAX_BSPLINE_CURVE_DEGREE 7
 #endif
 inline constexpr int kMaxBSplineCurveDegree = EGG_MAX_BSPLINE_CURVE_DEGREE;
-/// @brief Leading dimension of the *curve* de Boor work arrays.
+/// Leading dimension of the *curve* de Boor work arrays.
 inline constexpr int kBSplineCurveCap = kMaxBSplineCurveDegree + 1;
 
-/// @brief Host-side guard: reject a B-spline whose degree exceeds the compiled
-///        @p cap before it can index the fixed de Boor work arrays out of bounds
-///        on the device. Throws with an actionable message. Host-only — called
-///        from the `load_into` encoders (and the composite encoder), never from
-///        device code. Pass @ref kMaxBSplineDegree for surfaces and
-///        @ref kMaxBSplineCurveDegree for curves.
+/// Host-side guard: reject a B-spline whose degree exceeds the compiled
+/// @p cap before it can index the fixed de Boor work arrays out of bounds
+/// on the device. Throws with an actionable message. Host-only — called
+/// from the `load_into` encoders (and the composite encoder), never from
+/// device code. Pass @ref kMaxBSplineDegree for surfaces and
+/// @ref kMaxBSplineCurveDegree for curves.
 inline void bspline_degree_guard(int degree, const char* what, int cap)
 {
     if (degree > cap) {
@@ -639,7 +601,7 @@ inline void bspline_degree_guard(int degree, const char* what, int cap)
     }
 }
 
-/// @brief Index of the knot span containing @p u (clamped to the live domain).
+/// Index of the knot span containing @p u (clamped to the live domain).
 /// @param degree Basis degree @f$ p @f$.
 /// @param n_ctrl Number of control points along this direction.
 /// @param knots Knot vector, length @c n_ctrl+degree+1, non-decreasing.
@@ -663,7 +625,7 @@ inline int bspline_find_span(int degree, int n_ctrl, std::span<const real> knots
     return mid;
 }
 
-/// @brief Nonzero basis functions and their derivatives at @p u (NURBS book A2.3).
+/// Nonzero basis functions and their derivatives at @p u (NURBS book A2.3).
 ///
 /// Written once at "one parametric direction" arity: the curve uses it directly
 /// and the tensor-product surface calls it per direction.
@@ -729,7 +691,7 @@ inline void bspline_basis_ders(
     }
 }
 
-/// @brief Compile-time-`nd` de Boor basis-and-derivatives (F2 Lever A).
+/// Compile-time-`nd` de Boor basis-and-derivatives (F2 Lever A).
 ///
 /// Identical to the runtime @ref bspline_basis_ders for `nd == ND`, but the
 /// derivative-order bound `ND` is a template parameter so `if constexpr (ND>=1)`
@@ -796,7 +758,7 @@ inline void bspline_basis_ders(
     }
 }
 
-/// @brief A B-spline / NURBS curve over a knot vector and a flat control net.
+/// A B-spline / NURBS curve over a knot vector and a flat control net.
 ///
 /// The control points, knots, and (optional) weights live in spans over a
 /// device arena (never owned), so the type stays trivially copyable. Evaluation
@@ -813,10 +775,10 @@ struct BSplineCurveParam {
     std::span<const real> ctrl;     ///< Control points, length @c 2*n_ctrl (x,y interleaved).
     std::span<const real> weights;  ///< NURBS weights, length @c n_ctrl, or empty (polynomial).
 
-    /// @brief Control point @p i as a 2D point.
+    /// Control point @p i as a 2D point.
     [[nodiscard]] PtN<2> cp(int i) const { return {ctrl[2 * i], ctrl[(2 * i) + 1]}; }
 
-    /// @brief The @p order-th derivative point at @p u (order 0 = the curve point).
+    /// The @p order-th derivative point at @p u (order 0 = the curve point).
     [[nodiscard]] PtN<2> point_at(real u, int order) const
     {
         const int span = bspline_find_span(degree, n_ctrl, knots, u);
@@ -849,29 +811,29 @@ struct BSplineCurveParam {
         return C[order];
     }
 
-    /// @brief Evaluate the curve point @f$ C(u) @f$.
+    /// Evaluate the curve point @f$ C(u) @f$.
     [[nodiscard]] PtN<2> eval(const Param<1>& u) const { return point_at(u[0], 0); }
-    /// @brief First derivative @f$ C'(u) @f$.
+    /// First derivative @f$ C'(u) @f$.
     [[nodiscard]] VecN<2> deriv(const Param<1>& u) const { return point_at(u[0], 1); }
-    /// @brief Second derivative @f$ C''(u) @f$.
+    /// Second derivative @f$ C''(u) @f$.
     [[nodiscard]] VecN<2> deriv2(const Param<1>& u) const { return point_at(u[0], 2); }
-    /// @brief Inverse: seeded-Newton nearest foot over the live domain
-    ///        @f$ [knots[degree], knots[n\_ctrl]] @f$.
+    /// Inverse: seeded-Newton nearest foot over the live domain
+    /// @f$ [knots[degree], knots[n\_ctrl]] @f$.
     [[nodiscard]] Param<1> invert(const PtN<2>& q) const
     { return {project_param(*this, q, knots[degree], knots[n_ctrl])}; }
-    /// @brief Warm-started inverse: skip the coarse seed when @p has_seed. The
-    ///        @p Warm flag (the 3D surface cold/warm two-kernel split) is accepted
-    ///        for a uniform `project_seeded`/`tangent_basis_seeded` interface; the
-    ///        2D curve solve is already light, so it takes the same path either way.
+    /// Warm-started inverse: skip the coarse seed when @p has_seed. The
+    /// @p Warm flag (the 3D surface cold/warm two-kernel split) is accepted
+    /// for a uniform `project_seeded`/`tangent_basis_seeded` interface; the
+    /// 2D curve solve is already light, so it takes the same path either way.
     template <bool Warm = false>
     [[nodiscard]] Param<1> invert_seeded(const PtN<2>& q, Param<1> seed, bool has_seed) const
     { return {project_param_seeded(*this, q, knots[degree], knots[n_ctrl], seed[0], has_seed)}; }
-    /// @brief The raw tangent column @f$ C'(u) @f$.
+    /// The raw tangent column @f$ C'(u) @f$.
     [[nodiscard]] std::array<VecN<2>, 1> frame(const Param<1>& u) const { return {deriv(u)}; }
 };
 
-/// @brief A composite path: an ordered sequence of curve segments joined
-///        end-to-end (the 2D analogue of an OCCT wire).
+/// A composite path: an ordered sequence of curve segments joined
+/// end-to-end (the 2D analogue of an OCCT wire).
 ///
 /// The segments live as fixed-size records in the per-group arena
 /// (@ref kCompositeRecSize doubles each: `[tag, params...]`), so the type stays
@@ -889,13 +851,12 @@ struct CompositePath {
     std::span<const real> recs;   ///< Segment records, @c n_segs*kCompositeRecSize doubles.
     const real* arena;            ///< Arena base for span-backed segments (B-splines).
 
-    /// @brief Fused frame of the nearest segment to @p p.
-    /// @param p Query point.
+    /// Fused frame of the nearest segment to @p p.
     /// @return The nearest segment's projected point and unit tangent; @c eff_tdim is 1.
     [[nodiscard]] Frame<2, 1> project_frame(const Pt& p) const;  // defined after make_entity
-    /// @brief Project @p p onto the nearest segment.
+    /// Project @p p onto the nearest segment.
     [[nodiscard]] Pt project(const Pt& p) const { return project_frame(p).pos; }
-    /// @brief The matched segment's unit tangent column.
+    /// The matched segment's unit tangent column.
     [[nodiscard]] std::array<Vec, 1> tangent_basis(const Pt& p) const
     { return project_frame(p).basis; }
 };
@@ -909,7 +870,7 @@ struct CompositePath {
 // within kParamPad.
 // ---------------------------------------------------------------------------
 
-/// @brief Cross product of two 3-vectors.
+/// Cross product of two 3-vectors.
 inline VecN<3> cross3(const VecN<3>& a, const VecN<3>& b)
 {
     return {(a[1] * b[2]) - (a[2] * b[1]),
@@ -917,44 +878,44 @@ inline VecN<3> cross3(const VecN<3>& a, const VecN<3>& b)
             (a[0] * b[1]) - (a[1] * b[0])};
 }
 
-/// @brief A plane through @c o spanned by the orthonormal axes @c ax, @c ay.
+/// A plane through @c o spanned by the orthonormal axes @c ax, @c ay.
 struct PlaneParam {
     static constexpr int edim = 3, idim = 2;
     PtN<3> o;        ///< Origin.
     VecN<3> ax, ay;  ///< Orthonormal in-plane axes.
-    /// @brief Inverse: the in-plane coordinates of @p p.
+    /// Inverse: the in-plane coordinates of @p p.
     [[nodiscard]] Param<2> invert(const PtN<3>& p) const
     {
         const VecN<3> d = p - o;
         return {dot(d, ax), dot(d, ay)};
     }
-    /// @brief Evaluate @f$ O + u\,a_x + v\,a_y @f$.
+    /// Evaluate @f$ O + u\,a_x + v\,a_y @f$.
     [[nodiscard]] PtN<3> eval(const Param<2>& q) const { return o + q[0] * ax + q[1] * ay; }
-    /// @brief The constant tangent columns @f$ \{a_x, a_y\} @f$.
+    /// The constant tangent columns @f$ \{a_x, a_y\} @f$.
     [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>&) const { return {ax, ay}; }
 };
 
-/// @brief A sphere of radius @c r centred at @c c with orthonormal frame
-///        @c (ax, ay, az); chart @f$ (u, v) @f$ = (azimuth, latitude).
+/// A sphere of radius @c r centred at @c c with orthonormal frame
+/// @c (ax, ay, az); chart @f$ (u, v) @f$ = (azimuth, latitude).
 struct SphereParam {
     static constexpr int edim = 3, idim = 2;
     PtN<3> c;            ///< Centre.
     VecN<3> ax, ay, az;  ///< Orthonormal frame.
     real r;            ///< Radius.
-    /// @brief Inverse: azimuth/latitude of the radial direction of @p p.
+    /// Inverse: azimuth/latitude of the radial direction of @p p.
     [[nodiscard]] Param<2> invert(const PtN<3>& p) const
     {
         const VecN<3> m = normalize(p - c);
         return {sycl::atan2(dot(m, ay), dot(m, ax)), sycl::asin(std::clamp(dot(m, az), -1.0_r, 1.0_r))};
     }
-    /// @brief Evaluate @f$ C + r(\cos v\cos u\,a_x + \cos v\sin u\,a_y + \sin v\,a_z) @f$.
+    /// Evaluate @f$ C + r(\cos v\cos u\,a_x + \cos v\sin u\,a_y + \sin v\,a_z) @f$.
     [[nodiscard]] PtN<3> eval(const Param<2>& q) const
     {
         const real cu = sycl::cos(q[0]), su = sycl::sin(q[0]);
         const real cv = sycl::cos(q[1]), sv = sycl::sin(q[1]);
         return c + r * (cv * cu * ax + cv * su * ay + sv * az);
     }
-    /// @brief The raw tangent columns @f$ \partial S/\partial u, \partial S/\partial v @f$.
+    /// The raw tangent columns @f$ \partial S/\partial u, \partial S/\partial v @f$.
     [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
     {
         const real cu = sycl::cos(q[0]), su = sycl::sin(q[0]);
@@ -963,44 +924,44 @@ struct SphereParam {
     }
 };
 
-/// @brief A right circular cylinder: axis @c az through @c o, radius @c r;
-///        chart @f$ (u, v) @f$ = (angle about the axis, height along it).
+/// A right circular cylinder: axis @c az through @c o, radius @c r;
+/// chart @f$ (u, v) @f$ = (angle about the axis, height along it).
 struct CylinderParam {
     static constexpr int edim = 3, idim = 2;
     PtN<3> o;            ///< A point on the axis.
     VecN<3> ax, ay, az;  ///< Orthonormal frame; @c az is the axis.
     real r;            ///< Radius.
-    /// @brief Inverse: angle about the axis and height along it.
+    /// Inverse: angle about the axis and height along it.
     [[nodiscard]] Param<2> invert(const PtN<3>& p) const
     {
         const VecN<3> d = p - o;
         return {sycl::atan2(dot(d, ay), dot(d, ax)), dot(d, az)};
     }
-    /// @brief Evaluate @f$ O + r(\cos u\,a_x + \sin u\,a_y) + v\,a_z @f$.
+    /// Evaluate @f$ O + r(\cos u\,a_x + \sin u\,a_y) + v\,a_z @f$.
     [[nodiscard]] PtN<3> eval(const Param<2>& q) const
     { return o + r * (sycl::cos(q[0]) * ax + sycl::sin(q[0]) * ay) + q[1] * az; }
-    /// @brief The raw tangent columns.
+    /// The raw tangent columns.
     [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
     { return {r * (-sycl::sin(q[0]) * ax + sycl::cos(q[0]) * ay), az}; }
 };
 
-/// @brief A 3D line through @c p0 and @c p1 (an edge curve, tdim==1).
+/// A 3D line through @c p0 and @c p1 (an edge curve, tdim==1).
 struct Line3Param {
     static constexpr int edim = 3, idim = 1;
     PtN<3> p0, p1;  ///< Endpoints.
-    /// @brief Foot-of-projection parameter (unclamped; `Trim<1>` clamps).
+    /// Foot-of-projection parameter (unclamped; `Trim<1>` clamps).
     [[nodiscard]] Param<1> invert(const PtN<3>& q) const
     {
         const VecN<3> ab = p1 - p0;
         return {dot(q - p0, ab) / std::fmax(dot(ab, ab), tol::tiny)};
     }
-    /// @brief Evaluate @f$ P_0 + t(P_1 - P_0) @f$.
+    /// Evaluate @f$ P_0 + t(P_1 - P_0) @f$.
     [[nodiscard]] PtN<3> eval(const Param<1>& t) const { return p0 + t[0] * (p1 - p0); }
-    /// @brief The (constant) raw tangent column.
+    /// The (constant) raw tangent column.
     [[nodiscard]] std::array<VecN<3>, 1> frame(const Param<1>&) const { return {p1 - p0}; }
 };
 
-/// @brief A tensor-product B-spline / NURBS surface @f$ S(u,v) @f$ embedded in 3D.
+/// A tensor-product B-spline / NURBS surface @f$ S(u,v) @f$ embedded in 3D.
 ///
 /// Knots, the control net, and (optional) weights live in spans over a device
 /// arena (never owned). The control net is row-major over @f$ (i_u, i_v) @f$
@@ -1020,31 +981,31 @@ struct BSplineSurfaceParam {
     std::span<const real> ctrl;     ///< Control net, length @c 3*nu*nv (xyz interleaved).
     std::span<const real> weights;  ///< NURBS weights, length @c nu*nv, or empty.
 
-    /// @brief Control point @f$ P_{i_u, i_v} @f$.
+    /// Control point @f$ P_{i_u, i_v} @f$.
     [[nodiscard]] PtN<3> cp(int iu, int iv) const
     {
         const int b = 3 * ((iu * nv) + iv);
         return {ctrl[b], ctrl[b + 1], ctrl[b + 2]};
     }
 
-    /// @brief The (at most) six surface partials the callers actually consume:
-    ///        @f$ S, S_u, S_v, S_{uu}, S_{vv}, S_{uv} @f$. `nd` selects how many
-    ///        are valid — `nd=0`→`S00`; `nd=1`→ adds `S10,S01`; `nd=2`→ adds
-    ///        `S11,S20,S02`. `nd=1` (no second-order trio) is the **warm**
-    ///        projection's Gauss-Newton path (@ref newton_foot, the steady-state
-    ///        hot path) and @ref frame; `nd=2` is the **cold** exact-Newton path
-    ///        (first sweep / far queries, not register-critical).
+    /// The (at most) six surface partials the callers actually consume:
+    /// @f$ S, S_u, S_v, S_{uu}, S_{vv}, S_{uv} @f$. `nd` selects how many
+    /// are valid — `nd=0`→`S00`; `nd=1`→ adds `S10,S01`; `nd=2`→ adds
+    /// `S11,S20,S02`. `nd=1` (no second-order trio) is the **warm**
+    /// projection's Gauss-Newton path (@ref newton_foot, the steady-state
+    /// hot path) and @ref frame; `nd=2` is the **cold** exact-Newton path
+    /// (first sweep / far queries, not register-critical).
     struct SurfDers {
         PtN<3> S00 {}, S10 {}, S01 {}, S20 {}, S02 {}, S11 {};
     };
 
-    /// @brief Fused evaluation of just the @ref SurfDers partials.
+    /// Fused evaluation of just the @ref SurfDers partials.
     ///
     /// Flat accumulation: only the homogeneous sums for the six consumed partials
     /// (no full `A[3][3]`/`w[3][3]`/`S[3][3]` grid — that 9-entry nd=2 machinery
     /// was the boundary kernel's 256-VGPR pin). The bivariate quotient rule
     /// (rational case) and the unweighted pass-through are applied inline.
-    /// @brief Compile-time-`nd` fused @ref SurfDers evaluation (F2 Lever A).
+    /// Compile-time-`nd` fused @ref SurfDers evaluation (F2 Lever A).
     ///
     /// Identical numerically to the runtime @ref ders for `nd == ND`, but with
     /// `ND` static `if constexpr` elides the nd≥1 / nd≥2 homogeneous-sum rows
@@ -1122,17 +1083,17 @@ struct BSplineSurfaceParam {
         return S;
     }
 
-    /// @brief Evaluate the surface point @f$ S(u, v) @f$.
+    /// Evaluate the surface point @f$ S(u, v) @f$.
     [[nodiscard]] PtN<3> eval(const Param<2>& q) const { return ders_nd<0>(q).S00; }
 
-    /// @brief The raw tangent columns @f$ \{S_u, S_v\} @f$.
+    /// The raw tangent columns @f$ \{S_u, S_v\} @f$.
     [[nodiscard]] std::array<VecN<3>, 2> frame(const Param<2>& q) const
     {
         const SurfDers S = ders_nd<1>(q);
         return {S.S10, S.S01};
     }
 
-    /// @brief Inverse: coarse-grid-seeded Newton on the nearest-foot stationarity.
+    /// Inverse: coarse-grid-seeded Newton on the nearest-foot stationarity.
     ///
     /// Seeds from an 8×8 sample of the live domain, then iterates Newton on
     /// @f$ F = ((S-p)\cdot S_u, (S-p)\cdot S_v) @f$ with the exact Jacobian
@@ -1141,12 +1102,12 @@ struct BSplineSurfaceParam {
     __attribute__((noinline)) [[nodiscard]] Param<2> invert(const PtN<3>& p) const
     { return invert_seeded(p, {}, false); }
 
-    /// @brief Newton iteration on the nearest-foot stationarity
-    ///        @f$ F = ((S-p)\cdot S_u, (S-p)\cdot S_v) = 0 @f$ from start @p q,
-    ///        clamping each iterate to the domain and stopping once the (clamped)
-    ///        iterate stops moving (`|Δq| < 1e-9`; quadratic convergence ⇒ ~1e-18
-    ///        foot error). A near-singular Jacobian (a degenerate corner / cusp)
-    ///        stops early.
+    /// Newton iteration on the nearest-foot stationarity
+    /// @f$ F = ((S-p)\cdot S_u, (S-p)\cdot S_v) = 0 @f$ from start @p q,
+    /// clamping each iterate to the domain and stopping once the (clamped)
+    /// iterate stops moving (`|Δq| < 1e-9`; quadratic convergence ⇒ ~1e-18
+    /// foot error). A near-singular Jacobian (a degenerate corner / cusp)
+    /// stops early.
     ///
     /// @tparam Exact selects the Jacobian (W6):
     ///   - `true`  → the **exact** Newton Jacobian, including the curvature terms
@@ -1197,7 +1158,7 @@ struct BSplineSurfaceParam {
         return q;
     }
 
-    /// @brief Warm-started inverse.
+    /// Warm-started inverse.
     ///
     /// @tparam Warm selects the cold/warm two-kernel split (the boundary sweep
     ///   runs a *cold* projection pass once at startup, then a lean *warm* kernel
@@ -1267,30 +1228,22 @@ static_assert(GeometryEntity<Free<2>> && GeometryEntity<LineSeg> && GeometryEnti
 
 // --- The closed 2D entity set --------------------------------------------------
 //
-// The per-DOF entity variant (`EntityKind<D>` / `std::variant<…>`) was retired in
-// Phase 4: no value-level variant is materialized anywhere. The closed set now
-// lives as (a) the `static_assert(GeometryEntity<…>)` block above (every type
-// models the entity interface), (b) the `dispatch_entity_type<2>` switch arms,
-// and (c) the `decode_entity_fn<E>` / `EntitySoA<E>` specializations — all three
-// must list the same types, which a missing specialization fails to compile.
+// No value-level entity variant exists. The closed set lives as (a) the
+// static_assert(GeometryEntity<...>) block above, (b) the
+// dispatch_entity_type<2> switch arms, and (c) the decode_entity_fn<E> /
+// EntitySoA<E> specializations — all three must list the same types; a
+// missing specialization fails to compile.
 
 // ---------------------------------------------------------------------------
-// decode_entity<E>: the per-type positional blob decoder (single source).
-//
-// Each make_entity arm is split into a decode_entity_fn<E> specialization that
-// builds a concrete typed E from the positional (params, arena) blob. This is
-// the ONE place the untyped `params` pointer is read per type; make_entity
-// delegates to it (single source), and the Phase 1a monomorphic sweep kernel
-// calls decode_entity<E> directly — no variant, no make_entity on the device
-// hot path. Variable-length entities (B-spline net/knots, composite records)
-// keep their data in `arena` and store only offsets/counts in `params`;
-// fixed-size entities ignore `arena`.
-//
-// Selected via dispatch_entity_type<D>(tag, [&]<class E>{ decode_entity<E>(...); }),
-// so even the cold oracle/test paths never materialize a variant (Phase 4).
+// decode_entity<E>: the per-type positional blob decoder — the ONE place the
+// untyped `params` pointer is read per type. Variable-length entities
+// (B-spline net/knots, composite records) keep their data in `arena` and
+// store only offsets/counts in `params`; fixed-size entities ignore `arena`.
+// Selected via dispatch_entity_type<D>(tag, [&]<class E>{ ... }), so even the
+// cold oracle/test paths never materialize a variant.
 // ---------------------------------------------------------------------------
 
-/// @brief Per-type positional blob decoder trait. Specialize per entity type @p E.
+/// Per-type positional blob decoder trait. Specialize per entity type @p E.
 /// @tparam E The entity type to decode into.
 template <class E> struct decode_entity_fn;  // primary undefined
 
@@ -1458,7 +1411,7 @@ template <> struct decode_entity_fn<TrimmedEntity<BSplineSurfaceParam>> {
     }
 };
 
-/// @brief Build a typed entity @p E from its positional blob (single source).
+/// Build a typed entity @p E from its positional blob (single source).
 ///
 /// This is the per-type builder that replaces the make_entity arms: it reads the
 /// untyped `params` pointer ONCE per type and returns a concrete `E`. Variable-
@@ -1468,19 +1421,17 @@ template <> struct decode_entity_fn<TrimmedEntity<BSplineSurfaceParam>> {
 /// @param params Flat parameter blob (`kParamPad` doubles per DOF).
 /// @param arena Base of the per-group real arena for span-backed entities, or
 ///              nullptr when no variable-length entity is in play.
-/// @return The typed entity.
 template <class E>
 [[nodiscard]] inline E decode_entity(const real* params, const real* arena = nullptr)
 {
     return decode_entity_fn<E>::apply(params, arena);
 }
 
-// The per-DOF entity variant (`make_entity` returning `EntityKind<D>`) was
-// retired in Phase 4. Every call site now selects the concrete entity type via
-// `dispatch_entity_type<D>(tag, f)` and builds it with `decode_entity<E>` (cold
-// blob/oracle paths) or `EntitySoA<E>::load` (the device sweep) — no variant is
-// ever materialized. CompositePath::project_frame is defined below
-// dispatch_entity_type (it builds each segment the same way).
+// There is no per-DOF entity variant: every call site selects the concrete
+// entity type via dispatch_entity_type<D>(tag, f) and builds it with
+// decode_entity<E> (cold blob/oracle paths) or EntitySoA<E>::load (the device
+// sweep). CompositePath::project_frame is defined below dispatch_entity_type
+// (it builds each segment the same way).
 
 // ===========================================================================
 // Data-oriented entity registry.
@@ -1513,7 +1464,7 @@ static_assert(to_int(EntityTag::Cylinder) == TAG_CYLINDER);
 static_assert(to_int(EntityTag::Line3) == TAG_LINE3);
 static_assert(to_int(EntityTag::BSplineSurface) == TAG_BSPLINESURF);
 
-/// @brief SoA schema for the interior (free) DOF: no per-entity fields.
+/// SoA schema for the interior (free) DOF: no per-entity fields.
 ///
 /// A free node carries no geometry, so its storage is a bare count and its
 /// device builder reconstructs a default `Free<D>`. The `View` is an empty
@@ -1534,11 +1485,11 @@ template <int D> struct EntitySoA<Free<D>> {
         SoAView<const real> records{nullptr, 0, 0};  ///< Empty (no fields).
         SegmentedView<real> seg[kMaxSoASeg]{};       ///< Null (no segmented fields).
     };
-    /// @brief Reconstruct the (field-less) free entity.
+    /// Reconstruct the (field-less) free entity.
     [[nodiscard]] static Free<D> load(const View&, std::size_t) { return Free<D> {}; }
-    /// @brief Scatter a free entity into the host (no-op: no fields).
+    /// Scatter a free entity into the host (no-op: no fields).
     static void load_into(Host&, std::size_t, const Free<D>&) {}
-    /// @brief Construct the typed View from the generic partition slots.
+    /// Construct the typed View from the generic partition slots.
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
     { return View{.records = soa}; }
 };
@@ -1546,7 +1497,7 @@ template <int D> struct EntitySoA<Free<D>> {
 static_assert(HasEntitySoA<Free<2>>);
 
 // ---------------------------------------------------------------------------
-// Fixed-size 2D entity SoA specializations (Phase 1b-A, uniformized Phase 2-A).
+// Fixed-size 2D entity SoA specializations.
 //
 // Each is a packed contiguous record store: one flat `real[count*kFields]`
 // per partition, stride `kFields` per entity — the layout that matches the
@@ -1557,13 +1508,13 @@ static_assert(HasEntitySoA<Free<2>>);
 // designated initializers (matching make_entity's style). `bool` trim fields
 // are stored as `0.0`/`1.0` reals on the wire and reconstituted via `!= 0.0`.
 //
-// Phase 2-A uniformized all specializations to the same Host/View shape with
-// segmented slots (kSeg == 0 for fixed-size — `seg` vectors/views are empty/
-// null), `load_into(Host&, i, const E&)`, and `tie_view`. This makes the ctor
-// and kernel code fully generic across fixed-size and segmented types.
+// All specializations share the same Host/View shape with segmented slots
+// (kSeg == 0 for fixed-size — seg vectors/views empty/null), load_into, and
+// tie_view, keeping the ctor and kernel code generic across fixed-size and
+// segmented types.
 // ---------------------------------------------------------------------------
 
-/// @brief SoA schema for @ref LineSeg: packed `(sx, sy, ex, ey)` records.
+/// SoA schema for @ref LineSeg: packed `(sx, sy, ex, ey)` records.
 template <> struct EntitySoA<LineSeg> {
     static constexpr EntityTag tag = EntityTag::LineSeg;
     static constexpr int kFields = 4;
@@ -1593,7 +1544,7 @@ template <> struct EntitySoA<LineSeg> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for @ref Circle: packed `(cx, cy, r)` records.
+/// SoA schema for @ref Circle: packed `(cx, cy, r)` records.
 template <> struct EntitySoA<Circle> {
     static constexpr EntityTag tag = EntityTag::Circle;
     static constexpr int kFields = 3;
@@ -1621,7 +1572,7 @@ template <> struct EntitySoA<Circle> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for @ref Ellipse: packed `(cx, cy, rx, ry)` records.
+/// SoA schema for @ref Ellipse: packed `(cx, cy, rx, ry)` records.
 template <> struct EntitySoA<Ellipse> {
     static constexpr EntityTag tag = EntityTag::Ellipse;
     static constexpr int kFields = 4;
@@ -1651,8 +1602,8 @@ template <> struct EntitySoA<Ellipse> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for `TrimmedEntity<CircleArcParam>`:
-///        packed `(cx, cy, r, t0, t1, closed)` records.
+/// SoA schema for `TrimmedEntity<CircleArcParam>`:
+/// packed `(cx, cy, r, t0, t1, closed)` records.
 template <> struct EntitySoA<TrimmedEntity<CircleArcParam>> {
     static constexpr EntityTag tag = EntityTag::CircleArc;
     static constexpr int kFields = 6;
@@ -1684,8 +1635,8 @@ template <> struct EntitySoA<TrimmedEntity<CircleArcParam>> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for `TrimmedEntity<EllipseArcParam>`:
-///        packed `(cx, cy, a, b, phi, t0, t1, closed)` records.
+/// SoA schema for `TrimmedEntity<EllipseArcParam>`:
+/// packed `(cx, cy, a, b, phi, t0, t1, closed)` records.
 template <> struct EntitySoA<TrimmedEntity<EllipseArcParam>> {
     static constexpr EntityTag tag = EntityTag::EllipseArc;
     static constexpr int kFields = 8;
@@ -1719,8 +1670,8 @@ template <> struct EntitySoA<TrimmedEntity<EllipseArcParam>> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for `TrimmedEntity<QuadBezierParam>`:
-///        packed `(P0x, P0y, P1x, P1y, P2x, P2y, t0, t1)` records.
+/// SoA schema for `TrimmedEntity<QuadBezierParam>`:
+/// packed `(P0x, P0y, P1x, P1y, P2x, P2y, t0, t1)` records.
 template <> struct EntitySoA<TrimmedEntity<QuadBezierParam>> {
     static constexpr EntityTag tag = EntityTag::QuadBezier;
     static constexpr int kFields = 8;
@@ -1755,8 +1706,8 @@ template <> struct EntitySoA<TrimmedEntity<QuadBezierParam>> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for `TrimmedEntity<CubicBezierParam>`:
-///        packed `(P0x, P0y, P1x, P1y, P2x, P2y, P3x, P3y, t0, t1)` records.
+/// SoA schema for `TrimmedEntity<CubicBezierParam>`:
+/// packed `(P0x, P0y, P1x, P1y, P2x, P2y, P3x, P3y, t0, t1)` records.
 template <> struct EntitySoA<TrimmedEntity<CubicBezierParam>> {
     static constexpr EntityTag tag = EntityTag::CubicBezier;
     static constexpr int kFields = 10;
@@ -1803,7 +1754,7 @@ static_assert(HasEntitySoA<TrimmedEntity<QuadBezierParam>>);
 static_assert(HasEntitySoA<TrimmedEntity<CubicBezierParam>>);
 
 // ---------------------------------------------------------------------------
-// Segmented 2D entity SoA specialization (Phase 2-A).
+// Segmented 2D entity SoA specialization.
 //
 // The B-spline curve carries variable-length data (knot vector + control net)
 // that the packed-record layout cannot hold. The scalar fields (degree,
@@ -1817,10 +1768,10 @@ static_assert(HasEntitySoA<TrimmedEntity<CubicBezierParam>>);
 // golden tests gate correctness.
 // ---------------------------------------------------------------------------
 
-/// @brief SoA schema for `TrimmedEntity<BSplineCurveParam>`:
-///        packed `(degree, n_ctrl, t0, t1, closed, has_w)` records + up to 3
-///        segmented CSR fields (knots, ctrl, weights). The `has_w` flag selects
-///        the rational form; `weights` is present only when `has_w != 0`.
+/// SoA schema for `TrimmedEntity<BSplineCurveParam>`:
+/// packed `(degree, n_ctrl, t0, t1, closed, has_w)` records + up to 3
+/// segmented CSR fields (knots, ctrl, weights). The `has_w` flag selects
+/// the rational form; `weights` is present only when `has_w != 0`.
 template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
     static constexpr EntityTag tag = EntityTag::BSpline;
     static constexpr int kFields = 6;
@@ -1883,7 +1834,7 @@ template <> struct EntitySoA<TrimmedEntity<BSplineCurveParam>> {
 static_assert(HasEntitySoA<TrimmedEntity<BSplineCurveParam>>);
 
 // ---------------------------------------------------------------------------
-// Composite-path SoA specialization (Phase 3; nested arena added later).
+// Composite-path SoA specialization.
 //
 // A composite owns a single self-contained arena slice — the same positional
 // layout the global blob/oracle path uses, but per-composite: any
@@ -1904,9 +1855,9 @@ static_assert(HasEntitySoA<TrimmedEntity<BSplineCurveParam>>);
 // construction).
 // ---------------------------------------------------------------------------
 
-/// @brief SoA schema for `CompositePath`: packed `(n_segs, rec_off)` + one
-///        segmented CSR slot holding the per-composite self-contained arena
-///        slice (`[sub-segment data | segment records]`).
+/// SoA schema for `CompositePath`: packed `(n_segs, rec_off)` + one
+/// segmented CSR slot holding the per-composite self-contained arena
+/// slice (`[sub-segment data | segment records]`).
 template <> struct EntitySoA<CompositePath> {
     static constexpr EntityTag tag = EntityTag::Composite;
     static constexpr int kFields = 2;
@@ -1972,8 +1923,8 @@ static_assert(HasEntitySoA<CompositePath>);
 // the D==3 dispatch arm can select must have a specialization here.
 // ---------------------------------------------------------------------------
 
-/// @brief SoA schema for `TrimmedEntity<PlaneParam>`: packed
-///        `(o(3), ax(3), ay(3))` records (9 doubles). kSeg == 0.
+/// SoA schema for `TrimmedEntity<PlaneParam>`: packed
+/// `(o(3), ax(3), ay(3))` records (9 doubles). kSeg == 0.
 template <> struct EntitySoA<TrimmedEntity<PlaneParam>> {
     static constexpr EntityTag tag = EntityTag::Plane;
     static constexpr int kFields = 9;
@@ -2006,9 +1957,9 @@ template <> struct EntitySoA<TrimmedEntity<PlaneParam>> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for `TrimmedEntity<SphereParam>`: packed
-///        `(c(3), r, ax(3), ay(3))` records (10 doubles); `az` is derived at
-///        load as `ax × ay`. kSeg == 0.
+/// SoA schema for `TrimmedEntity<SphereParam>`: packed
+/// `(c(3), r, ax(3), ay(3))` records (10 doubles); `az` is derived at
+/// load as `ax × ay`. kSeg == 0.
 template <> struct EntitySoA<TrimmedEntity<SphereParam>> {
     static constexpr EntityTag tag = EntityTag::Sphere;
     static constexpr int kFields = 10;
@@ -2044,9 +1995,9 @@ template <> struct EntitySoA<TrimmedEntity<SphereParam>> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for `TrimmedEntity<CylinderParam>`: packed
-///        `(o(3), ax(3), ay(3), r)` records (10 doubles); `az` is derived at
-///        load as `ax × ay`. kSeg == 0.
+/// SoA schema for `TrimmedEntity<CylinderParam>`: packed
+/// `(o(3), ax(3), ay(3), r)` records (10 doubles); `az` is derived at
+/// load as `ax × ay`. kSeg == 0.
 template <> struct EntitySoA<TrimmedEntity<CylinderParam>> {
     static constexpr EntityTag tag = EntityTag::Cylinder;
     static constexpr int kFields = 10;
@@ -2082,8 +2033,8 @@ template <> struct EntitySoA<TrimmedEntity<CylinderParam>> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for `TrimmedEntity<Line3Param>`: packed
-///        `(p0(3), p1(3), t0, t1)` records (8 doubles). kSeg == 0.
+/// SoA schema for `TrimmedEntity<Line3Param>`: packed
+/// `(p0(3), p1(3), t0, t1)` records (8 doubles). kSeg == 0.
 template <> struct EntitySoA<TrimmedEntity<Line3Param>> {
     static constexpr EntityTag tag = EntityTag::Line3;
     static constexpr int kFields = 8;
@@ -2118,12 +2069,12 @@ template <> struct EntitySoA<TrimmedEntity<Line3Param>> {
     { return View{.records = soa}; }
 };
 
-/// @brief SoA schema for `TrimmedEntity<BSplineSurfaceParam>`: packed
-///        `(pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w)` records +
-///        up to 4 segmented CSR fields (knots_u, knots_v, ctrl, weights). The
-///        `has_w` flag selects the rational form; `weights` is present only
-///        when `has_w != 0`. Offsets in the record are relative to the CSR slot
-///        bases (not a global arena), so `load` slices each span directly.
+/// SoA schema for `TrimmedEntity<BSplineSurfaceParam>`: packed
+/// `(pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w)` records +
+/// up to 4 segmented CSR fields (knots_u, knots_v, ctrl, weights). The
+/// `has_w` flag selects the rational form; `weights` is present only
+/// when `has_w != 0`. Offsets in the record are relative to the CSR slot
+/// bases (not a global arena), so `load` slices each span directly.
 template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
     static constexpr EntityTag tag = EntityTag::BSplineSurface;
     static constexpr int kFields = 9;
@@ -2205,7 +2156,7 @@ static_assert(HasEntitySoA<TrimmedEntity<CylinderParam>>);
 static_assert(HasEntitySoA<TrimmedEntity<Line3Param>>);
 static_assert(HasEntitySoA<TrimmedEntity<BSplineSurfaceParam>>);
 
-/// @brief Host-side tag -> concrete entity TYPE dispatch for the 2D entity set.
+/// Host-side tag -> concrete entity TYPE dispatch for the 2D entity set.
 ///
 /// Invokes `f.template operator()<E>()` with the entity type `E` that
 /// @ref make_entity produces for @p tag. This is the launch-granularity
@@ -2278,16 +2229,12 @@ inline void dispatch_entity_type(EntityTag tag, F f)
     }
 }
 
-/// @brief Fused frame of the nearest segment to @p p (no entity variant).
-///
-/// Projects onto every non-nested curve segment and keeps the nearest. Each
-/// segment is built monomorphically via @ref dispatch_entity_type +
-/// @ref decode_entity<E> — the per-segment positional record is decoded into a
-/// concrete `E`, with NO `std::visit` and NO `make_entity` variant (the last
-/// device-hot-path variant retired in Phase 3). Nested composites and free
-/// records are filtered by tag before dispatch (a recursive device call is
-/// illegal); the `if constexpr` guard additionally excludes them at compile
-/// time so the `CompositePath`/`Free` dispatch arms instantiate to a no-op.
+/// Fused frame of the nearest segment to @p p. Projects onto every non-nested
+/// curve segment and keeps the nearest; each segment is built monomorphically
+/// via @ref dispatch_entity_type + @ref decode_entity<E> (no std::visit, no
+/// variant). Nested composites and free records are filtered by tag before
+/// dispatch (a recursive device call is illegal); the `if constexpr` guard
+/// also excludes them at compile time, so those arms instantiate to a no-op.
 inline Frame<2, 1> CompositePath::project_frame(const Pt& p) const
 {
     Frame<2, 1> best {.pos = p, .basis = {Vec {1.0_r, 0.0_r}}, .eff_tdim = 1};
@@ -2321,15 +2268,13 @@ inline Frame<2, 1> CompositePath::project_frame(const Pt& p) const
     return best;
 }
 
-/// @brief Project @p p onto the entity @p (tag, params).
+/// Project @p p onto the entity @p (tag, params).
 ///
 /// Builds the concrete entity monomorphically via @ref dispatch_entity_type +
 /// @ref decode_entity<E> (no `std::visit`, no entity variant). Cold oracle path
 /// (the `geometry_project` binding); fixed-size entities only (no arena).
-/// @param p Query point.
 /// @param tag Entity type tag.
 /// @param params Flat parameter blob.
-/// @return The projected point.
 inline Pt project(const Pt& p, Tag tag, const real* params)
 {
     Pt out {};
@@ -2338,12 +2283,11 @@ inline Pt project(const Pt& p, Tag tag, const real* params)
     return out;
 }
 
-/// @brief The @f$ (d, 1) @f$ tangent column at @p p on the entity @p (tag, params).
+/// The @f$ (d, 1) @f$ tangent column at @p p on the entity @p (tag, params).
 ///
 /// The first column of the entity tangent basis (the single tangent for a curve;
 /// @f$ e_0 @f$ for Free). Built monomorphically via @ref dispatch_entity_type +
 /// @ref decode_entity<E> (no `std::visit`, no entity variant).
-/// @param p Query point.
 /// @param tag Entity type tag.
 /// @param params Flat parameter blob.
 /// @return The tangent column.
@@ -2355,9 +2299,9 @@ inline Pt tangent_space(const Pt& p, Tag tag, const real* params)
     return out;
 }
 
-/// @brief Load DOF @p i's concrete entity from its tag's SoA slot and invoke
-///        @p f(ent). The sweep's single device-hot-path tag→type
-///        dispatch.
+/// Load DOF @p i's concrete entity from its tag's SoA slot and invoke
+/// @p f(ent). The sweep's single device-hot-path tag→type
+/// dispatch.
 ///
 /// Callers pass a *small* callable (tangent-reduced Newton or projection), so
 /// the heavy patch + backtracking body that surrounds the call stays

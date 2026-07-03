@@ -1,27 +1,15 @@
 #pragma once
 
-// structured_patch.hpp — the structured patch-evaluation bridge (Phase 1.3 of
-// gpu-performance-improvement.md).
-//
-// The sweep hot path (patch.hpp::patch_eval / sample_vecT) reads a stencil node
-// by index `i` as `X[D*i + k]` (load_pt/store_pt). With arbitrary global node ids
-// the gather is random; over the STRUCTURED store the same evaluation runs over a
-// BlockField<D>'s halo-padded buffer: every
-// node lives at a fixed (block, padded index) slot, the store is D-contiguous per
-// node with NO gaps (BlockLayout strides: innermost == D), and a block occupies
-// one packed run whose base offset is a multiple of D. Therefore a node's flat
-// index in node units is simply its double-offset / D — and patch_eval is a
-// drop-in over the padded buffer once the stencil's gc/gn carry these structured
-// indices instead of global ids.
-//
-// That is the whole coalescing win: consecutive interior nodes along the fastest
-// axis are D doubles apart, so consecutive work-items read consecutive memory.
-// This header is the single place that converts BlockLayout offsets into the
-// node indices patch_eval consumes; nothing here re-derives a stride.
-//
-// SYCL-free: pure index arithmetic over BlockLayout<D>, host-unit-testable
-// alongside structured.hpp. The structured sweep kernel (which captures the
-// resulting PatchViewT<D> over the device buffer) lands on top of this.
+/// @file structured_patch.hpp
+/// Structured patch-evaluation bridge. Over a BlockField<D>'s halo-padded
+/// buffer every node lives at a fixed (block, padded index) slot, the store is
+/// D-contiguous per node with no gaps, and each block base is a multiple of D
+/// — so a node's flat index in node units is its double-offset / D, and
+/// patch_eval (which reads X[D*i + k]) is a drop-in once the stencil's gc/gn
+/// carry these structured indices instead of global ids. That is the
+/// coalescing win: consecutive interior nodes on the fastest axis are D
+/// doubles apart. This header is the single place converting BlockLayout
+/// offsets into patch_eval node indices; SYCL-free and host-unit-testable.
 
 #include "patch.hpp"
 #include "structured.hpp"
@@ -55,28 +43,14 @@ template <int D>
                             static_cast<std::size_t>(D));
 }
 
-// ---------------------------------------------------------------------------
-// Implicit interior patch synthesis.
-//
-// A structured node's metric patch is a fixed stencil: it is a corner of the
-// corners(D)=2^D adjacent cells, and each of those cells contributes one
-// (cell,corner) sample per its 2^D corners, so the patch is exactly
-// corners(D)^2 = 4^D occurrences. For a node whose whole patch stays inside one
-// block's interior the occurrence list is therefore *derivable* from the node's
-// logical index alone — no per-occurrence gc/gn/sample_id/role/sign arrays need
-// be stored. This is the structured connectivity the explicit index arrays
-// otherwise spell out node by node.
-//
-// The occurrence ORDER reproduces the host patch builder exactly (the
-// hand-assembled `build_context`): outer over the 2^D cells in row-major order
-// of their base, inner over the 2^D corner offsets `o` in row-major order. So a
-// kernel walking these occurrences accumulates in the same order as the stored
-// path — bit-identical parity, not merely the same set.
-//
-// `s[k]` and `role` depend only on the occurrence index (the (cell, o) bit
-// pattern), not on the node's position, so they are a fixed table; only `gc`
-// and `gn[k]` carry the node's absolute structured indices.
-// ---------------------------------------------------------------------------
+// Implicit interior patch synthesis. An interior structured node's patch is a
+// fixed stencil — corner of 2^D cells x 2^D corner samples = 4^D occurrences —
+// derivable from the logical index alone, with no stored per-occurrence
+// gc/gn/sample_id/role/sign arrays. Occurrence ORDER reproduces the host
+// build_context exactly (outer: 2^D cells row-major; inner: 2^D corner offsets
+// row-major), so accumulation is bit-identical to the stored path, not merely
+// the same set. s[k]/role depend only on the occurrence bit pattern; only
+// gc/gn carry the node's absolute indices.
 
 /// Number of metric occurrences in an interior structured node's patch: 4^D.
 template <int D> [[nodiscard]] constexpr int interior_patch_size() { return 1 << (2 * D); }

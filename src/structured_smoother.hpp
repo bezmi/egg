@@ -1,16 +1,12 @@
 #pragma once
 
-// structured_smoother.hpp — the structured field interface.
-//
-// Expresses the node storage the block-Jacobi sweep reads/writes with a C++20
-// concept — StructuredField (read/write node store with a halo synchronisation)
-// — and a concrete model, BlockFieldStructured<D>, that composes the BlockField<D>
-// store with the BlockTopologyDevice<D> halo topology.
-//
-// BlockFieldStructured is a HOST-side orchestration object: it owns the device
-// storage + halo tables and runs exchange_halos(), and it hands out the
-// trivially-copyable interior(b)/with_halo(b) mdspan views that a kernel
-// captures by value. It is never itself captured into a kernel (it owns USM).
+/// @file structured_smoother.hpp
+/// The structured field interface: the StructuredField concept (read/write
+/// node store with one-call halo synchronisation) and its concrete model
+/// BlockFieldStructured<D> (BlockField<D> store + BlockTopologyDevice<D>
+/// halo tables). BlockFieldStructured is host-side orchestration — it owns
+/// USM and is never captured into a kernel; kernels capture the
+/// trivially-copyable interior(b)/with_halo(b) views by value.
 
 #include "device.hpp"
 #include "structured.hpp"
@@ -39,9 +35,8 @@ concept StructuredField = requires(F f, std::size_t b) {
 };
 
 /// Concrete StructuredField: BlockField<D> store + BlockTopologyDevice<D> halo
-/// tables on a shared queue. Move-only (owns USM). The structured smoother
-/// composes one of these; exchange_halos() is the per-cadence synchronisation
-/// (1.4) the block-Jacobi sweep calls.
+/// tables on a shared queue. Move-only (owns USM); exchange_halos() is the
+/// per-sweep synchronisation the block-Jacobi sweep calls.
 template <int D> class BlockFieldStructured
 {
   public:
@@ -72,8 +67,7 @@ template <int D> class BlockFieldStructured
     BlockTopologyDevice<D> topo_;
 };
 
-// BlockFieldStructured<D> models StructuredField<·, D> — a compile-time check
-// that the storage adapter satisfies the seam Phase 2 swaps behind.
+// Compile-time check that the storage adapter satisfies the swap seam.
 static_assert(StructuredField<BlockFieldStructured<2>, 2>);
 static_assert(StructuredField<BlockFieldStructured<3>, 3>);
 

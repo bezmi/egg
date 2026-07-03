@@ -1,3 +1,7 @@
+/// @file bindings.cpp
+/// pybind11 boundary: context unpack + validation, the resident structured
+/// block-Jacobi session, and SYCL-free oracle wrappers for golden tests.
+/// Python passes float64; precision is narrowed to egg::real here.
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -54,9 +58,9 @@ sycl::queue select_queue(const std::string& device)
     }
 }
 
-// num_nodes from a flat X array, with a hard shape check: X must be a 1-D array
-// whose length is a multiple of d (d coordinates per node). Catches the silent-UB
-// case where an (N, d) array is passed and num_nodes is miscomputed (#1).
+// num_nodes from a flat X array, with a hard shape check: X must be 1-D with
+// length a multiple of d. Catches the silent-UB case where an (N, d) array is
+// passed and num_nodes is miscomputed.
 std::size_t
   checked_num_nodes(const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr,
                     int d)
@@ -75,11 +79,11 @@ std::size_t
     return static_cast<std::size_t>(buf.shape[0]) / d;
 }
 
-// Host-side validation of an unpacked context against num_nodes: array-length
-// invariants, the ragged sum(P_of) == total_samples contract, and index bounds
-// for every gc/gn0/gn1/dof_idx. Throws std::invalid_argument before any device
-// work, so a malformed context can never reach the kernels as silent OOB / UB
-// (#1). This is the single biggest guard for a memory-safe core.
+// Host-side validation of an unpacked context: array-length invariants, the
+// ragged sum(P_of) == total_samples contract, and index bounds for every
+// gc/gn/dof_idx. Throws before any device work, so a malformed context never
+// reaches the kernels as silent OOB/UB — the single biggest guard for a
+// memory-safe core.
 template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
 {
     const std::size_t N = host.num_nodes;
@@ -155,10 +159,10 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         }
         check_index(g.dof_idx, "dof_idx", grp);
 
-        // Per-type SoA record + segmented field validation (Phase 2-B). Also
-        // verify the SoA partitions cover every group-local DOF exactly once:
-        // the entity data is now carried solely by `soa` (Phase 4 retired the
-        // positional blob), so an uncovered DOF would silently never be swept.
+        // Per-type SoA record + segmented field validation. Also verify the
+        // SoA partitions cover every group-local DOF exactly once: entity data
+        // is carried solely by `soa`, so an uncovered DOF would silently never
+        // be swept.
         std::vector<int> covered(g.ndof, 0);
         for (std::size_t si = 0; si < g.soa.size(); ++si) {
             const auto& s = g.soa[si];
@@ -277,11 +281,10 @@ egg::SweepContextHostT<D>
     host.num_nodes = num_nodes;
     host.X.assign(X_data, X_data + (num_nodes * D));
 
-    // Groups — one ragged group over all free DOFs. Per-sample arrays are flat over the
-    // concatenated DOFs (DOF-major, variable P per DOF); per-DOF arrays carry the
-    // patch size P_of and we derive the sample_offset prefix sum here. The wire
-    // format keeps per-axis keys gn0..gn{D-1} / s0..s{D-1}; we map them into the
-    // gn[k]/s[k] array slots. See cpp_backend_plan.md §5 and flatten_context.
+    // Groups — one ragged group over all free DOFs. Per-sample arrays are flat
+    // over the concatenated DOFs (DOF-major, variable P per DOF); per-DOF
+    // arrays carry P_of, and sample_offset is derived here as its prefix sum.
+    // The wire keeps per-axis keys gn0../s0.., mapped into gn[k]/s[k].
     auto groups_list = ctx_arrays["groups"].cast<py::list>();
     for (auto g_item : groups_list) {
         auto gd = g_item.cast<py::dict>();
@@ -313,21 +316,20 @@ egg::SweepContextHostT<D>
             sg.interior_logical = extract_int(gd, "interior_logical");
         }
 
-        // Typed per-entity-type SoA sub-dicts (the entity data — Phase 4 retired
-        // the positional tag/params/arena blob). Each present type contributes
-        // {tag, kFields, dof_local, records, [seg]}, where records is a packed
-        // (count, kFields) row-major double array and seg is a list of {data, off}
-        // CSR fields (absent for fixed-size types). Every constrained and free DOF
-        // is covered by exactly one entity sub-dict (validated below).
+        // Typed per-entity-type SoA sub-dicts (the sole carrier of entity
+        // data). Each present type contributes {tag, kFields, dof_local,
+        // records, [seg]}: records is a packed (count, kFields) row-major
+        // array, seg a list of {data, off} CSR fields (absent for fixed-size
+        // types). Every DOF is covered by exactly one sub-dict (validated).
         if (gd.contains("entities")) {
             auto entities = gd["entities"].cast<py::dict>();
             for (auto [name, val] : entities) {
                 auto ed = val.cast<py::dict>();
-                if (!ed.contains("tag")) {  // "__blob__" marker: unsupported post-Phase 4
+                if (!ed.contains("tag")) {  // "__blob__" marker: unsupported
                     throw std::invalid_argument(
                       "unpack_context: entities carries a '__blob__' group (an entity "
                       "with no SoA encoder, e.g. a composite with a nested B-spline); "
-                      "the positional blob path was retired in Phase 4");
+                      "the positional blob path was retired");
                 }
                 egg::SoAHostRecord rec;
                 rec.tag = static_cast<egg::EntityTag>(ed["tag"].cast<int>());
@@ -880,11 +882,11 @@ PYBIND11_MODULE(cpp_core, m)
           const auto run = [&]<int D>() {
               sycl::queue q = select_queue(device);
 
-              // Build the global-indexed context (validated here), then re-home it
-              // onto the halo-padded structured store: indices become structured
-              // node indices, X becomes the packed buffer, num_nodes the padded
-              // count. The structured executor then runs block-Jacobi with a
-              // per-sweep halo exchange (cadence 1.4b).
+              // Build the global-indexed context (validated here), then re-home
+              // it onto the halo-padded structured store: indices become
+              // structured node indices, X the packed buffer, num_nodes the
+              // padded count. The structured executor then runs block-Jacobi
+              // with a per-sweep halo exchange.
               const std::size_t num_nodes = checked_num_nodes(X_arr, dim);
               auto host_ctx = unpack_context<D>(ctx_arrays, X_arr.data(), num_nodes);
               StructuredRemap<D> rm = apply_structured_remap<D>(host_ctx, structured);

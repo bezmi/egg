@@ -1,21 +1,13 @@
 #pragma once
 
-// structured_field.hpp — device-resident storage of halo-padded structured
-// blocks (Phase 1.1b of gpu-performance-improvement.md).
-//
-// BlockField<D> owns ONE UsmBuffer<double> holding every block's padded node
-// coordinates back-to-back (the packing described by BlockLayout<D>), plus the
-// layout itself. It hands out mdspan views — interior(b) and with_halo(b) —
-// built on the single device base pointer, so a kernel addresses any block by
-// base pointer + strides with no per-block allocation and no raw index math.
-//
-// This is the storage layer only: the global-DOF <-> structured correspondence
-// (which host node fills which padded slot) is built host-side in 1.1c, and the
-// ghost layer is populated by the halo_exchange kernel (1.2). Here the buffer is
-// just an addressable, RAII-owned slab with typed, bounds-checked views.
-//
-// SYCL lives here (UsmBuffer), deliberately kept out of structured.hpp so the
-// pure layout/view math stays SYCL-free and unit-testable without a device.
+/// @file structured_field.hpp
+/// Device-resident storage of halo-padded structured blocks. BlockField<D>
+/// owns ONE UsmBuffer holding every block's padded node coordinates
+/// back-to-back (the BlockLayout<D> packing) and hands out mdspan views on the
+/// single device base pointer — no per-block allocation, no raw index math.
+/// Storage layer only: the global-DOF <-> structured correspondence is built
+/// host-side and ghosts are populated by halo_exchange. SYCL lives here, kept
+/// out of structured.hpp so the layout math stays device-free and testable.
 
 #include "device.hpp"
 #include "structured.hpp"

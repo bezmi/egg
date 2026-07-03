@@ -12,18 +12,15 @@
 namespace egg
 {
 
-// Non-owning view of one DOF's stencil, generalised to D axis-neighbours. The
-// per-corner stencil couples a corner to its D axis-neighbours (gn[k]/s[k]); for
-// D=2 gn[0]/gn[1] are the old gn0/gn1, so the indices and math are bit-identical.
-//
-// The bulk per-sample payload (gc/gn/s/W_inv) is deduplicated into one shared
-// table — identical (cell,corner) samples appear in every corner DOF's patch but
-// are stored once. So gc/gn/s/W_inv are the *shared-table base* pointers and are
-// indexed by `sample_id[p]`, NOT by `p`. Only `sample_id` and `role` are
-// per-occurrence (length P, sliced to this DOF). W_inv row stride is dim::wInv(D),
-// keyed on the table index. The chain-Jacobian J is not stored — its role-selected
-// block is recomputed in-kernel from s + W_inv (see role_Jb).
-// role ∈ {0=corner, 1..D=neighbour axis (role−1), -1=absent}.
+/// Non-owning view of one DOF's stencil, generalised to D axis-neighbours
+/// (for D=2, gn[0]/gn[1] are the old gn0/gn1 — bit-identical).
+///
+/// The bulk per-sample payload (gc/gn/s/W_inv) is deduplicated into one shared
+/// table: gc/gn/s/W_inv are the *shared-table base* pointers, indexed by
+/// `sample_id[p]`, NOT by p. Only `sample_id` and `role` are per-occurrence
+/// (length P, sliced to this DOF). The chain-Jacobian J is not stored — its
+/// role-selected block is recomputed in-kernel from s + W_inv (see role_Jb).
+/// role: 0 = corner, 1..D = neighbour on axis role−1, −1 = absent.
 template <int D> struct PatchViewT {
     int P;
     const int* sample_id;  // [P] index of each occurrence into the shared table
@@ -54,8 +51,8 @@ template <int D> struct StencilSampleViewT {
     const real* W_inv;  // [P * dim::wInv(D)]
 };
 
-// det(A): generic *structure*, specialized *arithmetic* where a closed form
-// exists, so D=2 stays bit-identical (a generic LU/cofactor is not). A is row-major.
+/// det(A), row-major: generic structure, specialized arithmetic per D so the
+/// D=2 build stays bit-identical (a generic LU/cofactor is not).
 template <int D> inline real det(const MatN<D>& A);
 template <> inline real det<2>(const MatN<2>& A) { return (A[0] * A[3]) - (A[1] * A[2]); }
 template <> inline real det<3>(const MatN<3>& A)
@@ -64,10 +61,9 @@ template <> inline real det<3>(const MatN<3>& A)
            (A[2] * ((A[3] * A[7]) - (A[4] * A[6])));
 }
 
-// The single A→T→detA site: vec(T) and det(A) from a corner + its D axis-neighbours,
-// the per-axis scales s[k], and W_inv (row-major). A[:,k] = s[k]·(nbr[k]−corner),
-// T = A·W_inv; returns vec(T) row-major and writes det(A). For D=2 the matmul
-// accumulation order (k outer, j inner) reproduces the old unrolled T00.. exactly.
+/// The single A→T→detA site: A[:,k] = s[k]·(nbr[k]−corner), T = A·W_inv;
+/// returns vec(T) row-major and writes det(A). For D=2 the accumulation order
+/// (k outer, j inner) reproduces the old unrolled T00.. exactly.
 template <int D>
 inline VecTN<D> assemble_vecT(const PtN<D>& corner,
                               const std::array<PtN<D>, D>& nbr,
@@ -92,9 +88,8 @@ inline VecTN<D> assemble_vecT(const PtN<D>& corner,
     return T;
 }
 
-// Shared-table index of occurrence p: a PatchViewT carries a `sample_id`
-// indirection (deduplicated payload), while a raw stencil view (StencilSampleViewT)
-// stores its payload one-per-occurrence and indexes directly by p.
+/// Shared-table index of occurrence p: `sample_id[p]` when the view carries
+/// the indirection (PatchViewT), else p (StencilSampleViewT).
 template <class V> inline int table_index(const V& sv, int p)
 {
     if constexpr (requires { sv.sample_id; }) {
@@ -104,8 +99,8 @@ template <class V> inline int table_index(const V& sv, int p)
     }
 }
 
-// vec(T) and det(A) for sample p, read from the flat node array via the view's
-// gc/gn[] indices. Generic over any view exposing gc/gn[]/s[]/W_inv.
+/// vec(T) and det(A) for sample p, read from the flat node array through the
+/// view's gc/gn[] indices. Generic over any view exposing gc/gn[]/s[]/W_inv.
 template <int D, class V>
 inline VecTN<D> sample_vecT(const V& sv, const real* X, int p, real& detA)
 {
@@ -125,8 +120,8 @@ inline VecTN<D> sample_vecT(const V& sv, const real* X, int p, real& detA)
     return assemble_vecT<D>(corner, nbr, s, &sv.W_inv[woff], detA);
 }
 
-// Patch energy (sum μ) and min det(A) — the cheap trial path. Mirrors
-// batch.energy_and_mindet. Templated on the dimension and the Objective.
+/// Patch energy (Σμ) and min det(A) — the cheap trial path (mirrors
+/// batch.energy_and_mindet).
 template <int D, class V, ObjectiveD<D> M = ShapeObjectiveT<D>>
 inline void patch_energy_mindet(
   const V& sv, const real* X, real& energy, real& mindet, M objective = {})
@@ -141,16 +136,13 @@ inline void patch_energy_mindet(
     }
 }
 
-// Role-selected chain-Jacobian block Jb (kVT×D, row-major), recomputed from the
-// per-axis signs @p s and W_inv @p w (row-major d×d) rather than read from a
-// stored table. Jb is the D columns of the constant J = d·vec(T)/d·coords that
-// belong to the DOF's node (role 0 = corner, role r≥1 = axis-(r−1) neighbour).
-//
-// J's closed form, J[i·d+c, coord] = Σ_k W_inv[k,c]·dA[i,k,coord] with
-// dA[i,k,·] = −s_k on corner[i] and +s_k on nbr_k[i], makes the selected block
-// sparse: for output row a (i = a/D, c = a%D) only column i is nonzero. So the
-// corner block is Jb[a][i] = −Σ_k s_k·W_inv[k,c], and the axis-`ax` neighbour
-// block is Jb[a][i] = s_ax·W_inv[ax,c]. role < 0 (absent) → all-zero block.
+/// Role-selected chain-Jacobian block Jb (kVT×D, row-major), recomputed from
+/// the per-axis signs @p s and W_inv @p w instead of a stored table. Jb is the
+/// D columns of the constant J = d·vec(T)/d·coords belonging to the DOF's node.
+/// From J's closed form (J[i·d+c, coord] = Σ_k W_inv[k,c]·dA[i,k,coord],
+/// dA = ∓s_k on corner/neighbour) the block is sparse: for row a (i = a/D,
+/// c = a%D) only column i is nonzero — corner: −Σ_k s_k·W_inv[k,c];
+/// axis-ax neighbour: s_ax·W_inv[ax,c]; role < 0 → all-zero.
 template <int D> inline void role_Jb(int role, const real* s, const real* w, real* Jb)
 {
     constexpr int kVT = dim::vecT(D);
@@ -171,13 +163,12 @@ template <int D> inline void role_Jb(int role, const real* s, const real* w, rea
     }
 }
 
-// Accumulate one metric sample into the running patch result, given its vec(T)
-// `t`, its row-major d×d `w` (= W_inv), the DOF's `role`, and the per-axis signs
-// `svals`. Factored out of patch_eval so the stored-array path and the
-// synthesized structured path share one audited math body; the caller supplies
-// (t, w, role, svals) from whichever source and owns the mindet update. The
-// fused eval_jhj branch (ShapeObjectiveT<3>) folds value + gradient + contracted
-// Hessian without materialising the 81-entry metric Hessian.
+/// Accumulate one metric sample (t, w = W_inv, role, per-axis signs) into the
+/// running patch result. Factored out of patch_eval so the stored-array and
+/// synthesized structured paths share one audited math body; the caller owns
+/// the mindet update. The fused eval_jhj branch (ShapeObjectiveT<3>) folds
+/// value + gradient + contracted Hessian without materialising the 81-entry
+/// metric Hessian.
 template <int D, ObjectiveD<D> M>
 inline void accumulate_sample(
   M& objective, const VecTN<D>& t, const real* w, int role, const real* svals, PatchResultT<D>& r)
@@ -258,9 +249,9 @@ inline void accumulate_sample(
     }
 }
 
-// Full patch evaluation: (grad, hess, energy, mindet) in one pass. Mirrors
-// batch.patch_eval (numerically identical to the JAX patch_eval_jax). For D=2 the
-// accumulation orders match the original unrolled code, so it is bit-identical.
+/// Full patch evaluation: (grad, hess, energy, mindet) in one pass. Mirrors
+/// batch.patch_eval (numerically identical to the JAX patch_eval_jax); D=2
+/// accumulation order matches the original unrolled code bit-for-bit.
 template <int D, ObjectiveD<D> M = ShapeObjectiveT<D>>
 __attribute__((noinline)) inline PatchResultT<D>
   patch_eval(const PatchViewT<D>& sv, const real* X, M objective = {})
@@ -285,28 +276,10 @@ __attribute__((noinline)) inline PatchResultT<D>
     return r;
 }
 
-/// @brief Newton step @f$ \delta @f$ (D,) for one DOF on a concrete (monomorphic) entity.
-///
-/// Interior DOFs (@c k==D) use the full @f$ D \times D @f$ Hessian; constrained
-/// entities reduce onto the entity tangent basis @f$ B @f$ (@f$ D \times k @f$):
-/// @f$ M = B^\top H B @f$, @f$ r = B^\top g @f$, solve @f$ M y = -r @f$, then
-/// @f$ \delta = B y @f$. The @c k==1 curve case is special-cased to `solve1x1`,
-/// reproducing the legacy single-column reduction bit-identically; the @c k==2
-/// surface arm (@c k==2) compiles now but is only exercised once 3D surface
-/// entities exist.
-/// @tparam D Embedding dimension.
-/// @tparam E Entity type (satisfies @ref GeometryEntity); supplies the tangent basis.
-/// @param g Gradient @f$ g @f$ at the DOF.
-/// @param H Hessian @f$ H @f$ at the DOF.
-/// @param pos Current node position (where the tangent basis is evaluated).
-/// @param entity The boundary entity constraining the DOF.
-/// @return The Newton step @f$ \delta @f$.
-/// @brief The tangent-reduced Newton step given a precomputed tangent basis @p B.
-///
-/// Reduce onto the k tangent columns B (D×k): M = BᵀHB (k×k), r = Bᵀg (k); solve
-/// M y = −r, then δ = B y. For k==1 this is exactly the legacy
-/// b·solve1x1(bᵀHb, bᵀg) path (bit-identical single-column reduction). Split out
-/// so the cold (@ref newton_delta) and warm-seeded (sweep kernel) paths share the
+/// Tangent-reduced Newton step given a precomputed tangent basis B (D×k):
+/// M = BᵀHB, r = Bᵀg, solve M y = −r, δ = B y. k==1 is exactly the legacy
+/// b·solve1x1(bᵀHb, bᵀg) path (bit-identical). Split out so the cold
+/// (@ref newton_delta) and warm-seeded (sweep kernel) paths share the
 /// reduction and differ only in how B is obtained.
 template <int D, int k>
 inline VecN<D>
@@ -345,6 +318,11 @@ inline VecN<D>
     return d;
 }
 
+/// Newton step δ (D,) for one DOF on a concrete (monomorphic) entity.
+/// Interior DOFs (k==D) use the full D×D solve; constrained entities reduce
+/// onto the entity tangent basis via @ref newton_step_from_basis, evaluated at
+/// @p pos (cold path: fresh coarse-grid projection). The k==2 surface arm
+/// compiles now but is only exercised once 3D surface entities exist.
 template <int D, GeometryEntity E>
 inline VecN<D> newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& pos, const E& entity)
 {
@@ -359,10 +337,9 @@ inline VecN<D> newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& po
     }
 }
 
-// (tag, params) convenience overload for host-side / oracle callers (e.g. the
-// newton_step binding). Selects the concrete entity type once via
-// dispatch_entity_type + decode_entity<E> (no std::visit, no variant); not on
-// the device hot path. Fixed-size entities only (no arena).
+/// (tag, params) convenience overload for host-side / oracle callers. Selects
+/// the concrete entity type once via dispatch_entity_type + decode_entity<E>
+/// (no variant); not on the device hot path. Fixed-size entities only.
 template <int D = kDefaultDim>
 inline VecN<D>
   newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& pos, Tag tag, const real* params)

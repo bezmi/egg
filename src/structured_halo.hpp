@@ -1,32 +1,25 @@
 #pragma once
 
-// structured_halo.hpp — device-side block interface topology and the
-// halo_exchange kernel (Phase 1.2 of gpu-performance-improvement.md).
-//
-// BlockTopologyDevice<D> is the device image of the host halo tables built by
-// egg.smoothing.cpp_backend.build_block_structured_context (1.1c): for each
-// interface node it names one source interior node and one destination ghost
-// node. It carries them as flat double-offsets into a BlockField's packed
-// buffer — the host turns the padded (block, index) pairs into offsets through
-// BlockLayout<D>, so the offset math stays single-sourced and the kernel is a
-// pure gather/scatter with no per-entry index arithmetic.
-//
-// halo_exchange then copies, per entry, the D coordinates of the source node
-// into the destination ghost slot. Entries are face-major (the host emits them
-// walking a face's free axis), so consecutive work-items touch consecutive
-// memory — the copy is coalesced and cheap.
-//
-// A conforming interface node is duplicated: it is interior to every block that
-// touches it, but only its owner block (lowest index) relaxes it. The owner ->
-// non-owner *broadcast* table (interior -> interior, distinct from the ghost
-// halo's interior -> ghost) refreshes the non-owner copies from the owner each
-// sweep so a non-owner block's patch reads the up-to-date shared value. Both are
-// the same coordinate gather/scatter (broadcast_shared shares halo_exchange's
-// kernel body) and are run together before each sweep (cadence 1.4b).
-//
-// Singularities (O-grid poles, valence != 2D) are carried as a separate node
-// list for the explicit patch the structured smoother applies after the regular
-// exchange (1.3); the regular table above covers every conforming face node.
+/// @file structured_halo.hpp
+/// Device-side block interface topology + the halo_exchange kernel.
+///
+/// BlockTopologyDevice<D> is the device image of the host halo tables built by
+/// egg.smoothing.cpp_backend.build_block_structured_context: per interface
+/// node, one source interior node and one destination ghost node, carried as
+/// flat double-offsets into a BlockField's packed buffer (the host resolves
+/// (block, padded index) through BlockLayout<D>, keeping offset math
+/// single-sourced; the kernel is a pure gather/scatter). Entries are
+/// face-major, so consecutive work-items touch consecutive memory.
+///
+/// A conforming interface node is duplicated — interior to every touching
+/// block, relaxed only by its owner (lowest block index). The owner ->
+/// non-owner *broadcast* table (interior -> interior, distinct from the ghost
+/// halo's interior -> ghost) refreshes non-owner copies each sweep; both
+/// tables share the same copy kernel and run together before each sweep.
+///
+/// Singularities (O-grid poles, valence != 2D) are a separate node list for
+/// the explicit patch the structured smoother applies after the exchange; the
+/// regular table covers every conforming face node.
 
 #include "device.hpp"
 #include "structured.hpp"
@@ -158,10 +151,9 @@ inline sycl::event halo_exchange(sycl::queue& q, real* buf,
 }
 
 /// Refresh every non-owner copy of a shared interface node from its owner block
-/// (interior -> interior). Run alongside @ref halo_exchange before each sweep so a
-/// non-owner block's patch reads the owner's up-to-date shared value (cadence
-/// 1.4b). The two write disjoint slots (ghost shell vs. non-owner interior) and
-/// read genuinely-interior sources, so their order is immaterial.
+/// (interior -> interior). Runs alongside @ref halo_exchange before each sweep;
+/// the two write disjoint slots (ghost shell vs. non-owner interior) and read
+/// genuinely-interior sources, so their order is immaterial.
 template <int D>
 inline sycl::event broadcast_shared(sycl::queue& q, real* buf,
                                     const BlockTopologyDevice<D>& topo)
@@ -169,14 +161,11 @@ inline sycl::event broadcast_shared(sycl::queue& q, real* buf,
     return copy_nodes<D>(q, buf, topo.share_src_off(), topo.share_dst_off(), topo.num_share());
 }
 
-/// Fused halo exchange + shared-node broadcast in a single launch. The two
-/// passes share the @ref copy_nodes body and write disjoint slots (ghost shell
-/// vs. non-owner interior) with genuinely-interior sources, so fusing is
-/// behaviour-preserving (their order is immaterial, see broadcast_shared above).
-/// One work-item per (halo entry || share entry); the per-item index selects
-/// the offset table — all-halo and all-share work-groups run straight paths,
-/// with at most one work-group straddling the boundary. Cuts one launch per
-/// sweep on the halo-padded structured path.
+/// Fused halo exchange + shared-node broadcast in one launch (saves a launch
+/// per sweep). Behaviour-preserving per the disjointness argument on
+/// @ref broadcast_shared. The per-item index selects the offset table:
+/// all-halo and all-share work-groups run straight paths, at most one
+/// work-group straddles the boundary.
 template <int D>
 inline sycl::event fused_halo_broadcast(sycl::queue& q, real* buf,
                                         const BlockTopologyDevice<D>& topo)

@@ -1,17 +1,11 @@
-//   Dual<N>   first-order forward mode: value + gradient[N].
-//   Dual2<N>  second-order forward-over-forward ("hyperdual" / dual2nd):
-//             value + gradient[N] + symmetric Hessian[N][N], all in one pass.
-//
-// Seeding convention: seed_dual<N>(x, i) makes a variable whose i-th partial is
-// 1. To get a full gradient/Hessian, build the input vector with each component
-// seeded on its own direction, evaluate the metric once, and read .g / .h.
-//
-// Not currently used for the shape mu, but is used for δ-continuation untangling.
-// will be important for the 3D mu
-//
-// The scalar type is templated (`T = egg::real`) so the AD path carries the same
-// precision as the rest of src/ without a double<->real seam; T must support the
-// usual arithmetic and sycl::sqrt (real/float/double all do).
+/// @file dual.hpp
+/// Forward-mode AD: Dual<N> (value + gradient) and Dual2<N> (forward-over-
+/// forward "hyperdual": value + gradient + symmetric Hessian in one pass).
+/// Seed with seed_dual{,2}<N>(x, i) (unit i-th partial), build the input with
+/// each component seeded on its own direction, evaluate once, read .g / .h.
+/// Used by the delta-continuation untangle; will matter for the 3D mu.
+/// T defaults to egg::real so AD carries src/ precision without a
+/// double<->real seam; T needs the usual arithmetic plus sycl::sqrt.
 #pragma once
 
 #include <array>
@@ -22,16 +16,18 @@
 namespace egg
 {
 
-// First-order forward-mode dual.
+/// First-order forward-mode dual number.
 template <int N, class T = real> struct Dual {
     T v {T(0)};
-    std::array<T, N> g {};  // value-initialised to zeros
+    std::array<T, N> g {};
 
     constexpr Dual() = default;
     constexpr Dual(T value) : v(value) { g.fill(T(0)); }  // NOLINT: implicit
     constexpr Dual(T value, std::array<T, N> grad) : v(value), g(grad) {}
 };
 
+/// @name Dual arithmetic (value + gradient chain rules)
+/// @{
 template <int N, class T> constexpr Dual<N, T> operator+(const Dual<N, T>& a, const Dual<N, T>& b)
 {
     Dual<N, T> r;
@@ -85,6 +81,7 @@ template <int N, class T> constexpr Dual<N, T> operator/(const Dual<N, T>& a, T 
 template <int N, class T> constexpr Dual<N, T> operator-(const Dual<N, T>& a, T s)
 { return a - Dual<N, T>(s); }
 
+/// f = sqrt(a): f' = a' / (2f).
 template <int N, class T> inline Dual<N, T> sqrt(const Dual<N, T>& a)
 {
     Dual<N, T> r;
@@ -93,7 +90,9 @@ template <int N, class T> inline Dual<N, T> sqrt(const Dual<N, T>& a)
     for (int i = 0; i < N; ++i) { r.g[i] = coef * a.g[i]; }
     return r;
 }
+/// @}
 
+/// Variable with unit i-th partial.
 template <int N, class T = real> constexpr Dual<N, T> seed_dual(T x, int i)
 {
     Dual<N, T> r(x);
@@ -101,8 +100,8 @@ template <int N, class T = real> constexpr Dual<N, T> seed_dual(T x, int i)
     return r;
 }
 
-// Second-order forward-over-forward (hyperdual). Carries the full symmetric
-// Hessian, so a single evaluation yields value, gradient, and Hessian.
+/// Second-order forward-over-forward dual: one evaluation yields value,
+/// gradient, and full symmetric Hessian.
 template <int N, class T = real> struct Dual2 {
     T v {T(0)};
     std::array<T, N> g {};
@@ -112,6 +111,8 @@ template <int N, class T = real> struct Dual2 {
     constexpr Dual2(T value) : v(value) {}  // NOLINT: implicit
 };
 
+/// @name Dual2 arithmetic (value + gradient + Hessian chain rules)
+/// @{
 template <int N, class T> constexpr Dual2<N, T> operator+(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
     Dual2<N, T> r;
@@ -161,9 +162,7 @@ template <int N, class T> constexpr Dual2<N, T> operator*(const Dual2<N, T>& a, 
 
 template <int N, class T> constexpr Dual2<N, T> operator/(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
-    // q = a / b. Differentiate a = q b twice:
-    //   q'  = (a' - q b') / b
-    //   q'' = (a'' - q' b' - q' b' - q b'') / b
+    // q = a / b, from a = q b: q' = (a' - q b')/b; q'' = (a'' - 2 q' b' - q b'')/b
     Dual2<N, T> r;
     const T inv = T(1) / b.v;
     r.v = a.v * inv;
@@ -186,9 +185,9 @@ template <int N, class T> constexpr Dual2<N, T> operator/(const Dual2<N, T>& a, 
 template <int N, class T> constexpr Dual2<N, T> operator-(const Dual2<N, T>& a, T s)
 { return a - Dual2<N, T>(s); }
 
+/// f = sqrt(a): f' = a'/(2f); f'' = (a'' - 2 f' f') / (2f).
 template <int N, class T> inline Dual2<N, T> sqrt(const Dual2<N, T>& a)
 {
-    // f = sqrt(a): f' = a'/(2f); f'' = (a'' - 2 f' f') / (2f)
     Dual2<N, T> r;
     r.v = sycl::sqrt(a.v);
     const T inv2f = T(0.5) / r.v;
@@ -198,7 +197,9 @@ template <int N, class T> inline Dual2<N, T> sqrt(const Dual2<N, T>& a)
     }
     return r;
 }
+/// @}
 
+/// Variable with unit i-th partial.
 template <int N, class T = real> constexpr Dual2<N, T> seed_dual2(T x, int i)
 {
     Dual2<N, T> r(x);
