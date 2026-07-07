@@ -19,7 +19,7 @@ Runs on the C++ backend (barrier sweep + delta-untangle sweep via
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import numpy as np
 
@@ -46,8 +46,6 @@ class PipelineConfig:
     ----------
     target_fn : callable, optional
         TMOP target; defaults to ``IdentityTarget(d)``.
-    metric : str
-        TMOP quality metric.
     margin : float
         Validity gate: the grid counts as untangled when
         ``min det A > margin``.
@@ -65,7 +63,26 @@ class PipelineConfig:
         True = the whole delta-continuation in one C++ call; False yields
         per delta so live views can animate the unfolding.
     tmop_sweeps, tmop_chunk : int
-        Total TMOP sweeps and sweeps per yielded chunk.
+        Total TMOP sweeps and sweeps per yielded chunk. With
+        ``tmop_smoother="fas"`` both count V-CYCLES instead (each cycle is
+        ``nu_pre + nu_post = 4`` fine sweeps plus the coarse-grid work).
+    tmop_smoother : str
+        ``"jacobi"`` (default) or ``"fas"`` — FAS nonlinear geometric
+        multigrid V-cycles for the TMOP phase (the untangle phase always
+        relaxes plain block-Jacobi; FAS is barrier-phase-only by design).
+        Blocks whose node counts admit no coarse level fall back to plain
+        Jacobi with the equivalent fine-sweep budget automatically.
+    fas_nu_pre, fas_nu_post : int
+        Pre-/post-smooth sweeps per level per FAS V-cycle.
+    fas_nu_coarse : int
+        Cap on Newton sweeps on the coarsest level per cycle (the driver
+        runs ``min(fas_nu_coarse, 2 × coarsest interior diameter)``). The
+        small-mesh tuning knob: the coarsest-level launches dominate cycle
+        cost on small grids, so a lower cap trades convergence slack for
+        wall time there.
+    fas_max_levels : int
+        V-cycle depth cap, fine level included (the hierarchy build stops
+        on its own when blocks stop coarsening).
     omega : float
         Block-Jacobi SOR/damping weight for the TMOP phase.
     report_every : int
@@ -84,7 +101,6 @@ class PipelineConfig:
     """
 
     target_fn: Callable[..., np.ndarray] | None = None
-    metric: str = "shape_2d"
 
     # Validity gate / untangle schedule.
     margin: float = 1e-9
@@ -97,6 +113,11 @@ class PipelineConfig:
     # TMOP quality phase.
     tmop_sweeps: int = 40
     tmop_chunk: int = 10
+    tmop_smoother: Literal["jacobi", "fas"] = "jacobi"
+    fas_nu_pre: int = 2
+    fas_nu_post: int = 2
+    fas_nu_coarse: int = 32
+    fas_max_levels: int = 32
     omega: float = 0.8
     report_every: int = 0
 
@@ -104,8 +125,22 @@ class PipelineConfig:
     pin_sweeps: int = 0
     respace: bool = False
 
-    device: str = "cpu"
+    device: Literal["cpu", "gpu", "auto"] = "cpu"
     verbose: bool = False
+
+    def validate(self) -> None:
+        """Reject invalid enum knobs up front — a typo must fail before the
+        untangle phase spends minutes, not after."""
+        if self.tmop_smoother not in ("jacobi", "fas"):
+            raise ValueError(
+                f"PipelineConfig.tmop_smoother must be 'jacobi' or 'fas', got "
+                f"{self.tmop_smoother!r}"
+            )
+        if self.device not in ("cpu", "gpu", "auto"):
+            raise ValueError(
+                f"PipelineConfig.device must be 'cpu', 'gpu' or 'auto', got "
+                f"{self.device!r}"
+            )
 
 
 @dataclass
@@ -188,7 +223,9 @@ def generate_steps(
     Both the TMOP and untangle phases relax block-Jacobi over the
     halo-padded structured store (one merged double-buffered launch per
     sweep; ``omega`` is the TMOP SOR weight); X stays device-resident
-    throughout.
+    throughout. With ``tmop_smoother="fas"`` the TMOP phase runs FAS
+    (nonlinear geometric multigrid) V-cycles instead — the untangle phase
+    always stays plain Jacobi.
 
     The TMOP phase always steps per chunk (``tmop_chunk`` sweeps each); set
     ``tmop_chunk == tmop_sweeps`` for one direct call. The untangle phase
@@ -216,6 +253,7 @@ def generate_steps(
         if config is not None
         else PipelineConfig(**overrides)
     )
+    cfg.validate()
     margin, device = cfg.margin, cfg.device
     tmop_chunk, omega, report_every = cfg.tmop_chunk, cfg.omega, cfg.report_every
 
@@ -321,17 +359,32 @@ def generate_steps(
     bsc = build_block_structured_context(grid)
     session = CppStructuredSweepSession(tmop_ctx, bsc, grid.global_nodes, device=device)
     run_kwargs = {"omega": omega}
+
+    def run_tmop(sess, k):
+        if cfg.tmop_smoother == "fas":
+            return sess.run_fas(
+                k,
+                nu_pre=cfg.fas_nu_pre,
+                nu_post=cfg.fas_nu_post,
+                nu_coarse=cfg.fas_nu_coarse,
+                max_levels=cfg.fas_max_levels,
+                **run_kwargs,
+            )
+        return sess.run(k, report_every=report_every, **run_kwargs)
+
     done = 0
     while done < tmop_sweeps:
         k = min(tmop_chunk, tmop_sweeps - done)
-        energies, _mds = session.run(k, report_every=report_every, **run_kwargs)
+        # The chunk-end min det comes from the device reduction (same as the
+        # stepped untangle loop) — no host O(N) recompute per chunk.
+        energies, mds = run_tmop(session, k)
         done += k
         _sync(grid, session.get_X())
         yield (
             "tmop",
             {
                 "energy": float(np.asarray(energies)[-1]),
-                "min_det": grid_min_det(grid.global_nodes, es),
+                "min_det": float(np.asarray(mds)[-1]),
                 "sweeps": done,
             },
         )
@@ -364,14 +417,14 @@ def generate_steps(
             done = 0
             while done < total:
                 k = min(tmop_chunk, total - done)
-                energies, _mds = session.run(k, report_every=report_every, **run_kwargs)
+                energies, mds = run_tmop(session, k)
                 done += k
                 _sync(grid, session.get_X())
                 yield (
                     "tmop",
                     {
                         "energy": float(np.asarray(energies)[-1]),
-                        "min_det": grid_min_det(grid.global_nodes, es),
+                        "min_det": float(np.asarray(mds)[-1]),
                         "sweeps": done,
                     },
                 )

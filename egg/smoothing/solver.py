@@ -8,19 +8,23 @@
 
 """Sweep-context construction for the TMOP block-Jacobi backend.
 
-A :class:`SweepContext` precomputes the per-DOF incidence maps and the target
-``W_inv`` once (the target is a function of logical position only, so it never
-changes during a sweep). The C++ wire itself is built by the single
-dimension-generic builder :func:`egg.smoothing.flat_context.build_flat_context`
-and carried on ``SweepContext.wire``; the per-DOF ``dof_patches`` here are the
-NumPy parity reference only (see :mod:`egg.smoothing.batch` tests).
+A :class:`SweepContext` precomputes the target ``W_inv`` once (the target is a
+function of logical position only, so it never changes during a sweep). The
+C++ wire itself is built by the single dimension-generic builder
+:func:`egg.smoothing.flat_context.build_flat_context` and carried on
+``SweepContext.wire``. The per-DOF NumPy parity-reference views
+(``dof_patches``, ``dof_to_cells``, ``dof_to_locals``, ``w_inv``) are built
+LAZILY on first access — they are consumed only by the parity tests (see
+:mod:`egg.smoothing.batch`), and their O(N) pure-Python construction must not
+tax the production pipeline path.
 
 Dimension note: this builder is 2-D (it names the two axis neighbours directly).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import cached_property
 from itertools import product
 from typing import TYPE_CHECKING, Callable
 
@@ -41,62 +45,165 @@ __all__ = [
 class SweepContext:
     """Precomputed, position-independent data reused across sweeps.
 
+    The eager fields below are what the pipeline consumes (the wire, the
+    energy stencil, the constraint encoding). The NumPy parity-reference
+    views — :attr:`dof_patches`, :attr:`dof_to_cells`, :attr:`dof_to_locals`,
+    :attr:`w_inv`, :attr:`dof_patch_sizes` — are ``cached_property`` accessors
+    built on first use from the retained grid/stencil ingredients, so tests
+    keep their API while production runs never pay for them.
+
     Attributes
     ----------
-    dof_to_cells : list[list[(block_idx, cell_base)]]
-        Cells whose energy depends on each global DOF (all 2**d corners).
-    dof_to_locals : list[list[(block_idx, logical_idx)]]
-        Block-node slots that alias each global DOF (for O(incidence) moves).
-    w_inv : dict[(block_idx, cell_base, corner_offset), ndarray]
-        Cached ``inv(target_fn(cell_base, corner_offset))`` per sample.
-    dof_patches : list[dict]
-        Per-DOF batched stencil arrays for vectorized patch evaluation
-        (see :mod:`egg.smoothing.batch`). Each dict contains ``gc``, ``gn0``,
-        ``gn1``, ``s0``, ``s1``, ``W_inv``, ``role``, ``J`` arrays.
     energy_stencil : dict
         Global stencil arrays over *every* (cell, corner) sample of the grid,
         for one-pass vectorized energy assembly
         (:func:`egg.smoothing.objective.assemble_energy_vec`).
-    dof_patch_sizes : list[int]
-        Number of corner samples ``P`` in each DOF's patch (0 if it has no
-        incident cells, e.g. a fixed corner).
     free_dofs : np.ndarray
         The moving DOFs that own at least one incident cell (``P > 0``), in
         ascending id — the single relaxation group the block-Jacobi sweep runs.
+    dof_patches : list[dict]  (lazy)
+        Per-DOF batched stencil arrays for vectorized patch evaluation
+        (see :mod:`egg.smoothing.batch`). Each dict contains ``gc``, ``gn0``,
+        ``gn1``, ``s0``, ``s1``, ``W_inv``, ``role``, ``J`` arrays.
+    dof_to_cells : list[list[(block_idx, cell_base)]]  (lazy)
+        Cells whose energy depends on each global DOF (all 2**d corners).
+    dof_to_locals : list[list[(block_idx, logical_idx)]]  (lazy)
+        Block-node slots that alias each global DOF (for O(incidence) moves).
+    w_inv : dict[(block_idx, cell_base, corner_offset), ndarray]  (lazy)
+        ``inv(target_fn(cell_base, corner_offset))`` per sample.
+    dof_patch_sizes : list[int]  (lazy)
+        Number of corner samples ``P`` in each DOF's patch (0 if it has no
+        incident cells, e.g. a fixed corner).
     """
 
-    dof_to_cells: list[list[tuple[int, tuple]]]
-    dof_to_locals: list[list[tuple[int, tuple]]]
-    w_inv: dict[tuple[int, tuple, tuple], np.ndarray]
-    dof_patches: list[dict]
     energy_stencil: dict
-    dof_patch_sizes: list[int]
     free_dofs: np.ndarray  # (F,) int moving DOFs with >= 1 incident cell
     dof_constraint_tags: np.ndarray  # (M,) int32 entity type tag per DOF
     dof_constraint_params: np.ndarray  # (M, PARAM_PAD_SIZE) float64 per DOF
     # Variable-length entity data (B-spline knots/nets, composite-path segment
     # records); offsets in dof_constraint_params index into this. Empty when
     # only fixed-size entities are present.
-    entity_arena: np.ndarray = None  # (A,) float64
+    entity_arena: np.ndarray
     # Original entity objects per DOF (for the typed SoA wire boundary).
     # None when no constraints are present.
-    dof_entities: dict = None
-    # Embedding dimension (2 or 3). Defaults to 2.
-    d: int = 2
+    dof_entities: dict
+    # Embedding dimension (2 or 3).
+    d: int
     # The C++ wire ({"groups", "energy_stencil"}) built once by
-    # egg.smoothing.flat_context.build_flat_context — the single wire builder for
-    # both this (reference-carrying) path and the direct structured path. The
-    # dof_patches above stay as the NumPy parity reference only.
-    wire: dict = None
+    # egg.smoothing.flat_context.build_flat_context — the single wire builder
+    # for both this (reference-carrying) path and the direct structured path.
+    wire: dict
+
+    # Lazy-build ingredients for the parity-reference views: the grid (cell /
+    # logical-index iteration), the cell_stencil result, and the per-sample
+    # target inverses. Position-independent, so retaining the grid is safe.
+    _grid: MultiBlockGrid = field(repr=False, default=None)
+    _stencil: dict = field(repr=False, default=None)
+    _samp_w_inv: np.ndarray = field(repr=False, default=None)
+
+    @cached_property
+    def dof_patch_sizes(self) -> list[int]:
+        """Corner-sample count P per DOF, from the membership table."""
+        M = self._grid.global_node_count
+        return np.bincount(self._stencil["m_node"], minlength=M)[:M].tolist()
+
+    @cached_property
+    def dof_patches(self) -> list[dict]:
+        """Per-DOF batched stencil arrays (NumPy parity reference only)."""
+        st = self._stencil
+        M = self._grid.global_node_count
+        en_gc = st["gc"].astype(np.intp)
+        en_gn0, en_gn1 = st["gn"][0].astype(np.intp), st["gn"][1].astype(np.intp)
+        en_s0, en_s1 = st["s"][0].astype(np.intp), st["s"][1].astype(np.intp)
+
+        # Group the node->sample membership by DOF. A stable sort keeps each
+        # DOF's samples in cell/corner traversal order (the reference order);
+        # patches are built for every node (indexed by id).
+        order = np.argsort(st["m_node"], kind="stable")
+        m_node = st["m_node"][order]
+        m_sid = st["m_sid"][order]
+        m_role = st["m_role"][order].astype(np.intp)
+        starts = np.searchsorted(m_node, np.arange(M), side="left")
+        ends = np.searchsorted(m_node, np.arange(M), side="right")
+
+        patches: list[dict] = []
+        for dof_idx in range(M):
+            lo, hi = starts[dof_idx], ends[dof_idx]
+            sids = m_sid[lo:hi]
+            P = int(sids.shape[0])
+            patch = {
+                "gc": en_gc[sids],
+                "gn0": en_gn0[sids],
+                "gn1": en_gn1[sids],
+                "s0": en_s0[sids],
+                "s1": en_s1[sids],
+                "W_inv": self._samp_w_inv[sids] if P else np.zeros((0, 2, 2)),
+                "role": m_role[lo:hi],
+            }
+            patch["J"] = (
+                _batch.make_chain_J(
+                    patch["s0"],
+                    patch["s1"],
+                    patch["W_inv"],
+                )
+                if P > 0
+                else np.zeros((0, 4, 6))
+            )
+            patches.append(patch)
+        return patches
+
+    @cached_property
+    def dof_to_cells(self) -> list[list[tuple[int, tuple]]]:
+        """Cells whose energy depends on each global DOF."""
+        grid = self._grid
+        out: list[list[tuple[int, tuple]]] = [[] for _ in range(grid.global_node_count)]
+        for bi, block in enumerate(grid.blocks):
+            dof_map = grid.block_dof_maps[bi]
+            for cell_base in block.iter_cells():
+                corner_dofs = {
+                    int(dof_map[ci]) for ci in block.corner_indices(cell_base)
+                }
+                for dof in corner_dofs:
+                    out[dof].append((bi, cell_base))
+        return out
+
+    @cached_property
+    def dof_to_locals(self) -> list[list[tuple[int, tuple]]]:
+        """Block-node slots aliasing each global DOF."""
+        grid = self._grid
+        out: list[list[tuple[int, tuple]]] = [[] for _ in range(grid.global_node_count)]
+        for bi, block in enumerate(grid.blocks):
+            dof_map = grid.block_dof_maps[bi]
+            for logical_idx in product(*[range(s) for s in block.logical_shape]):
+                out[int(dof_map[logical_idx])].append((bi, logical_idx))
+        return out
+
+    @cached_property
+    def w_inv(self) -> dict[tuple[int, tuple, tuple], np.ndarray]:
+        """Per-(block, cell, corner) target inverse, keyed for the tests.
+        Rows of the already-inverted per-sample stack, walked in the same
+        sample order the build used."""
+        grid = self._grid
+        corners = list(product((0, 1), repeat=self.d))
+        out: dict[tuple[int, tuple, tuple], np.ndarray] = {}
+        sid = 0
+        for bi, block in enumerate(grid.blocks):
+            for cell_base in block.iter_cells():
+                for co in corners:
+                    out[(bi, cell_base, co)] = self._samp_w_inv[sid]
+                    sid += 1
+        return out
 
 
 def build_sweep_context(
     grid: MultiBlockGrid, target_fn: Callable[..., np.ndarray]
 ) -> SweepContext:
-    """Build the per-sweep incidence maps and cached target inverses once.
+    """Build the sweep context: energy stencil, constraint encoding, C++ wire.
 
     With all-corner sampling a cell's energy depends on *all* 2**d of its corner
-    nodes, so every corner DOF lists the cell as incident.
+    nodes, so every corner DOF lists the cell as incident. The per-DOF NumPy
+    parity-reference views are NOT built here — they materialise lazily on
+    first attribute access (see :class:`SweepContext`).
     """
     from egg.smoothing.flat_context import cell_stencil
 
@@ -111,84 +218,34 @@ def build_sweep_context(
     # are the k-th axis neighbour's global id and sign.
     st = cell_stencil([np.asarray(dm) for dm in grid.block_dof_maps], d)
     ns = st["ns"]
-    en_gc = st["gc"].astype(np.intp)
-    en_gn0, en_gn1 = st["gn"][0].astype(np.intp), st["gn"][1].astype(np.intp)
-    en_s0, en_s1 = st["s"][0].astype(np.intp), st["s"][1].astype(np.intp)
 
-    # Per-(cell, corner) target inverse in sample order, the raw w_inv dict, and
-    # the incidence maps (dof -> cells / locals), built across all blocks.
-    w_inv: dict[tuple[int, tuple, tuple], np.ndarray] = {}
-    dof_to_cells: list[list[tuple[int, tuple]]] = [[] for _ in range(M)]
-    dof_to_locals: list[list[tuple[int, tuple]]] = [[] for _ in range(M)]
-    samp_w_inv = np.empty((ns, d, d))
-
-    for bi, block in enumerate(grid.blocks):
-        dof_map = grid.block_dof_maps[bi]
-        for logical_idx in product(*[range(s) for s in block.logical_shape]):
-            dof_to_locals[int(dof_map[logical_idx])].append((bi, logical_idx))
-
+    # Per-(cell, corner) target in sample order, inverted in ONE stacked
+    # np.linalg.inv over the (ns, d, d) batch — per-sample Python-loop
+    # inversion dominated the build on large grids. The target_fn call itself
+    # stays a per-cell Python call (its signature is per-(block, cell, corner)).
+    samp_w = np.empty((ns, d, d))
     sid = 0
     for bi, block in enumerate(grid.blocks):
-        dof_map = grid.block_dof_maps[bi]
         for cell_base in block.iter_cells():
-            corner_dofs = {int(dof_map[ci]) for ci in block.corner_indices(cell_base)}
-            for dof in corner_dofs:
-                dof_to_cells[dof].append((bi, cell_base))
             for co in corners:
-                wi = np.linalg.inv(target_fn(bi, block, cell_base, co))
-                w_inv[(bi, cell_base, co)] = wi
-                samp_w_inv[sid] = wi
+                samp_w[sid] = target_fn(bi, block, cell_base, co)
                 sid += 1
-
-    # Per-DOF patches: group the node->sample membership by DOF. A stable sort
-    # keeps each DOF's samples in cell/corner traversal order (the reference
-    # order); patches are built for every node (the C++ wire indexes by id).
-    order = np.argsort(st["m_node"], kind="stable")
-    m_node = st["m_node"][order]
-    m_sid = st["m_sid"][order]
-    m_role = st["m_role"][order].astype(np.intp)
-    starts = np.searchsorted(m_node, np.arange(M), side="left")
-    ends = np.searchsorted(m_node, np.arange(M), side="right")
-
-    dof_patches: list[dict] = []
-    for dof_idx in range(M):
-        lo, hi = starts[dof_idx], ends[dof_idx]
-        sids = m_sid[lo:hi]
-        P = int(sids.shape[0])
-        patch = {
-            "gc": en_gc[sids],
-            "gn0": en_gn0[sids],
-            "gn1": en_gn1[sids],
-            "s0": en_s0[sids],
-            "s1": en_s1[sids],
-            "W_inv": samp_w_inv[sids] if P else np.zeros((0, 2, 2)),
-            "role": m_role[lo:hi],
-        }
-        patch["J"] = (
-            _batch.make_chain_J(
-                patch["s0"],
-                patch["s1"],
-                patch["W_inv"],
-            )
-            if P > 0
-            else np.zeros((0, 4, 6))
-        )
-        dof_patches.append(patch)
+    samp_w_inv = np.linalg.inv(samp_w) if ns else np.zeros((0, d, d))
 
     energy_stencil = {
-        "gc": en_gc,
-        "gn0": en_gn0,
-        "gn1": en_gn1,
-        "s0": en_s0,
-        "s1": en_s1,
+        "gc": st["gc"].astype(np.intp),
+        "gn0": st["gn"][0].astype(np.intp),
+        "gn1": st["gn"][1].astype(np.intp),
+        "s0": st["s"][0].astype(np.intp),
+        "s1": st["s"][1].astype(np.intp),
         "W_inv": samp_w_inv if ns else np.zeros((0, 2, 2)),
     }
 
-    dof_patch_sizes = [dof_patches[dof]["gc"].shape[0] for dof in range(M)]
-    # The single block-Jacobi group: every moving DOF that owns a cell.
-    free_dofs = np.array(
-        [dof for dof in range(M) if grid.free_mask[dof] and dof_patch_sizes[dof] > 0],
-        dtype=np.int64,
+    # The single block-Jacobi group: every moving DOF that owns a cell. Patch
+    # size per node comes straight from the membership table (vectorized).
+    counts = np.bincount(st["m_node"], minlength=M)[:M]
+    free_dofs = np.flatnonzero(np.asarray(grid.free_mask) & (counts > 0)).astype(
+        np.int64
     )
 
     # --- Constraint tags/params per DOF ---
@@ -215,19 +272,17 @@ def build_sweep_context(
     )
 
     return SweepContext(
-        dof_to_cells,
-        dof_to_locals,
-        w_inv,
-        dof_patches,
-        energy_stencil,
-        dof_patch_sizes,
-        free_dofs,
-        dof_constraint_tags,
-        dof_constraint_params,
-        np.asarray(arena, dtype=np.float64),
-        dict(grid.dof_constraints),
+        energy_stencil=energy_stencil,
+        free_dofs=free_dofs,
+        dof_constraint_tags=dof_constraint_tags,
+        dof_constraint_params=dof_constraint_params,
+        entity_arena=np.asarray(arena, dtype=np.float64),
+        dof_entities=dict(grid.dof_constraints),
         d=d,
         wire=wire,
+        _grid=grid,
+        _stencil=st,
+        _samp_w_inv=samp_w_inv,
     )
 
 
