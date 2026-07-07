@@ -26,3 +26,9 @@ compile_commands.json
 .devcontainer/.home/
 docs/_build/
 docs/_doxygen/
+
+# fasthtml session key (webui prototype, created at runtime)
+.sesskey
+
+# downloaded browser deps (webui/vendor.py)
+webui/static/vendor/

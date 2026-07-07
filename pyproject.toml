@@ -21,7 +21,16 @@ dependencies = [
   "scipy>=1.17.1",
 ]
 
+[project.scripts]
+# serves webui/ from the repo checkout (editable install only)
+egg-webui = "egg._webui_launcher:main"
+
 [dependency-groups]
+# Web UI prototype: `uv sync --group webui` once, then
+# `uv run --no-sync egg-webui`
+webui = [
+  "python-fasthtml>=0.12",
+]
 # Docs build: `uv run --group docs sphinx-build -b html docs docs/_build/html`
 docs = [
   "sphinx>=8.2",
