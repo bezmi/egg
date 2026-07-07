@@ -853,7 +853,7 @@ struct BSplineCurveParam {
 /// end-to-end (the 2D analogue of an OCCT wire).
 ///
 /// The segments live as fixed-size records in the per-group arena
-/// (@ref kCompositeRecSize doubles each: `[tag, params...]`), so the type stays
+/// (@ref kCompositeRecSize reals each: `[tag, params...]`), so the type stays
 /// trivially copyable. Projection projects onto every segment and keeps the
 /// nearest; the tangent is the matched segment's. The reported effective tdim
 /// is always 1: a node clamped onto a segment endpoint sits on an interior
@@ -865,7 +865,7 @@ struct CompositePath {
     using Vec = VecN<2>;            ///< Vector type.
     static constexpr int tdim = 1;  ///< A path is a curve.
     int n_segs;                     ///< Number of segment records.
-    std::span<const real> recs;     ///< Segment records, @c n_segs*kCompositeRecSize doubles.
+    std::span<const real> recs;     ///< Segment records, @c n_segs*kCompositeRecSize reals.
     const real* arena;              ///< Arena base for span-backed segments (B-splines).
 
     /// Fused frame of the nearest segment to @p p.
@@ -1447,7 +1447,7 @@ template <> struct decode_entity_fn<TrimmedEntity<BSplineSurfaceParam>> {
 /// length entities (B-spline, composite) read their payload from @p arena via
 /// the offsets stored in @p params; fixed-size entities ignore @p arena.
 /// @tparam E The entity type to decode into.
-/// @param params Flat parameter blob (`kParamPad` doubles per DOF).
+/// @param params Flat parameter blob (`kParamPad` reals per DOF).
 /// @param arena Base of the per-group real arena for span-backed entities, or
 ///              nullptr when no variable-length entity is in play.
 template <class E>
@@ -1529,7 +1529,7 @@ static_assert(HasEntitySoA<Free<2>>);
 // Each is a packed contiguous record store: one flat `real[count*kFields]`
 // per partition, stride `kFields` per entity — the layout that matches the
 // sweep's per-entity-load access pattern (one coalesced read of entity i's
-// kFields doubles per work item, no per-field array indirection). The View is
+// kFields reals per work item, no per-field array indirection). The View is
 // a `SoAView<const real>` mdspan with extents `(count, kFields)`; `load`
 // reads `view.records(i, FIELD)` via named compile-time offsets and returns via
 // designated initializers (matching make_entity's style). `bool` trim fields
@@ -1897,7 +1897,7 @@ static_assert(HasEntitySoA<TrimmedEntity<BSplineCurveParam>>);
 // layout the global blob/oracle path uses, but per-composite: any
 // variable-length sub-segment data (B-spline knots/ctrl) is laid down first,
 // then the `n_segs` fixed-stride segment records `[seg_tag, params(kParamPad)]`
-// (kCompositeRecSize doubles each) at offset `rec_off`. The whole slice goes in
+// (kCompositeRecSize reals each) at offset `rec_off`. The whole slice goes in
 // one SegmentedHost/SegmentedView CSR slot (kSeg == 1); the packed fields are
 // `n_segs` and `rec_off` (kFields == 2). On load the reconstructed
 // `CompositePath` points `recs` at `slice[rec_off..]` and `arena` at the slice
@@ -1980,7 +1980,7 @@ static_assert(HasEntitySoA<CompositePath>);
 // ---------------------------------------------------------------------------
 
 /// SoA schema for `TrimmedEntity<PlaneParam>`: packed
-/// `(o(3), ax(3), ay(3))` records (9 doubles). kSeg == 0.
+/// `(o(3), ax(3), ay(3))` records (9 reals). kSeg == 0.
 template <> struct EntitySoA<TrimmedEntity<PlaneParam>> {
     static constexpr EntityTag tag = EntityTag::Plane;
     static constexpr int kFields = 9;
@@ -2014,7 +2014,7 @@ template <> struct EntitySoA<TrimmedEntity<PlaneParam>> {
 };
 
 /// SoA schema for `TrimmedEntity<SphereParam>`: packed
-/// `(c(3), r, ax(3), ay(3))` records (10 doubles); `az` is derived at
+/// `(c(3), r, ax(3), ay(3))` records (10 reals); `az` is derived at
 /// load as `ax × ay`. kSeg == 0.
 template <> struct EntitySoA<TrimmedEntity<SphereParam>> {
     static constexpr EntityTag tag = EntityTag::Sphere;
@@ -2052,7 +2052,7 @@ template <> struct EntitySoA<TrimmedEntity<SphereParam>> {
 };
 
 /// SoA schema for `TrimmedEntity<CylinderParam>`: packed
-/// `(o(3), ax(3), ay(3), r)` records (10 doubles); `az` is derived at
+/// `(o(3), ax(3), ay(3), r)` records (10 reals); `az` is derived at
 /// load as `ax × ay`. kSeg == 0.
 template <> struct EntitySoA<TrimmedEntity<CylinderParam>> {
     static constexpr EntityTag tag = EntityTag::Cylinder;
@@ -2090,7 +2090,7 @@ template <> struct EntitySoA<TrimmedEntity<CylinderParam>> {
 };
 
 /// SoA schema for `TrimmedEntity<Line3Param>`: packed
-/// `(p0(3), p1(3), t0, t1)` records (8 doubles). kSeg == 0.
+/// `(p0(3), p1(3), t0, t1)` records (8 reals). kSeg == 0.
 template <> struct EntitySoA<TrimmedEntity<Line3Param>> {
     static constexpr EntityTag tag = EntityTag::Line3;
     static constexpr int kFields = 8;

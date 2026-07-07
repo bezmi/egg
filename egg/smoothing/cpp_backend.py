@@ -91,8 +91,6 @@ class BlockStructuredContext:
         ``(S,)`` int32 block index of each singular node.
     sing_logical : np.ndarray
         ``(S, d)`` int32 interior logical index of each singular node.
-    sing_valence : np.ndarray
-        ``(S,)`` int32 neighbour count (≠ 2·d) of each singular node.
 
     The owner block of each global DOF and the owner→non-owner shared-node
     broadcast are derived in the C++ core from ``block_global_dof`` (a single
@@ -108,7 +106,6 @@ class BlockStructuredContext:
     halo_dst_padded: np.ndarray
     sing_block: np.ndarray
     sing_logical: np.ndarray
-    sing_valence: np.ndarray
 
     @property
     def num_blocks(self) -> int:
@@ -127,12 +124,19 @@ def build_structured_context_from_block_maps(
 
     For hand-assembled multiblock grids (e.g. the ``sphere_in_cube`` benchmark)
     that carry only the per-block structured id arrays, not a
-    :class:`BlockTopology`. The ghost **halo and singularity tables are left empty**
-    here, because
-    the C++ structured remap mirrors every cross-block patch neighbour into a spare
-    ghost slot (the singular-fan fallback) — so a correct sweep needs no
-    precomputed face-ghost connectivity. The canonical, fully-coalesced path with
-    face ghosts is :func:`build_block_structured_context`.
+    :class:`BlockTopology`. Conforming **face-ghost entries are derived here by
+    shared-global-DOF twin matching** (no orientation logic): for each face node
+    with a copy in another block, the ghost just outside the face is filled by
+    the node one step behind the twin — resolved purely through the id arrays,
+    including "patchwork" contacts where one face touches several neighbour
+    blocks. Anything that does not resolve (block self-contacts, singular-edge
+    neighbourhoods) is left to the C++ structured remap, which mirrors every
+    remaining cross-block patch neighbour into a spare ghost slot (the
+    singular-fan fallback) — so the sweep is correct either way; the derived
+    entries buy coalesced ghost reads and give the FAS hierarchy the tables it
+    needs to relax coarse interface DOFs. The singularity tables stay
+    empty. The canonical path from a :class:`BlockTopology` is
+    :func:`build_block_structured_context`.
 
     Parameters
     ----------
@@ -147,19 +151,101 @@ def build_structured_context_from_block_maps(
         np.ascontiguousarray(b.reshape(-1), dtype=np.int32) for b in block_global_dof
     ]
 
+    # gid -> [(block, logical), ...] over the SHARED nodes only (a face node
+    # duplicated across blocks), plus per-block gid sets (to reject a "behind"
+    # candidate that runs parallel to the contact).
+    n_gids = max(int(f.max()) for f in flat_dof if f.size) + 1 if flat_dof else 0
+    counts = np.zeros(n_gids, dtype=np.int64)
+    for f in flat_dof:
+        counts += np.bincount(f, minlength=n_gids)
+    shared = counts > 1
+    where: dict[int, list[tuple[int, tuple[int, ...]]]] = {}
+    for bi, dof in enumerate(block_global_dof):
+        for logical in zip(*np.nonzero(shared[dof])):
+            li = tuple(int(c) for c in logical)
+            where.setdefault(int(dof[li]), []).append((bi, li))
+    in_block = [set(int(g) for g in f) for f in flat_dof]
+
+    def behind_gid(dst_block: int, gid: int) -> tuple[int, tuple[int, ...]] | None:
+        """(block, logical) of the node one step behind the contact face —
+        the OWNER (lowest-block) copy, so the halo source slot is never also a
+        broadcast destination — or None when no twin resolves it unambiguously."""
+        g_behind = None
+        loc = None
+        for bj, lj in where.get(gid, ()):
+            if bj == dst_block:
+                continue
+            shape_j = block_global_dof[bj].shape
+            for axis in range(d):
+                if lj[axis] == 0:
+                    step = 1
+                elif lj[axis] == shape_j[axis] - 1:
+                    step = -1
+                else:
+                    continue
+                inner = list(lj)
+                inner[axis] += step
+                g_in = int(block_global_dof[bj][tuple(inner)])
+                # The contact normal is the axis whose inward step leaves the
+                # receiving block; a parallel (seam) step stays inside it.
+                if g_in in in_block[dst_block]:
+                    continue
+                if g_behind is not None and g_behind != g_in:
+                    return None  # ambiguous (self-contact / singular edge)
+                g_behind = g_in
+                loc = (bj, tuple(inner))
+        if g_behind is None:
+            return None
+        if shared[g_behind]:
+            return min(where[g_behind])  # owner copy
+        return loc  # interior to exactly one block — the candidate's own slot
+
+    halo_src_block: list[int] = []
+    halo_src_padded: list[tuple[int, ...]] = []
+    halo_dst_block: list[int] = []
+    halo_dst_padded: list[tuple[int, ...]] = []
+    for bi, dof in enumerate(block_global_dof):
+        shape = dof.shape
+        for axis in range(d):
+            for side in (0, 1):
+                fixed = 0 if side == 0 else shape[axis] - 1
+                face = np.take(dof, fixed, axis=axis)
+                for free_idx in np.ndindex(face.shape):
+                    gid = int(face[free_idx])
+                    if not shared[gid]:
+                        continue  # physical-boundary face node — no twin
+                    logical = list(free_idx[:axis]) + [fixed] + list(free_idx[axis:])
+                    hit = behind_gid(bi, gid)
+                    if hit is None:
+                        continue
+                    bj, inner = hit
+                    ghost = [c + 1 for c in logical]
+                    ghost[axis] = 0 if side == 0 else shape[axis] + 1
+                    halo_src_block.append(bj)
+                    halo_src_padded.append(tuple(c + 1 for c in inner))
+                    halo_dst_block.append(bi)
+                    halo_dst_padded.append(tuple(ghost))
+
     empty_i = np.zeros((0,), dtype=np.int32)
     empty_rows = np.zeros((0, d), dtype=np.int32)
     return BlockStructuredContext(
         d=d,
         interior_shapes=interior_shapes,
         block_global_dof=flat_dof,
-        halo_src_block=empty_i,
-        halo_src_padded=empty_rows,
-        halo_dst_block=empty_i,
-        halo_dst_padded=empty_rows,
+        halo_src_block=np.asarray(halo_src_block, dtype=np.int32),
+        halo_src_padded=(
+            np.asarray(halo_src_padded, dtype=np.int32)
+            if halo_src_padded
+            else empty_rows
+        ),
+        halo_dst_block=np.asarray(halo_dst_block, dtype=np.int32),
+        halo_dst_padded=(
+            np.asarray(halo_dst_padded, dtype=np.int32)
+            if halo_dst_padded
+            else empty_rows
+        ),
         sing_block=empty_i,
         sing_logical=empty_rows,
-        sing_valence=empty_i,
     )
 
 
@@ -287,7 +373,6 @@ def build_block_structured_context(grid: MultiBlockGrid) -> BlockStructuredConte
     sing_logical = np.array(
         [s.logical_idx for s in topo.singularities], dtype=np.int32
     ).reshape(-1, d)
-    sing_valence = np.array([s.valence for s in topo.singularities], dtype=np.int32)
 
     e = len(src_block)
     return BlockStructuredContext(
@@ -300,7 +385,6 @@ def build_block_structured_context(grid: MultiBlockGrid) -> BlockStructuredConte
         halo_dst_padded=np.array(dst_padded, dtype=np.int32).reshape(e, d),
         sing_block=sing_block,
         sing_logical=sing_logical,
-        sing_valence=sing_valence,
     )
 
 
@@ -376,6 +460,47 @@ class CppStructuredSweepSession:
             omega=omega,
             report_every=report_every,
         )
+
+    def run_fas(
+        self,
+        n_cycles: int,
+        *,
+        nu_pre: int = 2,
+        nu_post: int = 2,
+        nu_coarse: int = 32,
+        omega: float = 0.8,
+        max_levels: int = 32,
+        phase: str = "barrier",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Run ``n_cycles`` of FAS (nonlinear geometric multigrid) V-cycles on
+        the resident packed X; returns per-cycle ``(energies, mindets)``.
+
+        Each cycle runs ``nu_pre`` block-Jacobi sweeps, a tau-corrected coarse
+        solve that recurses down the factor-2 hierarchy (at most
+        ``max_levels`` levels, fine included; the hierarchy stops on its own
+        when blocks stop coarsening) to a coarsest level solved with Newton
+        sweeps scaled to its interior diameter (capped by ``nu_coarse``), a
+        safeguarded coarse-grid correction
+        (backtracking line search on the global energy, so energy decrease and
+        ``det > 0`` are preserved), and ``nu_post`` sweeps. Shape phase only:
+        ``phase="untangle"`` raises ``ValueError``. Blocks whose node counts
+        admit no coarse level (or ``max_levels < 2``) fall back to plain
+        block-Jacobi with the equivalent fine-sweep budget.
+        """
+        return self._session.run_fas(
+            n_cycles,
+            nu_pre=nu_pre,
+            nu_post=nu_post,
+            nu_coarse=nu_coarse,
+            omega=omega,
+            max_levels=max_levels,
+            phase=phase,
+        )
+
+    def mg_levels(self) -> list:
+        """Coarse-hierarchy shape: one list per level of per-block interior
+        node-count tuples; empty when no coarse level can be built."""
+        return self._session.mg_levels()
 
     def get_X(self) -> np.ndarray:
         """Return X gathered back to global node order, reshaped to the input shape."""

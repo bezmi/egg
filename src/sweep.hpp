@@ -36,6 +36,10 @@ namespace egg
 // D×D Newton step; the A→T→detA math is single-sourced in
 // patch.hpp::assemble_vecT. Everything is generic over D.
 
+/// Backtracking budget of every per-DOF line search (α halvings before the
+/// step is dropped); also the FasOptions::max_backtracks default.
+inline constexpr int kMaxBacktracks = 10;
+
 /// Per-partition typed SoA host data (one per entity type in the group).
 /// Populated by `unpack_context` from the Python `entities` sub-dicts; the
 /// SweepDeviceContextT ctor uploads to USM and builds PartitionView's
@@ -908,8 +912,10 @@ inline VecN<D> newton_delta_with_seed(
 /// callable, so entity variants are never all inlined (no std::visit
 /// occupancy collapse). Double-buffered: reads use @p X (frozen snapshot),
 /// the scatter writes @p X_out (null = in place), race-free since distinct
-/// DOFs are distinct nodes. @p omega damps the update
-/// (cur = pos + ω(cur − pos)). @p seeds is the optional per-node warm-start
+/// DOFs are distinct nodes. @p omega scales the Newton step BEFORE the
+/// projected line search (each trial is projected onto the entity), so
+/// damping never pulls a constrained DOF off its geometry — a post-hoc
+/// world-space blend would. @p seeds is the optional per-node warm-start
 /// cache (stride D−1, global node id; null = cold projection), persisted by
 /// the owning context so iterative projections converge in 1–2 Newton steps.
 /// Interior DOFs are relaxed by the fissioned metric/interior kernels; the
@@ -951,13 +957,16 @@ inline void sweep_kernel(sycl::queue& q,
                 delta = newton_delta_with_seed<D, false>(r.grad, r.hess, pos, ent, seed_slot);
             });
         }
+        // Jacobi damping on the step itself: trials stay projected, so the
+        // accepted point is exactly what gets stored.
+        for (int k = 0; k < D; ++k) { delta[k] *= omega; }
 
-        // 3. Backtracking: halve alpha up to 10×; accept on
-        //    finite(e) && e <= e0 + 1e-12 && objective.accept_mindet(mindet).
+        // 3. Backtracking: halve alpha up to kMaxBacktracks×; accept on
+        //    finite(e) && e <= e0 + tol::energy && objective.accept_mindet(mindet).
         real alpha = 1.0_r;
         PtN<D> cur = pos;
         bool accepted = false;
-        for (int it = 0; it < 10 && !accepted; ++it) {
+        for (int it = 0; it < kMaxBacktracks && !accepted; ++it) {
             PtN<D> raw;
             for (int k = 0; k < D; ++k) { raw[k] = pos[k] + alpha * delta[k]; }
             // Constrained DOFs project the trial onto their entity via the same
@@ -977,27 +986,9 @@ inline void sweep_kernel(sycl::queue& q,
                 }
             }
 
-            real e_new = 0.0_r;
-            real mdet = std::numeric_limits<real>::infinity();
-            for (int p = 0; p < pv.P; ++p) {
-                // Substitute the trial position for the moving DOF; all other
-                // nodes load from X. The A→T→detA math is the single source in
-                // patch.hpp::assemble_vecT.
-                auto node = [&](int ni) -> PtN<D> { return ni == dof ? trial : load_pt<D>(X, ni); };
-                const int sid = pv.sample_id[p];  // shared-table index of occurrence p
-                PtN<D> corner = node(pv.gc[sid]);
-                std::array<PtN<D>, D> nbr;
-                std::array<real, D> sc;
-                for (int k = 0; k < D; ++k) {
-                    nbr[k] = node(pv.gn[k][sid]);
-                    sc[k] = pv.s[k][sid];
-                }
-                real detA;
-                const VecTN<D> t =
-                  assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
-                e_new += objective.value(t);
-                mdet = std::min(detA, mdet);
-            }
+            real e_new;
+            real mdet;
+            trial_energy_mindet<D>(pv, X, dof, trial, objective, e_new, mdet);
 
             const bool ok = sycl::isfinite(e_new) && (e_new <= r.energy + tol::energy) &&
                             objective.accept_mindet(mdet);
@@ -1009,13 +1000,7 @@ inline void sweep_kernel(sycl::queue& q,
             }
         }
 
-        // 4. Jacobi relaxation weighting: cur = pos + ω·(cur − pos). ω=1 leaves
-        //    cur untouched (undamped).
-        if (omega != 1.0_r) {
-            for (int k = 0; k < D; ++k) { cur[k] = pos[k] + (omega * (cur[k] - pos[k])); }
-        }
-
-        // 5. Scatter into the double-buffered X_out snapshot. Race-free: distinct
+        // 4. Scatter into the double-buffered X_out snapshot. Race-free: distinct
         //    DOFs are distinct nodes, so the scatter never collides.
         store_pt<D>(out, dof, cur);
     });
@@ -1036,14 +1021,20 @@ inline void sweep_kernel(sycl::queue& q,
 /// @param hess_buf  [num_nodes * D*D]  contracted Hessian per node (row-major).
 /// @param e0_buf    [num_nodes]        baseline patch energy per node.
 /// @param objective Metric objective functor.
-template <int D, class Obj>
+/// @tparam HasTau   FAS coherence term: minimize E(x) − Σ_d τ_d·x_d instead of
+///                  E — the stored gradient is shifted by −τ_d (fas.hpp). A
+///                  compile-time branch so the fine-level (HasTau = false)
+///                  instantiation is bit-identical to the pre-FAS kernel.
+/// @param tau       [num_nodes * D] per-node linear shift (HasTau only).
+template <int D, class Obj, bool HasTau = false>
 inline void metric_kernel(sycl::queue& q,
                           const GroupViewT<D>& g,
                           const real* X,
                           real* grad_buf,
                           real* hess_buf,
                           real* e0_buf,
-                          Obj objective)
+                          Obj objective,
+                          const real* tau = nullptr)
 {
     if (g.ndof == 0) { return; }
     q.parallel_for(sycl::range<1>(g.ndof), [=](sycl::id<1> idx) {
@@ -1060,7 +1051,13 @@ inline void metric_kernel(sycl::queue& q,
                 : patch_eval<D>(g.patch(d), X, objective);
         const std::size_t base = static_cast<std::size_t>(dof);
         real* gslot = grad_buf + (base * D);
-        for (int k = 0; k < D; ++k) { gslot[k] = r.grad[k]; }
+        for (int k = 0; k < D; ++k) {
+            if constexpr (HasTau) {
+                gslot[k] = r.grad[k] - tau[(base * D) + static_cast<std::size_t>(k)];
+            } else {
+                gslot[k] = r.grad[k];
+            }
+        }
         real* hslot = hess_buf + (base * D * D);
         for (int k = 0; k < D * D; ++k) { hslot[k] = r.hess[k]; }
         e0_buf[base] = r.energy;
@@ -1079,7 +1076,13 @@ inline void metric_kernel(sycl::queue& q,
 /// @param omega     Relaxation weight (1.0 = undamped).
 /// @param grad_buf,hess_buf,e0_buf Metric buffers from @ref metric_kernel.
 /// @param objective Metric objective functor.
-template <int D, class Obj>
+/// @tparam HasTau   FAS coherence term (see @ref metric_kernel): the gradient
+///                  in grad_buf is already shifted; here the line-search
+///                  energies get the matching shift −τ_d·x_d (the Hessian is
+///                  untouched — the shift is linear — and accept_mindet stays
+///                  on the raw geometric det).
+/// @param tau       [num_nodes * D] per-node linear shift (HasTau only).
+template <int D, class Obj, bool HasTau = false>
 inline void interior_update_kernel(sycl::queue& q,
                                    const GroupViewT<D>& g,
                                    real* X,
@@ -1088,7 +1091,8 @@ inline void interior_update_kernel(sycl::queue& q,
                                    const real* grad_buf,
                                    const real* hess_buf,
                                    const real* e0_buf,
-                                   Obj objective)
+                                   Obj objective,
+                                   const real* tau = nullptr)
 {
     if (g.ndof == 0) { return; }
     real* out = X_out ? X_out : X;
@@ -1105,7 +1109,16 @@ inline void interior_update_kernel(sycl::queue& q,
         for (int k = 0; k < D; ++k) { grad[k] = gslot[k]; }
         const real* hslot = hess_buf + (base * D * D);
         for (int k = 0; k < D * D; ++k) { hess[k] = hslot[k]; }
-        const real e0 = e0_buf[base];
+        real e0 = e0_buf[base];
+
+        // FAS shift of the baseline energy: E(x) − τ_d·x_d at the current pos.
+        VecN<D> tau_d {};
+        if constexpr (HasTau) {
+            for (int k = 0; k < D; ++k) {
+                tau_d[k] = tau[(base * D) + static_cast<std::size_t>(k)];
+                e0 -= tau_d[k] * pos[k];
+            }
+        }
 
         // Interior DOF: plain d×d Newton solve (no entity geometry).
         const VecN<D> delta = solveNxN<D>(hess, grad);
@@ -1118,12 +1131,12 @@ inline void interior_update_kernel(sycl::queue& q,
         const bool synth = g.interior(d, block, logical);
         const PatchViewT<D> pv = synth ? PatchViewT<D> {} : g.patch(d);
 
-        // Backtracking: halve alpha up to 10×; trial == raw (interior projects to
-        // identity). Accept on finite(e) && e <= e0 + tol && accept_mindet.
+        // Backtracking: halve alpha up to kMaxBacktracks×; trial == raw (interior
+        // projects to identity). Accept on finite(e) && e <= e0 + tol && accept_mindet.
         real alpha = 1.0_r;
         PtN<D> cur = pos;
         bool accepted = false;
-        for (int it = 0; it < 10 && !accepted; ++it) {
+        for (int it = 0; it < kMaxBacktracks && !accepted; ++it) {
             PtN<D> trial;
             for (int k = 0; k < D; ++k) { trial[k] = pos[k] + (alpha * delta[k]); }
             real e_new = 0.0_r;
@@ -1132,24 +1145,12 @@ inline void interior_update_kernel(sycl::queue& q,
                 synth_trial_energy_mindet<
                   D>(g.block_off, g.nstride, block, logical, X, dof, trial, objective, e_new, mdet);
             } else {
-                for (int p = 0; p < pv.P; ++p) {
-                    auto node = [&](int ni) -> PtN<D> {
-                        return ni == dof ? trial : load_pt<D>(X, ni);
-                    };
-                    const int sid = pv.sample_id[p];  // shared-table index of occurrence p
-                    PtN<D> corner = node(pv.gc[sid]);
-                    std::array<PtN<D>, D> nbr;
-                    std::array<real, D> sc;
-                    for (int k = 0; k < D; ++k) {
-                        nbr[k] = node(pv.gn[k][sid]);
-                        sc[k] = pv.s[k][sid];
-                    }
-                    real detA;
-                    const VecTN<D> t =
-                      assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
-                    e_new += objective.value(t);
-                    mdet = std::min(detA, mdet);
-                }
+                trial_energy_mindet<D>(pv, X, dof, trial, objective, e_new, mdet);
+            }
+            // Shift the trial energy by the same linear term as e0 above, so
+            // the acceptance compares the FAS objective on both sides.
+            if constexpr (HasTau) {
+                for (int k = 0; k < D; ++k) { e_new -= tau_d[k] * trial[k]; }
             }
             const bool ok =
               sycl::isfinite(e_new) && (e_new <= e0 + tol::energy) && objective.accept_mindet(mdet);
@@ -1227,8 +1228,11 @@ inline std::pair<Param<K>, std::array<VecN<D>, K>>
 /// (de Boor nd=0) — the heavy nd=1 derivative rows run once instead of ≤10×
 /// per DOF. The constraint is preserved exactly (every trial lands on the
 /// geometry) and the Δq reduction is exact (δ_world ∈ span(J)); the only
-/// difference vs world-space LS is curvature at finite α. Warm path only —
-/// the cold sweep 0 stays the world-space @ref sweep_kernel that seeds q*.
+/// difference vs world-space LS is curvature at finite α. @p omega scales
+/// the step (Δq, or the world-space δ in the reprojection arm) BEFORE the
+/// line search for the same reason as @ref sweep_kernel: damping must never
+/// pull a constrained DOF off its geometry. Warm path only — the cold
+/// sweep 0 stays the world-space @ref sweep_kernel that seeds q*.
 template <int D, class Obj>
 inline void sweep_boundary_paramls_kernel(sycl::queue& q,
                                           const GroupViewT<D>& g,
@@ -1295,37 +1299,21 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q,
                     for (int i = 0; i < D; ++i) { s2 += J[a][i] * delta[i]; }
                     Jtd[a] = s2;
                 }
-                const VecN<K> dq = spd_solve<K>(JtJ, Jtd);
+                VecN<K> dq = spd_solve<K>(JtJ, Jtd);
+                for (int a = 0; a < K; ++a) { dq[a] *= omega; }
 
                 // 5. Param-space backtracking: q_trial = clamp(q* + αΔq), trial =
                 //    eval(q_trial) — a value-only (nd=0) de Boor, no reprojection.
                 real alpha = 1.0_r;
                 bool accepted = false;
-                for (int it = 0; it < 10 && !accepted; ++it) {
+                for (int it = 0; it < kMaxBacktracks && !accepted; ++it) {
                     Param<K> qt;
                     for (int a = 0; a < K; ++a) { qt[a] = qstar[a] + (alpha * dq[a]); }
                     qt = ent.trim.clamp(qt);
                     const PtN<D> trial = ent.param.eval(qt);
-                    real e_new = 0.0_r;
-                    real mdet = std::numeric_limits<real>::infinity();
-                    for (int p = 0; p < pv.P; ++p) {
-                        auto node = [&](int ni) -> PtN<D> {
-                            return ni == dof ? trial : load_pt<D>(X, ni);
-                        };
-                        const int sid = pv.sample_id[p];  // shared-table index
-                        PtN<D> corner = node(pv.gc[sid]);
-                        std::array<PtN<D>, D> nbr;
-                        std::array<real, D> sc;
-                        for (int k = 0; k < D; ++k) {
-                            nbr[k] = node(pv.gn[k][sid]);
-                            sc[k] = pv.s[k][sid];
-                        }
-                        real detA;
-                        const VecTN<D> t =
-                          assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
-                        e_new += objective.value(t);
-                        mdet = std::min(detA, mdet);
-                    }
+                    real e_new;
+                    real mdet;
+                    trial_energy_mindet<D>(pv, X, dof, trial, objective, e_new, mdet);
                     const bool ok = sycl::isfinite(e_new) && (e_new <= r.energy + tol::energy) &&
                                     objective.accept_mindet(mdet);
                     if (ok) {
@@ -1344,34 +1332,18 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q,
                 // analytic reprojection per trial. (The free/interior entity's
                 // identity `project` also matches here, but free DOFs never enter
                 // this boundary group — they are relaxed by the dedicated kernel.)
-                const VecN<D> delta =
+                VecN<D> delta =
                   newton_delta_with_seed<D, true>(r.grad, r.hess, pos, ent, seed_slot);
+                for (int k = 0; k < D; ++k) { delta[k] *= omega; }
                 real alpha = 1.0_r;
                 bool accepted = false;
-                for (int it = 0; it < 10 && !accepted; ++it) {
+                for (int it = 0; it < kMaxBacktracks && !accepted; ++it) {
                     PtN<D> raw;
                     for (int k = 0; k < D; ++k) { raw[k] = pos[k] + (alpha * delta[k]); }
                     const PtN<D> trial = project_with_seed<D, true>(ent, raw, seed_slot);
-                    real e_new = 0.0_r;
-                    real mdet = std::numeric_limits<real>::infinity();
-                    for (int p = 0; p < pv.P; ++p) {
-                        auto node = [&](int ni) -> PtN<D> {
-                            return ni == dof ? trial : load_pt<D>(X, ni);
-                        };
-                        const int sid = pv.sample_id[p];  // shared-table index
-                        PtN<D> corner = node(pv.gc[sid]);
-                        std::array<PtN<D>, D> nbr;
-                        std::array<real, D> sc;
-                        for (int k = 0; k < D; ++k) {
-                            nbr[k] = node(pv.gn[k][sid]);
-                            sc[k] = pv.s[k][sid];
-                        }
-                        real detA;
-                        const VecTN<D> t =
-                          assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
-                        e_new += objective.value(t);
-                        mdet = std::min(detA, mdet);
-                    }
+                    real e_new;
+                    real mdet;
+                    trial_energy_mindet<D>(pv, X, dof, trial, objective, e_new, mdet);
                     const bool ok = sycl::isfinite(e_new) && (e_new <= r.energy + tol::energy) &&
                                     objective.accept_mindet(mdet);
                     if (ok) {
@@ -1383,9 +1355,6 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q,
                 }
             }
         });
-        if (omega != 1.0_r) {
-            for (int k = 0; k < D; ++k) { cur[k] = pos[k] + (omega * (cur[k] - pos[k])); }
-        }
         store_pt<D>(out, dof, cur);
     });
 }
@@ -1428,17 +1397,113 @@ inline void reduce_energy_mindet(
                    });
 }
 
+/// One double-buffered block-Jacobi sweep: pre-sweep hook on the read buffer,
+/// interior metric/update kernel pair over the Free prefix, then the boundary
+/// kernel over the non-Free tail (cold world-space on the first sweep to seed
+/// the warm-start cache, warm param-LS after). Reads @p x_in (frozen
+/// snapshot), writes @p x_out; the caller swaps. Shared by @ref
+/// run_block_jacobi and the FAS pre/post-smooths — a coarse level passes a
+/// no-op hook, a view with n_free == ndof (no boundary tail, both boundary
+/// kernels early-return), and null @p seeds.
+///
+/// @param mg        merged group view (Free-first reordered).
+/// @param cold_boundary  true on the first sweep of a run (cold projection).
+/// @param seeds     per-node warm-start cache (null = cold projections).
+/// @param grad_buf,hess_buf,e0_buf  per-node metric scratch, keyed by global
+///                  node id (written by metric_kernel, read by the update).
+template <int D, class Obj, class PreSweep>
+inline void jacobi_sweep_once(sycl::queue& q,
+                              const GroupViewT<D>& mg,
+                              Obj objective,
+                              PreSweep& before_sweep,
+                              real* x_in,
+                              real* x_out,
+                              real omega,
+                              bool cold_boundary,
+                              real* seeds,
+                              real* grad_buf,
+                              real* hess_buf,
+                              real* e0_buf)
+{
+    before_sweep(q, x_in);  // refresh ghosts + shared-node copies on the read buffer
+    // Interior metric/update split: metric_kernel writes (grad, hess, e0)
+    // per node; interior_update_kernel reads them back and does the Newton
+    // solve + backtracking. Both run over [0, n_free) on the frozen x_in;
+    // the update writes disjoint x_out slots, so block-Jacobi correctness
+    // holds. Separate kernels keep the working sets apart (144 → ~88 + ~80
+    // VGPR).
+    const GroupViewT<D> interior = mg.dof_subrange(0, mg.n_free);
+    metric_kernel<D, Obj>(q, interior, x_in, grad_buf, hess_buf, e0_buf, objective);
+    interior_update_kernel<D, Obj>(q,
+                                   interior,
+                                   x_in,
+                                   x_out,
+                                   omega,
+                                   grad_buf,
+                                   hess_buf,
+                                   e0_buf,
+                                   objective);
+    // Boundary cold/warm split: the first sweep runs the robust cold kernel
+    // (8×8 grid + exact Newton nd=2) to project topologically-placed nodes
+    // and populate the warm-seed cache; later sweeps run the lean warm
+    // kernel (GN nd=1 — the de Boor second-order rows stay out of the hot
+    // kernel). NB: per-entity monomorphization of the boundary kernel was
+    // measured to REGRESS (BSpline arm alone 208 VGPR vs the union's 184,
+    // plus a launch explosion), so the boundary stays one union kernel.
+    const GroupViewT<D> bndry = mg.dof_subrange(mg.n_free, mg.ndof - mg.n_free);
+    if (cold_boundary) {
+        sweep_kernel<D, Obj>(q, bndry, x_in, objective, x_out, omega, seeds);
+    } else {
+        // Warm path: param-space line search (see kernel doc).
+        sweep_boundary_paramls_kernel<D, Obj>(q, bndry, x_in, objective, x_out, omega, seeds);
+    }
+}
+
+/// Reusable device scratch of the smoother drivers, owned by the resident
+/// session (StructuredExecutorT) so per-chunk run/run_fas calls do not
+/// re-allocate — USM malloc/free can synchronise the device, which is pure
+/// dead time in the launch-bound small-mesh regime. Lazily (re)sized; no
+/// state is carried between calls (each driver initialises what it reads:
+/// x_new is copied from X, the metric buffers are written before read, corr
+/// is memset per run_fas call).
+template <int D> struct SweepScratchT {
+    UsmBuffer<real> x_new;           ///< [x_size] double-buffer partner of X
+    UsmBuffer<real> grad, hess, e0;  ///< [nn*D], [nn*D*D], [nn] metric scratch
+    UsmBuffer<real> corr;            ///< [x_size] FAS prolonged correction
+    UsmBuffer<real> ls;              ///< [4] FAS line-search readback
+
+    /// Size the Jacobi buffers (x_new + metric) for nn nodes / x_size reals.
+    void ensure_jacobi(sycl::queue& q, std::size_t nn, std::size_t x_size)
+    {
+        if (x_new.size() != x_size) { x_new = UsmBuffer<real> {q, x_size}; }
+        if (e0.size() != nn) {
+            grad = UsmBuffer<real> {q, nn * static_cast<std::size_t>(D)};
+            hess = UsmBuffer<real> {q, nn * static_cast<std::size_t>(D * D)};
+            e0 = UsmBuffer<real> {q, nn};
+        }
+    }
+    /// The Jacobi buffers plus the FAS-only correction/readback slots.
+    void ensure_fas(sycl::queue& q, std::size_t nn, std::size_t x_size)
+    {
+        ensure_jacobi(q, nn, x_size);
+        if (corr.size() != x_size) { corr = UsmBuffer<real> {q, x_size}; }
+        if (ls.size() != 4) { ls = UsmBuffer<real> {q, 4}; }
+    }
+};
+
 /// Double-buffered block-Jacobi driver: n_sweeps of (pre-sweep hook → merged
 /// Jacobi launch reading X_in, writing X_new → energy/min-det reduction →
 /// swap). Under the frozen-halo cadence every free DOF reads the previous
 /// snapshot, so there is no intra-sweep dependency. @p before_sweep is the
-/// per-sweep halo hook; @p omega the SOR weight. X_new is allocated once and
-/// copied from X; each sweep writes every free DOF and ghosts are
-/// re-exchanged, so no per-sweep full copy is needed. The canonical ctx
-/// buffer is restored if an odd number of swaps left the result in X_new.
+/// per-sweep halo hook; @p omega the SOR weight; @p scratch the reusable
+/// device buffers (lazily sized here). X_new is copied from X each call;
+/// each sweep writes every free DOF and ghosts are re-exchanged, so no
+/// per-sweep full copy is needed. The canonical ctx buffer is restored if an
+/// odd number of swaps left the result in X_new.
 template <int D, class Obj, class PreSweep>
 inline std::pair<std::vector<real>, std::vector<real>> run_block_jacobi(sycl::queue& q,
                                                                         SweepDeviceContextT<D>& ctx,
+                                                                        SweepScratchT<D>& scratch,
                                                                         Obj objective,
                                                                         int n_sweeps,
                                                                         PreSweep before_sweep,
@@ -1450,16 +1515,17 @@ inline std::pair<std::vector<real>, std::vector<real>> run_block_jacobi(sycl::qu
     UsmBuffer<real> d_e(q, report_count);
     UsmBuffer<real> d_m(q, report_count);
     const std::size_t nbuf = ctx.x_size();
-    UsmBuffer<real> x_new_buf(q, nbuf);
 
     // Per-node metric scratch for the interior split, keyed by global node id
     // so the same buffers serve the boundary launches. Written by the metric
     // kernel before the update kernel reads them each sweep — stale slots are
     // never read, so no per-sweep memset.
     const std::size_t nn = ctx.num_nodes();
-    UsmBuffer<real> grad_buf(q, nn * D);
-    UsmBuffer<real> hess_buf(q, nn * D * D);
-    UsmBuffer<real> e0_buf(q, nn);
+    scratch.ensure_jacobi(q, nn, nbuf);
+    UsmBuffer<real>& x_new_buf = scratch.x_new;
+    UsmBuffer<real>& grad_buf = scratch.grad;
+    UsmBuffer<real>& hess_buf = scratch.hess;
+    UsmBuffer<real>& e0_buf = scratch.e0;
 
     real* canonical = ctx.X();
     real* x_in = canonical;
@@ -1471,50 +1537,18 @@ inline std::pair<std::vector<real>, std::vector<real>> run_block_jacobi(sycl::qu
     constexpr int kSyncEvery = 32;
     std::size_t report_idx = 0;
     for (int s = 0; s < n_sweeps; ++s) {
-        before_sweep(q, x_in);  // refresh ghosts + shared-node copies on the read buffer
-        // Interior metric/update split: metric_kernel writes (grad, hess, e0)
-        // per node; interior_update_kernel reads them back and does the Newton
-        // solve + backtracking. Both run over [0, n_free) on the frozen x_in;
-        // the update writes disjoint x_out slots, so block-Jacobi correctness
-        // holds. Separate kernels keep the working sets apart (144 → ~88 + ~80
-        // VGPR).
-        const GroupViewT<D> interior = mg.dof_subrange(0, mg.n_free);
-        metric_kernel<D, Obj>(q,
-                              interior,
-                              x_in,
-                              grad_buf.data(),
-                              hess_buf.data(),
-                              e0_buf.data(),
-                              objective);
-        interior_update_kernel<D, Obj>(q,
-                                       interior,
-                                       x_in,
-                                       x_out,
-                                       omega,
-                                       grad_buf.data(),
-                                       hess_buf.data(),
-                                       e0_buf.data(),
-                                       objective);
-        // Boundary cold/warm split: sweep 0 runs the robust cold kernel (8×8
-        // grid + exact Newton nd=2) to project topologically-placed nodes and
-        // populate the warm-seed cache; later sweeps run the lean warm kernel
-        // (GN nd=1 — the de Boor second-order rows stay out of the hot
-        // kernel). NB: per-entity monomorphization of the boundary kernel was
-        // measured to REGRESS (BSpline arm alone 208 VGPR vs the union's 184,
-        // plus a launch explosion), so the boundary stays one union kernel.
-        const GroupViewT<D> bndry = mg.dof_subrange(mg.n_free, mg.ndof - mg.n_free);
-        if (s == 0) {
-            sweep_kernel<D, Obj>(q, bndry, x_in, objective, x_out, omega, ctx.seeds());
-        } else {
-            // Warm path: param-space line search (see kernel doc).
-            sweep_boundary_paramls_kernel<D, Obj>(q,
-                                                  bndry,
-                                                  x_in,
-                                                  objective,
-                                                  x_out,
-                                                  omega,
-                                                  ctx.seeds());
-        }
+        jacobi_sweep_once<D, Obj>(q,
+                                  mg,
+                                  objective,
+                                  before_sweep,
+                                  x_in,
+                                  x_out,
+                                  omega,
+                                  /*cold_boundary=*/s == 0,
+                                  ctx.seeds(),
+                                  grad_buf.data(),
+                                  hess_buf.data(),
+                                  e0_buf.data());
         if ((s + 1) % k == 0 || s == n_sweeps - 1) {
             reduce_energy_mindet<D>(q,
                                     ctx.stencil_view(),
@@ -1538,6 +1572,28 @@ inline std::pair<std::vector<real>, std::vector<real>> run_block_jacobi(sycl::qu
     d_e.download(energies.data());
     d_m.download(mindets.data());
     return {energies, mindets};
+}
+
+/// Convenience overload with one-shot scratch (tests / single calls); resident
+/// sessions pass their own SweepScratchT to reuse the buffers across calls.
+template <int D, class Obj, class PreSweep>
+inline std::pair<std::vector<real>, std::vector<real>> run_block_jacobi(sycl::queue& q,
+                                                                        SweepDeviceContextT<D>& ctx,
+                                                                        Obj objective,
+                                                                        int n_sweeps,
+                                                                        PreSweep before_sweep,
+                                                                        real omega = 1.0_r,
+                                                                        int report_every = 1)
+{
+    SweepScratchT<D> scratch;
+    return run_block_jacobi<D>(q,
+                               ctx,
+                               scratch,
+                               objective,
+                               n_sweeps,
+                               before_sweep,
+                               omega,
+                               report_every);
 }
 
 // D=2 legacy aliases for the binding's oracle surface and existing call sites.

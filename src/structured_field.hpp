@@ -37,19 +37,19 @@ template <int D> class BlockField
     /// Allocate the packed buffer (zero-initialised is NOT guaranteed; callers
     /// upload coordinates and let halo_exchange fill ghosts).
     BlockField(sycl::queue q, BlockLayout<D> layout) :
-        layout_(std::move(layout)), buf_(q, layout_.total_doubles())
+        layout_(std::move(layout)), buf_(q, layout_.total_reals())
     {
     }
 
     [[nodiscard]] const BlockLayout<D>& layout() const { return layout_; }
     [[nodiscard]] std::size_t num_blocks() const { return layout_.num_blocks(); }
 
-    /// Device base pointer of the whole packed buffer (doubles).
+    /// Device base pointer of the whole packed buffer (reals).
     [[nodiscard]] real* data() const { return buf_.data(); }
-    /// Size of the packed buffer in doubles.
+    /// Size of the packed buffer in reals.
     [[nodiscard]] std::size_t size() const { return buf_.size(); }
 
-    /// Upload a host buffer of exactly total_doubles() values into the device
+    /// Upload a host buffer of exactly total_reals() values into the device
     /// store (padded layout, including ghost slots).
     void upload(const std::vector<real>& host) { buf_.upload(host); }
 

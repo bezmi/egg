@@ -20,9 +20,10 @@
 ///    interior logical index l maps to padded l + 1 on every axis.
 ///  - Storage is row-major over the padded axes, the D coordinate components
 ///    innermost and contiguous (matches load_pt/store_pt X[D*i + k]) —
-///    consecutive nodes on the fastest axis are D doubles apart, the property
+///    consecutive nodes on the fastest axis are D reals apart, the property
 ///    the coalesced stencil reads rely on.
-///  - All offsets and strides are in units of DOUBLES.
+///  - All offsets and strides are in units of REALS (egg::real elements —
+///    double or float depending on the EGG_REAL_IS_FP32 build).
 
 #include "core.hpp"  // egg::real (packed node store element type)
 
@@ -54,7 +55,7 @@ template <int D> class BlockLayout
     BlockLayout() = default;
 
     /// Build the packed layout from every block's interior (node-count) shape.
-    /// Blocks are laid out in the given order; block `b` occupies the doubles
+    /// Blocks are laid out in the given order; block `b` occupies the reals
     /// `[block_offset(b), block_offset(b+1))`.
     explicit BlockLayout(std::vector<Shape> interior_shapes) : interior_(std::move(interior_shapes))
     {
@@ -62,15 +63,15 @@ template <int D> class BlockLayout
         std::size_t acc = 0;
         for (const Shape& s : interior_) {
             offsets_.push_back(acc);
-            acc += padded_doubles(s);
+            acc += padded_reals(s);
         }
-        offsets_.push_back(acc);  // sentinel == total size in doubles
+        offsets_.push_back(acc);  // sentinel == total size in reals
     }
 
     [[nodiscard]] std::size_t num_blocks() const { return interior_.size(); }
 
-    /// Size (doubles) of the packed coordinate buffer for all blocks together.
-    [[nodiscard]] std::size_t total_doubles() const
+    /// Size (reals) of the packed coordinate buffer for all blocks together.
+    [[nodiscard]] std::size_t total_reals() const
     { return offsets_.empty() ? 0 : offsets_.back(); }
 
     /// Interior (node-count) shape of block `b`.
@@ -93,12 +94,12 @@ template <int D> class BlockLayout
         return n;
     }
 
-    /// Offset (doubles) of block `b`'s first element in the packed buffer.
+    /// Offset (reals) of block `b`'s first element in the packed buffer.
     [[nodiscard]] std::size_t block_offset(std::size_t b) const { return offsets_[b]; }
 
-    /// Per-axis node strides (doubles) of block `b`'s padded array, row-major
+    /// Per-axis node strides (reals) of block `b`'s padded array, row-major
     /// with the coordinate axis innermost. `strides[D-1] == D` (consecutive
-    /// nodes on the fastest axis are D doubles apart); the step between the D
+    /// nodes on the fastest axis are D reals apart); the step between the D
     /// coordinate components of one node is 1.
     [[nodiscard]] Shape node_strides(std::size_t b) const
     {
@@ -112,7 +113,7 @@ template <int D> class BlockLayout
         return s;
     }
 
-    /// Offset (doubles) of a node addressed by its PADDED index (ghost layer
+    /// Offset (reals) of a node addressed by its PADDED index (ghost layer
     /// included: each component in `[0, n_k + 2)`). Points at coordinate
     /// component 0 of that node.
     [[nodiscard]] std::size_t padded_node_offset(std::size_t b, const Shape& padded_idx) const
@@ -123,7 +124,7 @@ template <int D> class BlockLayout
         return off;
     }
 
-    /// Offset (doubles) of an INTERIOR node (logical index in `[0, n_k)`),
+    /// Offset (reals) of an INTERIOR node (logical index in `[0, n_k)`),
     /// shifted +1 per axis into the padded array. Points at coordinate
     /// component 0 of that node.
     [[nodiscard]] std::size_t interior_node_offset(std::size_t b, const Shape& logical_idx) const
@@ -133,14 +134,14 @@ template <int D> class BlockLayout
         return padded_node_offset(b, padded);
     }
 
-    /// Offset (doubles) of block `b`'s interior origin — logical (0,…,0), i.e.
+    /// Offset (reals) of block `b`'s interior origin — logical (0,…,0), i.e.
     /// padded (1,…,1). The base of the centred interior view.
     [[nodiscard]] std::size_t interior_origin_offset(std::size_t b) const
     { return interior_node_offset(b, Shape {}); }
 
   private:
     /// Doubles occupied by one block's padded array: D coords × ∏(n_k + 2).
-    static std::size_t padded_doubles(const Shape& interior)
+    static std::size_t padded_reals(const Shape& interior)
     {
         std::size_t n = D;  // coordinate components per node
         for (std::size_t k = 0; k < D; ++k) { n *= (interior[k] + 2); }
@@ -190,7 +191,7 @@ InteriorView<D> make_interior_view(real* p,
 }
 }  // namespace detail
 
-/// Halo (whole padded block) view of block `b` over `base` (doubles).
+/// Halo (whole padded block) view of block `b` over `base` (reals).
 template <int D>
 [[nodiscard]] HaloView<D> halo_view(real* base, const BlockLayout<D>& layout, std::size_t b)
 {
@@ -199,7 +200,7 @@ template <int D>
                                      std::make_index_sequence<D> {});
 }
 
-/// Interior (ghost-excluded) view of block `b` over `base` (doubles).
+/// Interior (ghost-excluded) view of block `b` over `base` (reals).
 template <int D>
 [[nodiscard]] InteriorView<D> interior_view(real* base, const BlockLayout<D>& layout, std::size_t b)
 {

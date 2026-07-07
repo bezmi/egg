@@ -65,7 +65,6 @@ def test_no_singularities_on_cartesian_pair():
     sc = build_block_structured_context(grid)
     assert sc.sing_block.shape == (0,)
     assert sc.sing_logical.shape == (0, 2)
-    assert sc.sing_valence.shape == (0,)
 
 
 def test_halo_entries_count_and_ghost_validity():

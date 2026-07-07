@@ -102,7 +102,7 @@ int main()
 
             expect(sfield.num_blocks() == 2_u);
 
-            std::vector<egg::real> host(sfield.layout().total_doubles(), 0.0_r);
+            std::vector<egg::real> host(sfield.layout().total_reals(), 0.0_r);
             seed_interior(layout, host, 0, 0.0);
             seed_interior(layout, host, 1, 3.0);
             sfield.upload(host);

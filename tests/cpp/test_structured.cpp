@@ -30,7 +30,7 @@ static const suite<"structured"> structured_suite = [] {
     "empty layout is zero-sized"_test = [] {
         const BlockLayout<2> layout {};
         expect(layout.num_blocks() == 0_u);
-        expect(layout.total_doubles() == 0_u);
+        expect(layout.total_reals() == 0_u);
     };
 
     // Two 2D blocks: interior (3,4) and (2,2). Padded shapes (5,6) and (4,4).
@@ -47,7 +47,7 @@ static const suite<"structured"> structured_suite = [] {
 
         expect(layout.block_offset(0) == 0_u);
         expect(layout.block_offset(1) == 60_u);
-        expect(layout.total_doubles() == 92_u);
+        expect(layout.total_reals() == 92_u);
     };
 
     // Strides are row-major over padded axes with D coords innermost: for padded
@@ -78,7 +78,7 @@ static const suite<"structured"> structured_suite = [] {
         const BlockLayout<3> layout {{{{2, 3, 4}}}};
         expect(layout.padded_shape(0) == std::array<std::size_t, 3> {4, 5, 6});
         expect(layout.padded_node_count(0) == 120_u);
-        expect(layout.total_doubles() == 360_u);
+        expect(layout.total_reals() == 360_u);
         expect(layout.node_strides(0) == std::array<std::size_t, 3> {90, 18, 3});
         // Interior (0,0,0) -> padded (1,1,1) -> 90+18+3 = 111.
         expect(layout.interior_node_offset(0, {0, 0, 0}) == 111_u);
@@ -91,8 +91,8 @@ static const suite<"structured"> structured_suite = [] {
     // layout and assert offsets are unique and within the packed buffer.
     "interior node offsets are unique and in-range"_test = [] {
         const BlockLayout<2> layout {{{{3, 4}}, {{2, 2}}}};
-        const std::size_t total = layout.total_doubles();
-        std::array<int, 92> hit {};  // total_doubles() == 92
+        const std::size_t total = layout.total_reals();
+        std::array<int, 92> hit {};  // total_reals() == 92
         bool ok = true;
         for (std::size_t b = 0; b < layout.num_blocks(); ++b) {
             const auto shape = layout.interior_shape(b);
@@ -112,7 +112,7 @@ static const suite<"structured"> structured_suite = [] {
     // (Same builders are used on the device base pointer in test_field_device.)
     "2D halo/interior views read the packed offsets"_test = [] {
         const BlockLayout<2> layout {{{{3, 4}}, {{2, 2}}}};
-        std::vector<egg::real> buf(layout.total_doubles());
+        std::vector<egg::real> buf(layout.total_reals());
         for (std::size_t i = 0; i < buf.size(); ++i) { buf[i] = static_cast<double>(i); }
 
         for (std::size_t b = 0; b < layout.num_blocks(); ++b) {
@@ -151,7 +151,7 @@ static const suite<"structured"> structured_suite = [] {
 
     "3D interior view strides match the layout"_test = [] {
         const BlockLayout<3> layout {{{{2, 3, 4}}}};
-        std::vector<egg::real> buf(layout.total_doubles());
+        std::vector<egg::real> buf(layout.total_reals());
         for (std::size_t i = 0; i < buf.size(); ++i) { buf[i] = static_cast<double>(i); }
 
         const InteriorView<3> iv = interior_view<3>(buf.data(), layout, 0);
@@ -187,7 +187,7 @@ static const suite<"structured"> structured_suite = [] {
                            static_cast<egg::real>(j) + 0.03_r * static_cast<egg::real>(i * i)};
         };
         std::vector<egg::real> Xc(n * n * 2);                // compact: global idx = i*n + j
-        std::vector<egg::real> buf(layout.total_doubles());  // padded BlockField store
+        std::vector<egg::real> buf(layout.total_reals());  // padded BlockField store
         for (std::size_t i = 0; i < n; ++i) {
             for (std::size_t j = 0; j < n; ++j) {
                 const PtN<2> p = pos(i, j);
@@ -353,7 +353,7 @@ static const suite<"structured"> structured_suite = [] {
                            static_cast<egg::real>(j) + 0.02_r * static_cast<egg::real>(k),
                            static_cast<egg::real>(k) + 0.01_r * static_cast<egg::real>(i)};
         };
-        std::vector<egg::real> buf(layout.total_doubles());
+        std::vector<egg::real> buf(layout.total_reals());
         for (std::size_t i = 0; i < n; ++i) {
             for (std::size_t j = 0; j < n; ++j) {
                 for (std::size_t k = 0; k < n; ++k) {

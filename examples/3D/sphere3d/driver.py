@@ -20,9 +20,23 @@ from egg.geometry.entity_soa import TAG_LINE3
 
 
 def _add_run_args(p, *, sweeps):
-    p.add_argument("--sweeps", type=int, default=sweeps)
+    p.add_argument(
+        "--sweeps",
+        type=int,
+        default=sweeps,
+        help="block-Jacobi sweeps (or FAS V-cycles with --smoother fas)",
+    )
     p.add_argument(
         "--chunk", type=int, default=10, help="sweeps per device-resident chunk"
+    )
+    p.add_argument(
+        "--smoother",
+        choices=["jacobi", "fas"],
+        default="jacobi",
+        help="jacobi = plain block-Jacobi sweeps; fas = FAS (nonlinear geometric "
+        "multigrid) V-cycles — --sweeps/--chunk then count cycles (each is 4 fine "
+        "sweeps plus the coarse-grid work). Falls back to Jacobi when the block "
+        "shapes admit no coarse level.",
     )
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
     p.add_argument(
@@ -50,16 +64,24 @@ def _drive(session, a, on_chunk=None):
     plotting only pays one download per chunk.
     """
     energies, mindets = [], []
+    unit = "cycles" if getattr(a, "smoother", "jacobi") == "fas" else "sweeps"
     done = 0
     while done < a.sweeps:
         step = min(a.chunk, a.sweeps - done)
-        e, m = session.run(
-            step, phase="barrier", delta=0.0, report_every=a.report_every, omega=a.omega
-        )
+        if unit == "cycles":
+            e, m = session.run_fas(step, omega=a.omega)
+        else:
+            e, m = session.run(
+                step,
+                phase="barrier",
+                delta=0.0,
+                report_every=a.report_every,
+                omega=a.omega,
+            )
         energies.extend(np.asarray(e))
         mindets.extend(np.asarray(m))
         done += step
-        print(f"  sweeps={done:4d} energy={energies[-1]:.4e} min_det={mindets[-1]:.4e}")
+        print(f"  {unit}={done:4d} energy={energies[-1]:.4e} min_det={mindets[-1]:.4e}")
         if on_chunk is not None:
             on_chunk(done)
     return energies, mindets

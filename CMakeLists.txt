@@ -283,7 +283,8 @@ if(EGG_BUILD_TESTS)
     tests/cpp/test_curves.cpp
     tests/cpp/test_3d.cpp
     tests/cpp/test_patch.cpp
-    tests/cpp/test_structured.cpp)
+    tests/cpp/test_structured.cpp
+    tests/cpp/test_multigrid.cpp)
   add_executable(cpp_tests ${_cpp_tests_srcs})
   target_link_libraries(cpp_tests PRIVATE egg_core Boost::ut)
   target_compile_definitions(cpp_tests PRIVATE BOOST_UT_DISABLE_MODULE)
@@ -298,7 +299,7 @@ if(EGG_BUILD_TESTS)
   # interior/with_halo mdspan views (Phase 1.1b) on the same devices; the halo
   # test exercises BlockTopologyDevice + halo_exchange (Phase 1.2); the
   # structured_field test exercises the BlockFieldStructured adapter (Phase 1.3).
-  foreach(_t geometry patch field halo structured_field)
+  foreach(_t geometry patch field halo structured_field multigrid)
     add_executable(cpp_${_t}_tests tests/cpp/test_${_t}_device.cpp)
     target_link_libraries(cpp_${_t}_tests PRIVATE egg_core Boost::ut)
     target_compile_definitions(cpp_${_t}_tests PRIVATE BOOST_UT_DISABLE_MODULE)

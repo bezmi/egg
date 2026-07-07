@@ -40,6 +40,14 @@ def parse_args():
     )
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
     p.add_argument("--tmop-sweeps", type=int, default=40)
+    p.add_argument(
+        "--smoother",
+        choices=["jacobi", "fas"],
+        default="jacobi",
+        help="TMOP-phase smoother: plain block-Jacobi sweeps or FAS (nonlinear "
+        "geometric multigrid) V-cycles; with fas, --tmop-sweeps/--chunk count "
+        "V-cycles (4 fine sweeps each plus coarse-grid work)",
+    )
     p.add_argument("--sweeps-per-delta", type=int, default=20)
     p.add_argument("--chunk", type=int, default=10)
     p.add_argument(
