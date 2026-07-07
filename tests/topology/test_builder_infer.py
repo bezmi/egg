@@ -195,3 +195,126 @@ class TestInferredGridInitializes:
         )
         grid = b.build().initialize_grid()
         assert not np.any(np.isnan(grid.global_nodes))
+
+
+class TestEdgeParamFaceInit:
+    """initialize_grid spaces wall nodes in the edge parameter when both
+    face corners are Nodes on one Edge — a chord projected onto a strongly
+    curved wall leaves spans of it empty (no chord point projects onto a
+    narrow tip's apex), and the smoother cannot recover the gap."""
+
+    @staticmethod
+    def _egg_edge():
+        from egg.geometry import Spline
+
+        theta = np.linspace(0.0, 2.0 * np.pi, 17)[:-1]
+        ring = [
+            Vector3(2.0 + (0.66 - 0.15 * np.sin(t)) * np.cos(t), 2.0 + 0.85 * np.sin(t))
+            for t in theta
+        ]
+        return Edge(Spline(ring, closed=True))
+
+    @staticmethod
+    def _wall_row(egg, t0, t1, sw, se):
+        b = TopologyBuilder(d=2)
+        b.add_block(
+            "blk",
+            sw=Vector3(*sw, fixed=True),
+            nw=egg.place_node(t0),
+            se=Vector3(*se, fixed=True),
+            ne=egg.place_node(t1),
+            res=(16, 4),
+        )
+        grid = b.build().initialize_grid()
+        return grid.blocks[0].nodes[:, -1]
+
+    def test_wall_row_covers_high_curvature_tip(self):
+        egg = self._egg_edge()
+        # The face spans the egg's narrow apex (fraction 0.25, ~(2, 2.85)).
+        row = self._wall_row(egg, 0.125, 0.375, sw=(3, 3), se=(1, 3))
+        for p in row:
+            assert np.linalg.norm(np.asarray(egg.project(p)) - p) < 1e-9
+        assert (row[:, 1] > 2.8).any()  # apex covered
+        seg = np.linalg.norm(np.diff(row, axis=0), axis=1)
+        assert seg.max() / seg.min() < 1.5  # near-uniform, no chord gap
+
+    def test_closed_composite_wraps_the_short_way(self):
+        egg = self._egg_edge()
+        # 0.875 -> 0.125 must run through the wrap point (the right side),
+        # not 3/4 of the way around; CompositePath.closed is a class attr
+        # (False), so closure is detected from coincident endpoints.
+        row = self._wall_row(egg, 0.875, 0.125, sw=(3, 1), se=(3, 3))
+        assert row[:, 0].min() > 2.2
+        seg = np.linalg.norm(np.diff(row, axis=0), axis=1)
+        assert seg.sum() < 1.7  # short arc, not the 3.5-long way round
+
+
+class TestBlockArraySkip:
+    """add_block_array(skip=...) leaves cells for hand-built replacements."""
+
+    def _edges(self, w=4.0, h=4.0):
+        sw, se = Vector3(0, 0, fixed=True), Vector3(w, 0, fixed=True)
+        ne, nw = Vector3(w, h, fixed=True), Vector3(0, h, fixed=True)
+        return (
+            Edge(Line(p0=sw, p1=se)),  # south, west -> east
+            Edge(Line(p0=nw, p1=ne)),  # north, west -> east
+            Edge(Line(p0=sw, p1=nw)),  # west, south -> north
+            Edge(Line(p0=se, p1=ne)),  # east, south -> north
+        )
+
+    def test_skipped_cell_absent_but_corners_and_associations_survive(self):
+        south, north, west, east = self._edges()
+        b = TopologyBuilder(d=2)
+        corner, names = b.add_block_array(
+            south=south,
+            north=north,
+            west=west,
+            east=east,
+            nib=2,
+            njb=2,
+            res=(8, 8),
+            skip={(1, 1)},
+        )
+        # every array corner still exists for replacement blocks to share
+        assert set(corner) == {(i, j) for i in range(3) for j in range(3)}
+        topo = b.build()
+        assert set(topo.block_specs) == {"b0_0", "b0_1", "b1_0"}
+        grid = topo.initialize_grid()  # L-shaped domain initializes fine
+        assert len(grid.blocks) == 3
+
+    def test_dipole_insertion_reports_the_three_five_pair(self):
+        # Replace the skipped ne cell with three blocks meeting at a free
+        # interior corner: lines run to the north face, the east face, and
+        # the cell's sw corner — which gains a block and goes 5-valent.
+        south, north, west, east = self._edges()
+        b = TopologyBuilder(d=2)
+        corner, _names = b.add_block_array(
+            south=south,
+            north=north,
+            west=west,
+            east=east,
+            nib=2,
+            njb=2,
+            res=(8, 8),
+            skip={(1, 1)},
+        )
+        b.add_corner("s3", (3.2, 3.4), fixed=False)
+        b.add_corner("an", north.place_node(0.8), fixed=False)
+        b.add_corner("ae", east.place_node(0.8), fixed=False)
+        b.add_block(
+            "pa", sw=corner[1, 1], se="s3", ne="an", nw=corner[1, 2], res=(2, 4)
+        )
+        b.add_block(
+            "pb", sw=corner[1, 1], se=corner[2, 1], ne="ae", nw="s3", res=(4, 2)
+        )
+        b.add_block("pc", sw="s3", se="ae", ne=corner[2, 2], nw="an", res=(4, 4))
+        topo = b.build()
+        valences = sorted(s.valence for s in topo.singularities)
+        assert valences == [3, 5]
+        grid = topo.initialize_grid()
+        assert len(grid.blocks) == 6
+        for blk in grid.blocks:  # TFI init untangled around the singularity
+            p = blk.nodes[..., :2]
+            e0 = p[1:, :-1] - p[:-1, :-1]
+            e1 = p[:-1, 1:] - p[:-1, :-1]
+            assert float(np.cross(e0, e1).min()) > 0.0

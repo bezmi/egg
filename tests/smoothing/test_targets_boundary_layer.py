@@ -18,7 +18,7 @@ from egg.smoothing.targets import (
     MultiBlockTarget,
     IdentityTarget,
     AnisotropicTarget,
-    build_boundary_layer_target,
+    build_topology_target,
 )
 
 sys.path.insert(
@@ -31,9 +31,54 @@ def _ring_block(spec_kwargs):
     topo, ents = build_circle_in_rectangle(rough=False)
     grid = topo.initialize_grid()
     topo.boundary_layer_specs = {id(ents["circle"]): spec_kwargs}
-    tgt = build_boundary_layer_target(topo, interior_spacing=0.2)
+    tgt = build_topology_target(topo, interior_spacing=0.2)
     bi = list(topo.block_specs.keys()).index("o_s")
     return topo, grid, tgt, bi, ents
+
+
+def test_metric_selects_far_field_default():
+    """metric= picks the far-field default: Identity for shape, mean-size for
+    shape_size — so shape_size needs no manual mean_size_target plumbing."""
+    import pytest
+
+    from egg.smoothing.targets import mean_size_target
+
+    topo, ents = build_circle_in_rectangle(rough=False)
+    grid = topo.initialize_grid()
+    topo.boundary_layer_specs = {
+        id(ents["circle"]): dict(
+            first_height=0.02,
+            growth=1.3,
+            n_layers=4,
+            max_height=None,
+            tangential_spacing=None,
+        )
+    }
+    far = list(topo.block_specs.keys()).index("c_sw")  # a block with no BL spec
+    block = grid.blocks[far]
+    cb = next(iter(block.iter_cells()))
+
+    # plain shape (default): far-field default is IdentityTarget -> det W == 1
+    tgt_shape = build_topology_target(topo, grid, metric="shape")
+    assert abs(np.linalg.det(tgt_shape(far, block, cb, (0, 0))) - 1.0) < 1e-12
+
+    # shape_size: far-field default carries physical scale (mean cell size)
+    tgt_size = build_topology_target(topo, grid, metric="shape_size")
+    ref = mean_size_target(grid)
+    W = tgt_size(far, block, cb, (0, 0))
+    assert np.allclose(W, ref(far, block, cb, (0, 0)))
+    assert abs(np.linalg.det(W) - 1.0) > 1e-6  # not identity
+
+    # an explicit default always wins over metric
+    idt = IdentityTarget(2)
+    tgt_override = build_topology_target(
+        topo, grid, default=idt, metric="shape_size"
+    )
+    assert abs(np.linalg.det(tgt_override(far, block, cb, (0, 0))) - 1.0) < 1e-12
+
+    # shape_size without a grid is a clear error, not a silent Identity fallback
+    with pytest.raises(ValueError, match="needs"):
+        build_topology_target(topo, metric="shape_size")
 
 
 def test_det_W_positive_everywhere():
@@ -179,7 +224,7 @@ def test_per_face_tangential_spacing():
             tangential_spacing=None,
         )
     }
-    tgt = build_boundary_layer_target(topo)
+    tgt = build_topology_target(topo)
     names = list(topo.block_specs.keys())
     bi = names.index("o_s")
     spec = topo.block_specs["o_s"]
@@ -202,7 +247,7 @@ def test_neighbour_blend_continues_profile():
             tangential_spacing=None,
         )
     }
-    tgt = build_boundary_layer_target(topo)
+    tgt = build_topology_target(topo)
     names = list(topo.block_specs.keys())
     ring, behind = names.index("o_s"), names.index("e_s")
     assert behind in tgt.per_block
@@ -229,7 +274,7 @@ def test_no_neighbour_blend_once_isotropic():
             tangential_spacing=None,
         )
     }
-    tgt = build_boundary_layer_target(topo)
+    tgt = build_topology_target(topo)
     names = list(topo.block_specs.keys())
     ring_names = {"o_s", "o_e", "o_n", "o_w"}
     assert {names[bi] for bi in tgt.per_block} == ring_names
@@ -246,6 +291,6 @@ def test_blend_neighbours_off():
             tangential_spacing=None,
         )
     }
-    tgt = build_boundary_layer_target(topo, blend_neighbours=False)
+    tgt = build_topology_target(topo, blend_neighbours=False)
     names = list(topo.block_specs.keys())
     assert {names[bi] for bi in tgt.per_block} == {"o_s", "o_e", "o_n", "o_w"}

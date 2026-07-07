@@ -13,7 +13,7 @@ import pytest
 
 from egg.geometry.analytic2d import Circle, LineSegment
 from egg.pipeline import generate, generate_steps, drain_steps, PipelineConfig
-from egg.smoothing.targets import build_boundary_layer_target
+from egg.smoothing.targets import build_topology_target
 from egg.topology.builder import TopologyBuilder
 
 
@@ -223,7 +223,7 @@ def test_folded_with_boundary_layer():
             tangential_spacing=None,
         )
     }
-    tgt = build_boundary_layer_target(topo, interior_spacing=0.2)
+    tgt = build_topology_target(topo, interior_spacing=0.2)
     grid = generate(
         topo,
         PipelineConfig(
