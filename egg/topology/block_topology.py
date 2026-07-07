@@ -35,11 +35,19 @@ __all__ = [
 
 @dataclass
 class Corner:
-    """A named point in R^d."""
+    """A named point in R^d.
+
+    ``source`` keeps the object the corner was declared with (a
+    :class:`~egg.geometry.frontend2d.Vector3` or
+    :class:`~egg.geometry.frontend2d.Node`), when there was one: a Node's
+    edge/parameter provenance lets :meth:`BlockTopology.initialize_grid`
+    space wall nodes along the curve instead of along the chord.
+    """
 
     name: str
     position: np.ndarray
     fixed: bool = True
+    source: Any = None
 
     def __post_init__(self):
         self.position = np.asarray(self.position, dtype=float)
@@ -162,6 +170,23 @@ class BlockTopology:
         self._resolve_orientations()
         self.grid = self._build_dof_map()
         self.singularities = self._detect_singularities()
+
+    @property
+    def entities(self) -> dict[str, Any]:
+        """The whole-domain ``{name: entity}`` map of every
+        :meth:`~egg.geometry.base.GeometryEntity.named` associated entity
+        (deduped by name, first association wins).
+
+        Derived from the associations, so it needs no hand-maintained
+        companion dict: name a curve once and it appears here for rendering
+        and export.
+        """
+        out: dict[str, Any] = {}
+        for assoc in self.associations:
+            name = getattr(assoc.entity, "name", None)
+            if name is not None and name not in out:
+                out[name] = assoc.entity
+        return out
 
     def _validate(self) -> None:
         """Check that all connections reference valid blocks and matching faces."""
@@ -620,7 +645,8 @@ class BlockTopology:
 
         Steps per block:
         1. Place corner positions from Corner.position
-        2. Linearly space edge nodes between corners
+        2. Space edge nodes between corners (uniform in the edge parameter
+           when both corners are Nodes on one Edge, chord otherwise)
         3. Project geometry-associated face nodes onto their entities
         4. Fill interior nodes via TFI
 
@@ -649,7 +675,13 @@ class BlockTopology:
                 gidx = int(dof_map[actual])
                 global_nodes[gidx] = self.corners[cname].position.copy()
 
-            # Step 2: Linearly space nodes along each edge (1D face)
+            # Step 2: Space nodes along each edge (1D face). When both
+            # corners are Nodes placed on the same Edge, interpolate the
+            # edge *parameter* (shortest way around a closed curve) — the
+            # chord projected onto a strongly curved wall can leave whole
+            # spans of it empty (a narrow tip: no chord point projects onto
+            # the apex, and the smoother cannot recover the gap). Otherwise
+            # fall back to the chord; step 3 projects it onto the entity.
             for axis in range(self.d):
                 for side in (0, 1):
                     fixed = 0 if side == 0 else shape[axis] - 1
@@ -658,6 +690,25 @@ class BlockTopology:
                         continue
                     c0 = self.corners[face_cnames[0]].position
                     c1 = self.corners[face_cnames[1]].position
+                    src0 = self.corners[face_cnames[0]].source
+                    src1 = self.corners[face_cnames[1]].source
+
+                    edge = getattr(src0, "edge", None)
+                    param = None
+                    if edge is not None and getattr(src1, "edge", None) is edge:
+                        t0, t1 = float(src0.t), float(src1.t)
+                        dt = t1 - t0
+                        # A curve is a closed loop if it says so or if its
+                        # endpoints coincide (a closed Spline/imported SVG
+                        # path is a CompositePath, whose ``closed`` class
+                        # attribute stays False).
+                        p0, p1 = edge.point_at(0.0), edge.point_at(1.0)
+                        closed = bool(getattr(edge.entity, "closed", False)) or (
+                            abs(p1 - p0) <= 1e-9 * (1.0 + abs(p0))
+                        )
+                        if closed and abs(dt) > 0.5:
+                            dt -= np.copysign(1.0, dt)
+                        param = (t0, dt, closed)
 
                     free_axes = [a for a in range(self.d) if a != axis]
                     if not free_axes:
@@ -674,7 +725,15 @@ class BlockTopology:
                         gidx = int(dof_map[logical_t])
                         if not np.any(np.isnan(global_nodes[gidx])):
                             continue
-                        global_nodes[gidx] = (1.0 - t) * c0 + t * c1
+                        if param is not None:
+                            t0, dt, closed = param
+                            tt = t0 + t * dt
+                            if closed:
+                                tt %= 1.0
+                            p = edge.point_at(tt)
+                            global_nodes[gidx] = np.array([p.x, p.y][: self.d])
+                        else:
+                            global_nodes[gidx] = (1.0 - t) * c0 + t * c1
 
             # Step 3: Project geometry-associated face nodes
             for assoc in self.associations:

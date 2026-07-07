@@ -78,7 +78,7 @@ class TopologyBuilder:
             raise ValueError(
                 f"Corner '{name}' position has shape {pos.shape}, expected ({self._d},)"
             )
-        self._corners[name] = Corner(name=name, position=pos, fixed=fixed)
+        self._corners[name] = Corner(name=name, position=pos, fixed=fixed, source=obj)
         if obj is not None:
             self._corner_ids[id(obj)] = name
             self._corner_objs[name] = obj
@@ -284,6 +284,7 @@ class TopologyBuilder:
         fixed_corners: bool = True,
         corner_prefix: str = "c",
         block_prefix: str = "b",
+        skip: set[tuple[int, int]] | None = None,
     ) -> tuple[dict, list[list[str]]]:
         """Add an ``nib x njb`` array of blocks over a four-edge patch.
 
@@ -311,6 +312,11 @@ class TopologyBuilder:
             Corners register as ``c{i}_{j}`` (i: 0=west..nib=east, j:
             0=south..njb=north) and blocks as ``b{i}_{j}``, keeping
             ``--plot-topology`` labels readable.
+        skip : set of (i, j), optional
+            Array cells to leave empty — their corners are still created
+            and returned, so hand-built replacement blocks (e.g. a
+            singularity insertion) can share them; the caller owns the
+            skipped cells' boundary associations and tags.
 
         Returns
         -------
@@ -318,7 +324,8 @@ class TopologyBuilder:
             Shared corner objects keyed ``(i, j)``.
         block_names : list of list of str
             Block-name grid ``block_names[i][j]``, for tagging boundaries
-            or attaching further structure.
+            or attaching further structure. Skipped cells keep their name
+            in the grid but no block is declared for them.
 
         Notes
         -----
@@ -350,9 +357,12 @@ class TopologyBuilder:
                 f"{corner_prefix}{i}_{j}", obj, fixed=getattr(obj, "fixed", False)
             )
 
+        skip = skip or set()
         names = [[f"{block_prefix}{i}_{j}" for j in range(njb)] for i in range(nib)]
         for i in range(nib):
             for j in range(njb):
+                if (i, j) in skip:
+                    continue
                 self.add_block(
                     names[i][j],
                     sw=corner[i, j],
@@ -362,11 +372,15 @@ class TopologyBuilder:
                     res=(nx[i], ny[j]),
                 )
         for i in range(nib):
-            self.associate(names[i][0], 1, 0, south)
-            self.associate(names[i][njb - 1], 1, 1, north)
+            if (i, 0) not in skip:
+                self.associate(names[i][0], 1, 0, south)
+            if (i, njb - 1) not in skip:
+                self.associate(names[i][njb - 1], 1, 1, north)
         for j in range(njb):
-            self.associate(names[0][j], 0, 0, west)
-            self.associate(names[nib - 1][j], 0, 1, east)
+            if (0, j) not in skip:
+                self.associate(names[0][j], 0, 0, west)
+            if (nib - 1, j) not in skip:
+                self.associate(names[nib - 1][j], 0, 1, east)
         return corner, names
 
     def set_boundary_layer(
@@ -384,7 +398,7 @@ class TopologyBuilder:
         """Request wall-normal clustering on every block face lying on ``entity``.
 
         Consumed later (e.g. by
-        :func:`~egg.smoothing.targets.build_boundary_layer_target`) to
+        :func:`~egg.smoothing.targets.build_topology_target`) to
         build a :class:`~egg.smoothing.targets.BoundaryLayerTarget` per
         ring block, oriented from ``entity``.
 
@@ -416,7 +430,7 @@ class TopologyBuilder:
             into the boundary's own direction, so the smoother follows it
             with sheared parallelograms instead of rotating the near-wall
             cells orthogonal to it and trading away the layer heights (see
-            :func:`~egg.smoothing.targets.build_boundary_layer_target`).
+            :func:`~egg.smoothing.targets.build_topology_target`).
         """
         if isinstance(entity, Edge):
             entity = entity.entity
@@ -534,12 +548,76 @@ class TopologyBuilder:
         """
         connections = self._connections + self._infer_connections()
         associations = self._associations + self._infer_associations(connections)
+        boundary_tags = self._auto_boundary_tags(associations)
+        boundary_layer_specs = self._collect_boundary_layers(associations)
         return BlockTopology(
             d=self._d,
             corners=self._corners,
             block_specs=self._block_specs,
             connections=connections,
             associations=associations,
-            boundary_layer_specs=self._boundary_layer_specs,
-            boundary_tags=self._boundary_tags,
+            boundary_layer_specs=boundary_layer_specs,
+            boundary_tags=boundary_tags,
         )
+
+    def _collect_boundary_layers(
+        self, associations: list[Association]
+    ) -> dict[int, dict]:
+        """Explicit :meth:`set_boundary_layer` specs plus any carried on an
+        associated entity via :meth:`~egg.geometry.base.GeometryEntity.clustered`.
+
+        Keyed by ``id(entity)`` like the explicit specs (the smoother matches
+        them against the associations the same way). An explicit
+        ``set_boundary_layer`` for an entity wins over its carried spec, so the
+        builder method stays the override. ``relax_orthogonality`` entries given
+        by *name* are resolved here against the named associated entities.
+        """
+        specs = dict(self._boundary_layer_specs)
+        by_name: dict[str, Any] = {}
+        for assoc in associations:
+            nm = getattr(assoc.entity, "name", None)
+            if nm is not None:
+                by_name.setdefault(nm, assoc.entity)
+
+        def _resolve(o):
+            if isinstance(o, str):
+                return by_name.get(o)
+            return o.entity if isinstance(o, Edge) else o
+
+        for assoc in associations:
+            ent = assoc.entity
+            bl = getattr(ent, "boundary_layer", None)
+            if bl is None or id(ent) in specs:  # explicit set_boundary_layer wins
+                continue
+            spec = dict(bl)
+            spec["relax_orthogonality"] = tuple(
+                r
+                for r in map(_resolve, bl.get("relax_orthogonality", ()))
+                if r is not None
+            )
+            specs[id(ent)] = spec
+            self._bl_entities.setdefault(id(ent), ent)
+        return specs
+
+    def _auto_boundary_tags(
+        self, associations: list[Association]
+    ) -> dict[str, list[FaceSpec]]:
+        """Explicit :meth:`tag_boundary` tags plus an auto-derived marker for
+        every associated face whose entity carries a
+        :attr:`~egg.geometry.base.GeometryEntity.tag` (which defaults to its
+        :attr:`~egg.geometry.base.GeometryEntity.name`).
+
+        A face already carrying an explicit tag keeps it — a hand-written
+        ``tag_boundary`` overrides the entity's tag on that face. An entity
+        whose ``tag`` is ``None`` emits no marker (associated/drawn only).
+        """
+        tags = {name: list(faces) for name, faces in self._boundary_tags.items()}
+        tagged = {(f.block_name, f.axis, f.side) for fs in tags.values() for f in fs}
+        for assoc in associations:
+            tag = getattr(assoc.entity, "tag", None)
+            face = assoc.face
+            key = (face.block_name, face.axis, face.side)
+            if tag is not None and key not in tagged:
+                tags.setdefault(tag, []).append(face)
+                tagged.add(key)
+        return tags

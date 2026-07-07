@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from .base import _INHERIT
 from .analytic2d import LineSegment
 from .curves2d import (
     BSplineCurve,
@@ -239,7 +240,12 @@ def Arc(p0, p1, centre) -> CircleArc:
             raise ValueError(
                 "Arc angular range wraps past the +/-pi branch cut; split it"
             )
-    return CircleArc(center, ra, float(t0), float(t1))
+    arc = CircleArc(center, ra, float(t0), float(t1))
+    # Retain the construction points as Vector3s (gdtk-style, like Line.p0/p1).
+    arc.p0 = p0 if isinstance(p0, Vector3) else Vector3(*pa)
+    arc.p1 = p1 if isinstance(p1, Vector3) else Vector3(*pb)
+    arc.centre = centre if isinstance(centre, Vector3) else Vector3(*center)
+    return arc
 
 
 def Bezier(points) -> LineSegment | QuadBezier | CubicBezier | BSplineCurve:
@@ -262,13 +268,19 @@ def Bezier(points) -> LineSegment | QuadBezier | CubicBezier | BSplineCurve:
     if n < 1:
         raise ValueError("Bezier needs at least two control points")
     if n == 1:
-        return LineSegment(pts[0], pts[1])
-    if n == 2:
-        return QuadBezier(pts[0], pts[1], pts[2])
-    if n == 3:
-        return CubicBezier(pts[0], pts[1], pts[2], pts[3])
-    knots = np.concatenate([np.zeros(n + 1), np.ones(n + 1)])
-    return BSplineCurve(n, knots, np.stack(pts))
+        curve = LineSegment(pts[0], pts[1])
+    elif n == 2:
+        curve = QuadBezier(pts[0], pts[1], pts[2])
+    elif n == 3:
+        curve = CubicBezier(pts[0], pts[1], pts[2], pts[3])
+    else:
+        knots = np.concatenate([np.zeros(n + 1), np.ones(n + 1)])
+        curve = BSplineCurve(n, knots, np.stack(pts))
+    # Retain the control points as Vector3s (gdtk-style, like Line.p0/p1).
+    curve.points = [
+        p if isinstance(p, Vector3) else Vector3(*q) for p, q in zip(points, pts)
+    ]
+    return curve
 
 
 def _seg_start(seg) -> np.ndarray:
@@ -391,7 +403,11 @@ def Spline(points, closed=False, tolerance=1.0e-10) -> CompositePath:
     if closed and np.linalg.norm(pts[0] - pts[-1]) > tolerance:
         pts = np.vstack([pts, pts[0:1]])
     segs = _spline_to_beziers(pts)
-    return CompositePath(segs)
+    path = CompositePath(segs)
+    # Retain the through-points as Vector3s (gdtk-style, like Line.p0/p1),
+    # so tooling (e.g. the web UI) can show the construction points.
+    path.points = [p if isinstance(p, Vector3) else Vector3(*_vec2(p)) for p in points]
+    return path
 
 
 class Edge:
@@ -429,7 +445,15 @@ class Edge:
     (fractional).
     """
 
-    def __init__(self, entity, arc_length: bool = False, samples: int = 256):
+    def __init__(
+        self,
+        entity,
+        arc_length: bool = False,
+        samples: int = 256,
+        *,
+        name=None,
+        tag=_INHERIT,
+    ):
         for attr in ("eval", "t0", "t1"):
             if not hasattr(entity, attr):
                 raise TypeError(
@@ -437,6 +461,10 @@ class Edge:
                     f"(missing '{attr}'): {entity!r}"
                 )
         self.entity = entity
+        if name is not None:
+            entity.name = name
+        if tag is not _INHERIT:
+            entity.tag = tag
         self._table = None
         if arc_length:
             ts = np.linspace(entity.t0, entity.t1, samples + 1)
@@ -452,6 +480,46 @@ class Edge:
     def dim(self) -> int:
         """1 (a curve)."""
         return 1
+
+    @property
+    def name(self):
+        """The wrapped :attr:`entity`'s :attr:`~egg.geometry.base.GeometryEntity.name`."""
+        return self.entity.name
+
+    @name.setter
+    def name(self, value):
+        self.entity.name = value
+
+    @property
+    def tag(self):
+        """The wrapped :attr:`entity`'s :attr:`~egg.geometry.base.GeometryEntity.tag`."""
+        return self.entity.tag
+
+    @tag.setter
+    def tag(self, value):
+        self.entity.tag = value
+
+    def named(self, name, *, tag=_INHERIT):
+        """Name the wrapped :attr:`entity` (and optionally set its
+        :attr:`~egg.geometry.base.GeometryEntity.tag`); return this ``Edge``
+        (fluent)."""
+        self.entity.name = name
+        if tag is not _INHERIT:
+            self.entity.tag = tag
+        return self
+
+    @property
+    def boundary_layer(self):
+        """The wrapped :attr:`entity`'s
+        :attr:`~egg.geometry.base.GeometryEntity.boundary_layer`."""
+        return self.entity.boundary_layer
+
+    def clustered(self, **kw):
+        """Request clustering on the wrapped :attr:`entity`
+        (see :meth:`~egg.geometry.base.GeometryEntity.clustered`); return this
+        ``Edge`` (fluent)."""
+        self.entity.clustered(**kw)
+        return self
 
     def _tau(self, t: float) -> float:
         """Native parameter for fractional t in [0, 1]."""
