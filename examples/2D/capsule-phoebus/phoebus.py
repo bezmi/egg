@@ -18,7 +18,8 @@ block-to-block connectivity is inferred from the shared corner objects.
 
 The Lua wall clustering (GeometricFunction, h_wall=1e-4, r=1.2) is realised
 with egg's boundary-layer machinery: ``set_boundary_layer`` records the spec,
-the TMOP pass smooths against :func:`egg.smoothing.build_boundary_layer_target`,
+the pipeline builds the clustering target from it automatically
+(``cluster_boundary_layers``) and the TMOP pass smooths against it,
 and :func:`egg.smoothing.enforce_boundary_layer_spacing` enforces the exact
 wall spacing at initialization and as a post-pass. Where the Lua example
 massages the interior with manual control points, the TMOP smoothing pass
@@ -33,7 +34,6 @@ The command-line surface lives in ``driver.py``; run
 import math
 
 from egg.pipeline import PipelineConfig, generate_steps
-from egg.smoothing import build_boundary_layer_target
 
 from egg.geometry import Arc, Bezier, Edge, Line, Polyline, Vector3
 from egg.topology.builder import TopologyBuilder
@@ -66,6 +66,8 @@ def build_phoebus(grid_level: int = 1, n_fixed: int = 1):
     centre_s = Vector3(x=D.x, y=D.y - Rs)
 
     # -- paths -> grid edges (axis0 = inflow->wall, axis1 = along the wall) ---
+    # Naming each edge auto-derives its SU2 marker on every associated face (the
+    # block array associates the outer faces below) and exposes it as an entity.
     wall = Edge(
         Polyline(
             [
@@ -76,13 +78,15 @@ def build_phoebus(grid_level: int = 1, n_fixed: int = 1):
             ]
         ),
         arc_length=True,
+        name="wall",
     )
     inflow = Edge(
         Bezier(points=[G, Vector3(x=G.x, y=B.y), Vector3(x=B.x, y=0.8 * F.y), F]),
         arc_length=True,
+        name="inflow",
     )
-    symm = Edge(Line(p0=G, p1=A))  # south: symmetry axis
-    outflow = Edge(Line(p0=F, p1=E))  # north: outflow boundary
+    symm = Edge(Line(p0=G, p1=A), name="symm")  # south: symmetry axis
+    outflow = Edge(Line(p0=F, p1=E), name="outflow")  # north: outflow boundary
 
     # -- 2x4 block array (nib x njb of registerFluidGridArray) ----------------
     n_refine = 2 ** (grid_level / 2)
@@ -114,13 +118,34 @@ def build_phoebus(grid_level: int = 1, n_fixed: int = 1):
     )
 
     topology = bld.build()
-    entities = {
-        "wall": wall.entity,
-        "inflow": inflow.entity,
-        "symm": symm.entity,
-        "outflow": outflow.entity,
-    }
-    return topology, entities
+    return topology, topology.entities
+
+
+def setup(a):
+    """Topology, grid, and config from parsed args — shared by the CLI
+    ``main()`` and the web UI (which passes the parser defaults)."""
+    topo, ents = build_phoebus(grid_level=a["grid_level"], n_fixed=a["pin_layers"])
+
+    # --pin-layers > 0 smooths against the boundary-layer clustering target
+    # and pins the first n_fixed layers exactly; the default path runs on the
+    # plain metric (no clustering) and restores the wall spacing with the
+    # respace post-pass. cluster_boundary_layers picks between them — the
+    # pipeline builds the clustering target from the set_boundary_layer specs.
+    pin = a["pin_layers"] > 0
+    grid = topo.initialize_grid()
+    metric = a.get("metric", "shape")
+    cfg = PipelineConfig(
+        tmop_sweeps=a["tmop_sweeps"],
+        tmop_chunk=a["chunk"],
+        tmop_smoother=a["smoother"],
+        tmop_metric=metric,
+        cluster_boundary_layers=pin,
+        omega=a["omega"],
+        device=a["device"],
+        pin_sweeps=a["pin_sweeps"] if pin else 0,
+        respace=not pin,
+    )
+    return topo, ents, grid, cfg
 
 
 def main():
@@ -131,27 +156,32 @@ def main():
     from driver import finish, parse_args
 
     a = parse_args()
-
-    topo, ents = build_phoebus(grid_level=a.grid_level, n_fixed=a.pin_layers)
-
-    # --pin-layers > 0 smooths against the aspect-ratio target and pins the
-    # first n_fixed layers exactly; the default path runs the pure shape
-    # metric and restores the wall spacing with the respace post-pass.
-    target = build_boundary_layer_target(topo) if a.pin_layers > 0 else None
-    grid = topo.initialize_grid()
-    cfg = PipelineConfig(
-        tmop_sweeps=a.tmop_sweeps,
-        tmop_chunk=a.chunk,
-        tmop_smoother=a.smoother,
-        omega=a.omega,
-        device=a.device,
-        pin_sweeps=a.pin_sweeps if a.pin_layers > 0 else 0,
-        respace=a.pin_layers == 0,
-    )
-    steps = generate_steps(grid, target, cfg, untangle_direct=True)
+    topo, ents, grid, cfg = setup(vars(a))
+    steps = generate_steps(grid, config=cfg, untangle_direct=True)
 
     finish(grid, topo, ents, steps, a, title="Phoebus capsule")
 
+
+if __name__ == "__egg_webui__":  # running inside the egg web UI
+    import egg_webui
+
+    # CLI defaults, mirroring driver.py — edit freely
+    a = egg_webui.params(
+        grid_level=1,
+        pin_layers=2,
+        pin_sweeps=5000,
+        tmop_sweeps=5000,
+        chunk=1000,
+        smoother="jacobi",
+        # editable() surfaces a value in the run panel with a typed input;
+        # choices=[...] renders a dropdown. metric="shape" is the classic
+        # scale-invariant metric; "shape_size" also equalises cell areas.
+        metric=egg_webui.editable("shape_size", choices=["shape", "shape_size"]),
+        omega=0.8,
+        device="cpu",
+    )
+    topo, ents, grid, cfg = setup(a)
+    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
 
 if __name__ == "__main__":
     main()

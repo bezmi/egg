@@ -11,7 +11,7 @@
 import argparse
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description="spline blob → TMOP smoothed.")
     p.add_argument(
         "--plot-live", action="store_true", help="PyVista animated relaxation"
@@ -56,7 +56,7 @@ def parse_args():
         default=0.8,
         help="block-Jacobi SOR/damping weight (1.0 = undamped)",
     )
-    a = p.parse_args()
+    a = p.parse_args(argv)
     print("=" * 56)
     print("spline blob in rectangle → TMOP smooth")
     print("=" * 56)

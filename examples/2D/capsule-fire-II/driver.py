@@ -11,7 +11,7 @@
 import argparse
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description="FIRE II capsule forebody → TMOP smoothed.")
     p.add_argument(
         "--plot-live", action="store_true", help="PyVista animated relaxation"
@@ -68,6 +68,21 @@ def parse_args():
         "V-cycles (4 fine sweeps each plus coarse-grid work)",
     )
     p.add_argument(
+        "--metric",
+        choices=["shape", "shape_size"],
+        default="shape_size",
+        help="TMOP objective: shape+size (default; adds (det T - 1)^2 "
+        "against a mean-cell-size target — pushes cell areas toward "
+        "uniform) or the classic scale-invariant shape metric",
+    )
+    p.add_argument(
+        "--dipole",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="nested 3-valent dipole in the inflow/outflow corner block "
+        "(default; --no-dipole keeps the plain block array for comparison)",
+    )
+    p.add_argument(
         "--omega",
         type=float,
         default=0.8,
@@ -90,7 +105,7 @@ def parse_args():
         default=40,
         help="TMOP sweeps for the pinned re-run",
     )
-    a = p.parse_args()
+    a = p.parse_args(argv)
     print("=" * 56)
     print("FIRE II capsule forebody → TMOP smooth")
     print("=" * 56)

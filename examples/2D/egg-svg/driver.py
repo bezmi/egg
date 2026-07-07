@@ -6,51 +6,51 @@
 # See the license for details.
 # For commercial licensing, contact s.imran@tuta.io
 
-"""Argument parsing for the phoebus capsule example (see ``phoebus.py``)."""
+"""Argument parsing for the SVG-imported egg example (see ``egg_svg.py``)."""
 
 import argparse
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Phoebus capsule grid")
-    p.add_argument(
-        "--plot-grid", action="store_true", help="matplotlib final wireframe grid"
+    p = argparse.ArgumentParser(
+        description="egg in rectangle, geometry from Inkscape SVG → TMOP smoothed."
     )
+    p.add_argument(
+        "--plot-live", action="store_true", help="PyVista animated relaxation"
+    )
+    p.add_argument(
+        "--plot-energy",
+        action="store_true",
+        help="matplotlib energy + min-det convergence curves",
+    )
+    p.add_argument("--plot-grid", action="store_true", help="final wireframe grid")
     p.add_argument(
         "--plot-topology",
         action="store_true",
         help="Plot the declared topology only — no pipeline run",
     )
     p.add_argument(
-        "--grid-level",
-        type=int,
-        default=1,
-        help="grid refinement factor (as in the Lua example)",
-    )
-    p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
-    p.add_argument("--tmop-sweeps", type=int, default=5000)
-    p.add_argument(
-        "--smoother",
-        choices=["jacobi", "fas"],
-        default="jacobi",
-        help="TMOP-phase smoother: plain block-Jacobi sweeps or FAS (nonlinear "
-        "geometric multigrid) V-cycles; with fas, --tmop-sweeps/--chunk count "
-        "V-cycles (4 fine sweeps each plus coarse-grid work)",
+        "--colour-edge-verts",
+        action="store_true",
+        help="Toggle blue/red edge-vertex spheres in live plot",
     )
     p.add_argument(
-        "--metric",
-        choices=["shape", "shape_size"],
-        default="shape_size",
-        help="TMOP objective: shape+size (default; adds (det T - 1)^2 "
-        "against a mean-cell-size target — pushes cell areas toward "
-        "uniform) or the classic scale-invariant shape metric",
+        "--export",
+        metavar="FILE",
+        help="write the final grid as an SU2 mesh (markers: egg, "
+        "inflow, outflow, wall)",
     )
-    p.add_argument("--chunk", type=int, default=1000)
     p.add_argument(
-        "--omega",
+        "--bl-first-height",
         type=float,
-        default=0.8,
-        help="block-Jacobi SOR/damping weight for the TMOP phase",
+        default=5.0e-3,
+        help="first wall-normal cell height on the egg (0 disables clustering)",
+    )
+    p.add_argument(
+        "--bl-growth",
+        type=float,
+        default=1.5,
+        help="boundary-layer geometric growth ratio",
     )
     p.add_argument(
         "--pin-layers",
@@ -64,12 +64,30 @@ def parse_args(argv=None):
     p.add_argument(
         "--pin-sweeps",
         type=int,
-        default=5000,
+        default=300,
         help="TMOP sweeps for the pinned re-run",
+    )
+    p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
+    p.add_argument("--tmop-sweeps", type=int, default=600)
+    p.add_argument(
+        "--smoother",
+        choices=["jacobi", "fas"],
+        default="jacobi",
+        help="TMOP-phase smoother: plain block-Jacobi sweeps or FAS (nonlinear "
+        "geometric multigrid) V-cycles; with fas, --tmop-sweeps/--chunk count "
+        "V-cycles (4 fine sweeps each plus coarse-grid work)",
+    )
+    p.add_argument("--sweeps-per-delta", type=int, default=20)
+    p.add_argument("--chunk", type=int, default=50)
+    p.add_argument(
+        "--omega",
+        type=float,
+        default=0.8,
+        help="block-Jacobi SOR/damping weight (1.0 = undamped)",
     )
     a = p.parse_args(argv)
     print("=" * 56)
-    print("Phoebus capsule → TMOP smooth")
+    print("egg in rectangle (from Inkscape SVG) → TMOP smooth")
     print("=" * 56)
     for k, v in vars(a).items():
         print(f"  {k} = {v}")
@@ -105,13 +123,6 @@ def finish(grid, topo, ents, steps, a, *, title, mindet_title="min det A"):
         from egg.pipeline import drain_steps
 
         drain_steps(steps, mindet_history=mindet_history, energy_history=energy_history)
-
-    if getattr(topo, "boundary_layer_specs", None):
-        from egg.smoothing import first_layer_heights
-
-        # Height / its own spec target per wall column (1.0 = exact).
-        r = first_layer_heights(grid, topo, relative=True)
-        print(f"First layer heights / target: min={r.min():.6f} max={r.max():.6f}")
 
     if not getattr(a, "plot_live", False):
         print(f"\nFinal min det A: {mindet_history[-1]:.4e}")

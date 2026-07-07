@@ -23,7 +23,12 @@ from __future__ import annotations
 from egg.geometry import Circle, Edge, Line, Vector3
 from egg.topology.builder import TopologyBuilder
 
-__all__ = ["build_circle_in_rectangle", "build_twin_circle"]
+__all__ = [
+    "build_circle_in_rectangle",
+    "build_twin_circle",
+    "setup_single",
+    "setup_twin",
+]
 
 
 # Proper vs. rough (folded) inner O-ring corner placements.
@@ -39,16 +44,18 @@ def build_circle_in_rectangle(rough: bool = False, R: int = 1, bl=None):
     ``dict(first_height=0.01, growth=1.3)``.
     ``R`` → resolution multiplier.
     """
-    circle = Circle(center=(2.0, 2.0), radius=0.8)
+    circle = Circle(center=(2.0, 2.0), radius=0.8).named("circle")
 
+    # Naming each curve auto-derives its boundary marker on every associated
+    # face and exposes it as an entity (topo.entities) for rendering.
     sw = Vector3(x=0.0, y=0.0, fixed=True)
     se = Vector3(x=4.0, y=0.0, fixed=True)
     ne = Vector3(x=4.0, y=4.0, fixed=True)
     nw = Vector3(x=0.0, y=4.0, fixed=True)
-    bottom = Edge(Line(p0=sw, p1=se))
-    right = Edge(Line(p0=se, p1=ne))
-    top = Edge(Line(p0=ne, p1=nw))
-    left = Edge(Line(p0=sw, p1=nw))
+    bottom = Edge(Line(p0=sw, p1=se), name="bottom")
+    right = Edge(Line(p0=se, p1=ne), name="right")
+    top = Edge(Line(p0=ne, p1=nw), name="top")
+    left = Edge(Line(p0=sw, p1=nw), name="left")
 
     # O-ring corners: mid square and (rough or proper) inner square.
     msw, mse, mne, mnw = (Vector3(*p) for p in [(1, 1), (3, 1), (3, 3), (1, 3)])
@@ -102,14 +109,7 @@ def build_circle_in_rectangle(rough: bool = False, R: int = 1, bl=None):
         b.set_boundary_layer(circle, **bl)
 
     topology = b.build()
-    entities = {
-        "circle": circle,
-        "bottom": bottom.entity,
-        "right": right.entity,
-        "top": top.entity,
-        "left": left.entity,
-    }
-    return topology, entities
+    return topology, topology.entities
 
 
 _PROPER_TWIN = {
@@ -131,17 +131,19 @@ def build_twin_circle(rough: bool = False, bl=None, R: int = 1):
     ``bl["circle2"]`` dicts, e.g. ``dict(first_height=0.05, growth=1.5)``.
     ``R`` → corner-block resolution multiplier.
     """
-    circle = Circle(center=(2.0, 2.0), radius=0.8)
-    circle2 = Circle(center=(5.0, 2.0), radius=0.8)
+    circle = Circle(center=(2.0, 2.0), radius=0.8).named("circle")
+    circle2 = Circle(center=(5.0, 2.0), radius=0.8).named("circle2")
 
+    # Naming each curve auto-derives its boundary marker on every associated
+    # face and exposes it as an entity (topo.entities) for rendering.
     sw = Vector3(x=0.0, y=0.0, fixed=True)
     s2e = Vector3(x=7.0, y=0.0, fixed=True)
     n2e = Vector3(x=7.0, y=4.0, fixed=True)
     nw = Vector3(x=0.0, y=4.0, fixed=True)
-    bottom = Edge(Line(p0=sw, p1=s2e))
-    right = Edge(Line(p0=s2e, p1=n2e))
-    top = Edge(Line(p0=n2e, p1=nw))
-    left = Edge(Line(p0=sw, p1=nw))
+    bottom = Edge(Line(p0=sw, p1=s2e), name="bottom")
+    right = Edge(Line(p0=s2e, p1=n2e), name="right")
+    top = Edge(Line(p0=n2e, p1=nw), name="top")
+    left = Edge(Line(p0=sw, p1=nw), name="left")
 
     # O-ring corners around each circle.
     msw, mse, mne, mnw = (Vector3(*p) for p in [(1, 1), (3, 1), (3, 3), (1, 3)])
@@ -210,12 +212,67 @@ def build_twin_circle(rough: bool = False, bl=None, R: int = 1):
         b.set_boundary_layer(circle2, **bl["circle2"])
 
     topology = b.build()
-    entities = {
-        "circle": circle,
-        "circle2": circle2,
-        "bottom": bottom.entity,
-        "right": right.entity,
-        "top": top.entity,
-        "left": left.entity,
+    return topology, topology.entities
+
+
+def setup_single(a, rough: bool = False):
+    """Wiring shared by good-topo.py / untangle.py and their web-UI guards:
+    optional circle bl spec, TFI grid, PipelineConfig. The pipeline builds the
+    clustering target from the bl spec automatically (cluster_boundary_layers).
+    """
+    from egg.pipeline import PipelineConfig
+
+    bl = (
+        dict(
+            first_height=a["bl_first_height"],
+            growth=a["bl_growth"],
+            n_fixed=a["pin_layers"],
+        )
+        if a["bl_first_height"] > 0.0
+        else None
+    )
+    topo, ents = build_circle_in_rectangle(rough=rough, bl=bl)
+    grid = topo.initialize_grid()
+    cfg = PipelineConfig(
+        sweeps_per_delta=a["sweeps_per_delta"],
+        tmop_sweeps=a["tmop_sweeps"],
+        tmop_chunk=a["chunk"],
+        tmop_smoother=a["smoother"],
+        omega=a["omega"],
+        device=a["device"],
+        pin_sweeps=a["pin_sweeps"] if bl and a["pin_layers"] > 0 else 0,
+    )
+    return topo, ents, grid, cfg
+
+
+def setup_twin(a, rough: bool = False):
+    """Wiring shared by the *_side-by-side demos and their web-UI guards:
+    per-wall bl specs, TFI grid, PipelineConfig. The pipeline builds the
+    clustering target from the bl specs automatically (cluster_boundary_layers).
+    """
+    from egg.pipeline import PipelineConfig
+
+    bl = {
+        "circle": dict(
+            first_height=a["bl_first_height"],
+            growth=a["bl_growth"],
+            n_fixed=a["pin_layers"],
+        ),
+        "circle2": dict(
+            first_height=a["bl_first_height2"],
+            growth=a["bl_growth2"],
+            n_fixed=a["pin_layers"],
+        ),
     }
-    return topology, entities
+    topo, ents = build_twin_circle(rough=rough, bl=bl, R=a["resolution"])
+    grid = topo.initialize_grid()
+    cfg = PipelineConfig(
+        sweeps_per_delta=a["sweeps_per_delta"],
+        tmop_sweeps=a["tmop_sweeps"],
+        tmop_chunk=a["chunk"],
+        tmop_smoother=a["smoother"],
+        omega=a["omega"],
+        device=a["device"],
+        pin_sweeps=a["pin_sweeps"] if a["pin_layers"] > 0 else 0,
+    )
+    return topo, ents, grid, cfg
