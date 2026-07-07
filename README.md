@@ -56,6 +56,9 @@ The basics:
 
 Details, theming, and the full script contract: [`webui/README.md`](webui/README.md).
 
+### Documentation
+Start the webui after running `uv sync group pwebui --group docs`. Then, the full egg documentation is accessible through **help → documentation**.
+
 ## Running the demos
 
 The circle demos accept `--device {auto,cpu,gpu}` to select the SYCL device:
