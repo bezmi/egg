@@ -416,7 +416,7 @@ template <int D> struct StructuredRemap {
     egg::BlockLayout<D> layout;
     std::vector<int> g2s;          // global node id -> owner-interior (padded) node index
     std::size_t global_num_nodes;  // M (pre-remap host.num_nodes)
-    // Singular-fan mirrors: extra interior->ghost copies (already as double offsets)
+    // Singular-fan mirrors: extra interior->ghost copies (already as real offsets)
     // the host allocated when a patch node fell outside the regular interior+face
     // ghost shell. Appended to the device halo so they refresh every sweep.
     std::vector<std::size_t> fan_src_off;
@@ -505,7 +505,7 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     // slots come from block_global_dof; the ghost shell from the halo table (a
     // dst-block ghost holds the src-block's interior node, keyed by its global id).
     std::vector<std::unordered_map<int, int>> block_map(num_blocks);
-    std::vector<egg::real> Xp(layout.total_doubles(), egg::real {0});
+    std::vector<egg::real> Xp(layout.total_reals(), egg::real {0});
     // Owner block + owner interior slot of each global node, derived in this same
     // interior pass: the lowest-index block that contains a node owns (relaxes)
     // it; every later block holds a copy refreshed by an owner->copy broadcast.
@@ -676,7 +676,7 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     for (int k = 0; k < D; ++k) { remap_stencil(host.energy_stencil.gn[k]); }
 
     host.X = std::move(Xp);
-    host.num_nodes = layout.total_doubles() / static_cast<std::size_t>(D);
+    host.num_nodes = layout.total_reals() / static_cast<std::size_t>(D);
 
     // Flatten the block layout into node-unit arrays the device synthesis reads
     // (block base + padded node strides per block). Doubles/D are exact: a block
@@ -762,7 +762,16 @@ StructuredSession<D> make_structured_session(const py::dict& ctx_arrays,
                                   rm.share_dst_off,
                                   rm.fan_src_off,
                                   rm.fan_dst_off);
-    egg::StructuredExecutorT<D> exec(q, host, std::move(topo));
+    // Host copies of the conforming face tables (ghost fills + owner→copy
+    // broadcasts; fans/singularities stay fine-level-only), so the FAS
+    // hierarchy can derive coarse interface topology (mg_topology.hpp).
+    egg::HaloTablesHost<D> halo_host {extract_int(structured, "halo_src_block"),
+                                      extract_index_rows<D>(structured, "halo_src_padded"),
+                                      extract_int(structured, "halo_dst_block"),
+                                      extract_index_rows<D>(structured, "halo_dst_padded"),
+                                      rm.share_src_off,
+                                      rm.share_dst_off};
+    egg::StructuredExecutorT<D> exec(q, host, std::move(topo), std::move(halo_host));
     return StructuredSession<D> {std::move(exec), std::move(rm)};
 }
 
@@ -809,12 +818,64 @@ class CppStructuredSweepSession
                                to_f64(mindets.data(), n_reported));
     }
 
+    // Run n_cycles of FAS V-cycles (fas.hpp) on the resident packed X. Shape
+    // phase only: phase="untangle" raises ValueError. Returns per-cycle
+    // (energies, mindets); falls back to plain block-Jacobi with the same
+    // fine-sweep budget (per-cycle report cadence) when no coarse level can
+    // be built.
+    std::tuple<py::array_t<double>, py::array_t<double>> run_fas(int n_cycles,
+                                                                 int nu_pre,
+                                                                 int nu_post,
+                                                                 int nu_coarse,
+                                                                 double omega,
+                                                                 int max_levels,
+                                                                 const std::string& phase)
+    {
+        auto [energies, mindets] = std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              egg::FasOptions opts;
+              opts.n_cycles = n_cycles;
+              opts.nu_pre = nu_pre;
+              opts.nu_post = nu_post;
+              opts.nu_coarse = nu_coarse;
+              opts.omega = static_cast<egg::real>(omega);
+              opts.max_levels = max_levels;
+              const egg::ObjectiveKindT<D> objective = egg::make_objective<D>(phase, 0.0);
+              return s.exec.run_fas(opts, objective);
+          },
+          sess_);
+        const auto n_reported = static_cast<py::ssize_t>(energies.size());
+        return std::make_tuple(to_f64(energies.data(), n_reported),
+                               to_f64(mindets.data(), n_reported));
+    }
+
+    // Coarse-hierarchy shape: one list per level, one (n0, ..., n_{D-1})
+    // interior-node-count tuple per block. Empty when no level can be built.
+    py::list mg_levels()
+    {
+        return std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              py::list levels;
+              for (const auto& shapes : s.exec.mg_level_shapes()) {
+                  py::list blocks;
+                  for (const auto& shape : shapes) {
+                      py::tuple t(D);
+                      for (int k = 0; k < D; ++k) { t[k] = shape[static_cast<std::size_t>(k)]; }
+                      blocks.append(t);
+                  }
+                  levels.append(blocks);
+              }
+              return levels;
+          },
+          sess_);
+    }
+
     // Download the packed buffer and gather it back to global node order.
     py::array_t<double> get_X()
     {
         return std::visit(
           [&]<int D>(StructuredSession<D>& s) {
-              std::vector<egg::real> X_pad(s.rm.layout.total_doubles());
+              std::vector<egg::real> X_pad(s.rm.layout.total_reals());
               s.exec.ctx().download_X(X_pad.data());
               std::vector<double> X_out(s.rm.global_num_nodes * D);
               for (std::size_t g = 0; g < s.rm.global_num_nodes; ++g) {
@@ -890,6 +951,30 @@ PYBIND11_MODULE(cpp_core, m)
            "the final sweep of this call (chunk-end cadence, minimal reduction\n"
            "launches); 1 reports every sweep (legacy per-sweep contract); k > 1\n"
            "reports every k-th sweep plus the final one.")
+      .def("run_fas",
+           &CppStructuredSweepSession::run_fas,
+           py::arg("n_cycles"),
+           py::kw_only(),
+           py::arg("nu_pre") = 2,
+           py::arg("nu_post") = 2,
+           py::arg("nu_coarse") = 32,
+           py::arg("omega") = 1.0,
+           py::arg("max_levels") = egg::FasOptions {}.max_levels,
+           py::arg("phase") = "barrier",
+           "Run n_cycles of FAS (nonlinear geometric multigrid) V-cycles on the\n"
+           "resident packed X; returns per-cycle (energies, mindets). Each cycle is\n"
+           "nu_pre Jacobi sweeps, a tau-corrected coarse solve — recursing down the\n"
+           "factor-2 hierarchy (at most max_levels levels, fine included) to a\n"
+           "coarsest level solved with Newton sweeps scaled to its interior\n"
+           "diameter (capped by nu_coarse) — a safeguarded coarse-grid\n"
+           "correction (backtracking on the global energy), and nu_post sweeps.\n"
+           "Shape phase only: phase=\"untangle\" raises ValueError. Falls back to\n"
+           "plain block-Jacobi with the equivalent fine-sweep budget when the block\n"
+           "shapes admit no coarse level (or max_levels < 2).")
+      .def("mg_levels",
+           &CppStructuredSweepSession::mg_levels,
+           "Coarse-hierarchy shape: one list per level of per-block interior\n"
+           "node-count tuples; empty when no coarse level can be built.")
       .def("get_X",
            &CppStructuredSweepSession::get_X,
            "Download X gathered back to global node order, shape (N*dim,).");
@@ -933,7 +1018,7 @@ PYBIND11_MODULE(cpp_core, m)
               auto [energies, mindets] = exec.run_jacobi(n_sweeps, objective, omega, report_every);
 
               // Download the padded buffer and gather it back to global node order.
-              std::vector<egg::real> X_pad(rm.layout.total_doubles());
+              std::vector<egg::real> X_pad(rm.layout.total_reals());
               exec.ctx().download_X(X_pad.data());
               std::vector<double> X_out(rm.global_num_nodes * D);
               for (std::size_t g = 0; g < rm.global_num_nodes; ++g) {

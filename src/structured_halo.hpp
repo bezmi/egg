@@ -14,7 +14,7 @@
 /// BlockTopologyDevice<D> is the device image of the host halo tables built by
 /// egg.smoothing.cpp_backend.build_block_structured_context: per interface
 /// node, one source interior node and one destination ghost node, carried as
-/// flat double-offsets into a BlockField's packed buffer (the host resolves
+/// flat real-offsets into a BlockField's packed buffer (the host resolves
 /// (block, padded index) through BlockLayout<D>, keeping offset math
 /// single-sourced; the kernel is a pure gather/scatter). Entries are
 /// face-major, so consecutive work-items touch consecutive memory.
@@ -64,9 +64,9 @@ template <int D> class BlockTopologyDevice
     ///                      broadcast (the owner -> non-owner copy source).
     /// @param share_dst_off (K,) non-owner interior element offset (the copy dest).
     /// @param fan_src_off  (F,) extra interior->ghost copies as already-computed
-    ///                     double offsets (singular-fan neighbours mirrored into
+    ///                     real offsets (singular-fan neighbours mirrored into
     ///                     spare ghost-ring slots; appended to the ghost halo).
-    /// @param fan_dst_off  (F,) destination ghost double offsets for the above.
+    /// @param fan_dst_off  (F,) destination ghost real offsets for the above.
     BlockTopologyDevice(sycl::queue q,
                         const BlockLayout<D>& layout,
                         const std::vector<int>& src_block,
@@ -127,7 +127,7 @@ template <int D> class BlockTopologyDevice
     std::size_t n_entries_ = 0;
     std::size_t n_sing_ = 0;
     std::size_t n_share_ = 0;
-    UsmBuffer<std::size_t> src_off_;        // (E,) source-node coord-0 offsets (doubles)
+    UsmBuffer<std::size_t> src_off_;        // (E,) source-node coord-0 offsets (reals)
     UsmBuffer<std::size_t> dst_off_;        // (E,) destination ghost-node offsets
     UsmBuffer<std::size_t> share_src_off_;  // (K,) owner interior-node offsets
     UsmBuffer<std::size_t> share_dst_off_;  // (K,) non-owner interior-node offsets
@@ -135,7 +135,7 @@ template <int D> class BlockTopologyDevice
 };
 
 /// Copy the D coordinates of each `src[e]` node into `dst[e]`. One work-item per
-/// entry; each copies D contiguous doubles. The single source for both the ghost
+/// entry; each copies D contiguous reals. The single source for both the ghost
 /// halo and the shared-node broadcast — they differ only in which offset tables
 /// they pass. Returns the launch event (empty if `count == 0`).
 template <int D>

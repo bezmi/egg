@@ -10,6 +10,8 @@
 
 #include <cstddef>
 #include <experimental/mdspan>
+#include <optional>
+#include <stdexcept>
 #include <sycl/sycl.hpp>
 #include <utility>
 #include <vector>
@@ -34,14 +36,14 @@ template <class T> class UsmBuffer
     UsmBuffer() = default;
 
     UsmBuffer(sycl::queue q, std::size_t n) :
-        q_(q), n_(n), ptr_(n ? sycl::malloc_device<T>(n, q) : nullptr)
+        q_(std::move(q)), n_(n), ptr_(n ? sycl::malloc_device<T>(n, *q_) : nullptr)
     {
     }
 
     /// Allocate and upload a host vector in one step.
-    UsmBuffer(sycl::queue q, const std::vector<T>& host) : UsmBuffer(q, host.size())
+    UsmBuffer(sycl::queue q, const std::vector<T>& host) : UsmBuffer(std::move(q), host.size())
     {
-        if (n_) { q_.memcpy(ptr_, host.data(), n_ * sizeof(T)).wait(); }
+        if (n_) { q_->memcpy(ptr_, host.data(), n_ * sizeof(T)).wait(); }
     }
 
     ~UsmBuffer() { reset(); }
@@ -63,17 +65,21 @@ template <class T> class UsmBuffer
 
     void upload(const std::vector<T>& host)
     {
-        if (host.size()) { q_.memcpy(ptr_, host.data(), host.size() * sizeof(T)).wait(); }
+        if (host.size() > n_) {
+            throw std::length_error("UsmBuffer::upload: host size exceeds buffer capacity");
+        }
+        if (host.size()) { q_->memcpy(ptr_, host.data(), host.size() * sizeof(T)).wait(); }
     }
     void download(T* host)
     {
-        if (n_) { q_.memcpy(host, ptr_, n_ * sizeof(T)).wait(); }
+        if (n_) { q_->memcpy(host, ptr_, n_ * sizeof(T)).wait(); }
     }
 
   private:
     void reset()
     {
-        if (ptr_) { sycl::free(ptr_, q_); }
+        if (ptr_) { sycl::free(ptr_, *q_); }
+        q_.reset();
         ptr_ = nullptr;
         n_ = 0;
     }
@@ -84,9 +90,14 @@ template <class T> class UsmBuffer
         std::swap(ptr_, o.ptr_);
     }
 
+    // Engaged only when a queue was supplied: a default-constructed or
+    // moved-from buffer must not create (and later destroy) a default ACPP
+    // queue — empty buffers are made constantly (member declarations, moves,
+    // `= UsmBuffer{}` frees), and transient queue churn is exactly what the
+    // runtime-teardown notes in the tests warn about.
     // `sycl::queue` is a reference-counted handle; enqueueing work (memcpy in the
     // const download path) does not change this buffer's logical state.
-    mutable sycl::queue q_ {};
+    mutable std::optional<sycl::queue> q_;
     std::size_t n_ {};
     T* ptr_ {};
 };

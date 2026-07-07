@@ -12,11 +12,11 @@
 /// Structured patch-evaluation bridge. Over a BlockField<D>'s halo-padded
 /// buffer every node lives at a fixed (block, padded index) slot, the store is
 /// D-contiguous per node with no gaps, and each block base is a multiple of D
-/// — so a node's flat index in node units is its double-offset / D, and
+/// — so a node's flat index in node units is its real-offset / D, and
 /// patch_eval (which reads X[D*i + k]) is a drop-in once the stencil's gc/gn
 /// carry these structured indices instead of global ids. That is the
 /// coalescing win: consecutive interior nodes on the fastest axis are D
-/// doubles apart. This header is the single place converting BlockLayout
+/// reals apart. This header is the single place converting BlockLayout
 /// offsets into patch_eval node indices; SYCL-free and host-unit-testable.
 
 #include "patch.hpp"
@@ -29,7 +29,7 @@ namespace egg
 {
 
 /// Flat node index (in node units, for load_pt/store_pt) of the node at PADDED
-/// index `padded_idx` in block `b`. Equals the double-offset / D because the
+/// index `padded_idx` in block `b`. Equals the real-offset / D because the
 /// packed buffer is D-contiguous per node with no gaps and every block base is a
 /// multiple of D — so `patch_eval(buf, …)` reading `buf[D*i + k]` lands exactly
 /// on that node's coordinates.

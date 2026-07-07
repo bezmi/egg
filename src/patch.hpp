@@ -143,6 +143,43 @@ inline void
     }
 }
 
+/// Line-search trial energy + min det over one DOF's patch, substituting
+/// @p trial for the moving node @p dof (every other node loads from @p X).
+/// The stored-array twin of structured_patch.hpp::synth_trial_energy_mindet
+/// and the single body behind every kernel backtracking loop, so the
+/// acceptance inputs cannot drift between the interior/boundary paths. The
+/// A→T→detA math is the single source in @ref assemble_vecT; statement order
+/// matches the historical in-kernel copies (fp64 bit-identity). Plain inline:
+/// the SSCP device pass inlines it into each kernel like the hand-written
+/// bodies it replaces (inlining attributes are ignored there anyway).
+template <int D, class Obj>
+inline void trial_energy_mindet(const PatchViewT<D>& pv,
+                                const real* X,
+                                int dof,
+                                const PtN<D>& trial,
+                                Obj& objective,
+                                real& e_new,
+                                real& mdet)
+{
+    e_new = 0.0_r;
+    mdet = std::numeric_limits<real>::infinity();
+    for (int p = 0; p < pv.P; ++p) {
+        auto node = [&](int ni) -> PtN<D> { return ni == dof ? trial : load_pt<D>(X, ni); };
+        const int sid = pv.sample_id[p];  // shared-table index of occurrence p
+        PtN<D> corner = node(pv.gc[sid]);
+        std::array<PtN<D>, D> nbr;
+        std::array<real, D> sc;
+        for (int k = 0; k < D; ++k) {
+            nbr[k] = node(pv.gn[k][sid]);
+            sc[k] = pv.s[k][sid];
+        }
+        real detA;
+        const VecTN<D> t = assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
+        e_new += objective.value(t);
+        mdet = std::min(detA, mdet);
+    }
+}
+
 /// Role-selected chain-Jacobian block Jb (kVT×D, row-major), recomputed from
 /// the per-axis signs @p s and W_inv @p w instead of a stored table. Jb is the
 /// D columns of the constant J = d·vec(T)/d·coords belonging to the DOF's node.
