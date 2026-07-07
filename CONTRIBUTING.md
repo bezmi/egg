@@ -14,7 +14,12 @@ modify, and share the software and your changes, **provided all use stays
 noncommercial** and you pass along this license and any required notices. To
 protect community contributions, **each tagged release's artifacts convert to GNU
 AGPL-3.0 four years after its release date**, via the PolyForm Countdown notice
-attached to that release.
+attached to that release. When the AGPL countdown is active for a release, that notice
+is included as a `LICENSE-COUNTDOWN.md` file alongside the license in the
+release's files. The conversion applies only to **official releases signed by
+the maintainer** (see "Release authenticity" in [DEPLOY.md](./DEPLOY.md)); a
+`LICENSE-COUNTDOWN.md` in an unsigned or third-party build does not bind the
+maintainer or grant any rights.
 
 Contributing requires agreeing to the Contributor License Agreement (CLA) at the
 end of this document, which—among other things—allows the maintainer to offer

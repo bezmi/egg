@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """Dimension-agnostic data model: Block, MultiBlockGrid."""
 
 from __future__ import annotations
@@ -5,7 +13,12 @@ from __future__ import annotations
 from itertools import product
 from typing import Any, Iterator
 
+from typing import TYPE_CHECKING
+
 import numpy as np
+
+if TYPE_CHECKING:
+    from egg.topology.block_topology import BlockTopology
 
 __all__ = ["Block", "MultiBlockGrid"]
 
@@ -128,10 +141,11 @@ class MultiBlockGrid:
     def pack(self) -> np.ndarray:
         """Flatten free-DOF coordinates into a 1D optimization vector.
 
-        Delegates to :func:`egg.smoothing.objective.pack_x` (the real M2
+        Delegates to :func:`egg.smoothing.objective.pack_x` (the real
         implementation).
         """
         from egg.smoothing.objective import pack_x
+
         return pack_x(self)
 
     def unpack(self, x: np.ndarray) -> None:
@@ -140,4 +154,5 @@ class MultiBlockGrid:
         Delegates to :func:`egg.smoothing.objective.unpack_x`.
         """
         from egg.smoothing.objective import unpack_x
+
         unpack_x(x, self)

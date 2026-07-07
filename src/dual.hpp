@@ -1,14 +1,22 @@
-//   Dual<N>   first-order forward mode: value + gradient[N].
-//   Dual2<N>  second-order forward-over-forward ("hyperdual" / dual2nd):
-//             value + gradient[N] + symmetric Hessian[N][N], all in one pass.
+// Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
 //
-// Seeding convention: seed_dual<N>(x, i) makes a variable whose i-th partial is
-// 1. To get a full gradient/Hessian, build the input vector with each component
-// seeded on its own direction, evaluate the metric once, and read .g / .h.
-//
-// Not currently used for the shape mu, but is used for δ-continuation untangling.
-// will be important for the 3D mu
+// PolyForm Noncommercial License 2.0.0-pre.2
+// https://github.com/bezmi/egg/blob/main/LICENSE.md
+// Free to use and redistribute for personal and noncommercial purposes.
+// See the license for details.
+// For commercial licensing, contact s.imran@tuta.io
+
+/// @file dual.hpp
+/// Forward-mode AD: `Dual<N>` (value + gradient) and `Dual2<N>` (forward-over-
+/// forward "hyperdual": value + gradient + symmetric Hessian in one pass).
+/// Seed with `seed_dual{,2}<N>(x, i)` (unit i-th partial), build the input with
+/// each component seeded on its own direction, evaluate once, read `.g` / `.h`.
+/// Used by the delta-continuation untangle; will matter for the 3D mu.
+/// T defaults to egg::real so AD carries src/ precision without a
+/// double<->real seam; T needs the usual arithmetic plus sycl::sqrt.
 #pragma once
+
+#include "core.hpp"
 
 #include <array>
 #include <cmath>
@@ -16,52 +24,54 @@
 namespace egg
 {
 
-// First-order forward-mode dual.
-template <int N> struct Dual {
-    double v {0.0};
-    std::array<double, N> g {};  // value-initialised to zeros
+/// First-order forward-mode dual number.
+template <int N, class T = real> struct Dual {
+    T v {T(0)};
+    std::array<T, N> g {};
 
     constexpr Dual() = default;
-    constexpr Dual(double value) : v(value) { g.fill(0.0); }  // NOLINT: implicit
-    constexpr Dual(double value, std::array<double, N> grad) : v(value), g(grad) {}
+    constexpr Dual(T value) : v(value) { g.fill(T(0)); }  // NOLINT: implicit
+    constexpr Dual(T value, std::array<T, N> grad) : v(value), g(grad) {}
 };
 
-template <int N> constexpr Dual<N> operator+(const Dual<N>& a, const Dual<N>& b)
+/// @name Dual arithmetic (value + gradient chain rules)
+/// @{
+template <int N, class T> constexpr Dual<N, T> operator+(const Dual<N, T>& a, const Dual<N, T>& b)
 {
-    Dual<N> r;
+    Dual<N, T> r;
     r.v = a.v + b.v;
     for (int i = 0; i < N; ++i) { r.g[i] = a.g[i] + b.g[i]; }
     return r;
 }
 
-template <int N> constexpr Dual<N> operator-(const Dual<N>& a, const Dual<N>& b)
+template <int N, class T> constexpr Dual<N, T> operator-(const Dual<N, T>& a, const Dual<N, T>& b)
 {
-    Dual<N> r;
+    Dual<N, T> r;
     r.v = a.v - b.v;
     for (int i = 0; i < N; ++i) { r.g[i] = a.g[i] - b.g[i]; }
     return r;
 }
 
-template <int N> constexpr Dual<N> operator-(const Dual<N>& a)
+template <int N, class T> constexpr Dual<N, T> operator-(const Dual<N, T>& a)
 {
-    Dual<N> r;
+    Dual<N, T> r;
     r.v = -a.v;
     for (int i = 0; i < N; ++i) { r.g[i] = -a.g[i]; }
     return r;
 }
 
-template <int N> constexpr Dual<N> operator*(const Dual<N>& a, const Dual<N>& b)
+template <int N, class T> constexpr Dual<N, T> operator*(const Dual<N, T>& a, const Dual<N, T>& b)
 {
-    Dual<N> r;
+    Dual<N, T> r;
     r.v = a.v * b.v;
     for (int i = 0; i < N; ++i) { r.g[i] = a.g[i] * b.v + a.v * b.g[i]; }
     return r;
 }
 
-template <int N> constexpr Dual<N> operator/(const Dual<N>& a, const Dual<N>& b)
+template <int N, class T> constexpr Dual<N, T> operator/(const Dual<N, T>& a, const Dual<N, T>& b)
 {
-    Dual<N> r;
-    const double inv = 1.0 / b.v;
+    Dual<N, T> r;
+    const T inv = T(1) / b.v;
     r.v = a.v * inv;
     for (int i = 0; i < N; ++i) {
         r.g[i] = (a.g[i] - r.v * b.g[i]) * inv;  // (a' - (a/b) b') / b
@@ -70,41 +80,51 @@ template <int N> constexpr Dual<N> operator/(const Dual<N>& a, const Dual<N>& b)
 }
 
 // scalar mixed ops
-template <int N> constexpr Dual<N> operator*(double s, const Dual<N>& a) { return Dual<N>(s) * a; }
-template <int N> constexpr Dual<N> operator*(const Dual<N>& a, double s) { return a * Dual<N>(s); }
-template <int N> constexpr Dual<N> operator/(const Dual<N>& a, double s) { return a * (1.0 / s); }
-template <int N> constexpr Dual<N> operator-(const Dual<N>& a, double s) { return a - Dual<N>(s); }
+template <int N, class T> constexpr Dual<N, T> operator*(T s, const Dual<N, T>& a)
+{ return Dual<N, T>(s) * a; }
+template <int N, class T> constexpr Dual<N, T> operator*(const Dual<N, T>& a, T s)
+{ return a * Dual<N, T>(s); }
+template <int N, class T> constexpr Dual<N, T> operator/(const Dual<N, T>& a, T s)
+{ return a * (T(1) / s); }
+template <int N, class T> constexpr Dual<N, T> operator-(const Dual<N, T>& a, T s)
+{ return a - Dual<N, T>(s); }
 
-template <int N> inline Dual<N> sqrt(const Dual<N>& a)
+/// f = sqrt(a): f' = a' / (2f).
+template <int N, class T> inline Dual<N, T> sqrt(const Dual<N, T>& a)
 {
-    Dual<N> r;
-    r.v = std::sqrt(a.v);
-    const double coef = 0.5 / r.v;
+    Dual<N, T> r;
+    r.v = sycl::sqrt(a.v);
+    const T coef = T(0.5) / r.v;
     for (int i = 0; i < N; ++i) { r.g[i] = coef * a.g[i]; }
     return r;
 }
+/// @}
 
-template <int N> constexpr Dual<N> seed_dual(double x, int i)
+/// Variable with unit i-th partial.
+template <int N, class T = real> constexpr Dual<N, T> seed_dual(T x, int i)
 {
-    Dual<N> r(x);
-    r.g[i] = 1.0;
+    Dual<N, T> r(x);
+    r.g[i] = T(1);
     return r;
 }
 
-// Second-order forward-over-forward (hyperdual). Carries the full symmetric
-// Hessian, so a single evaluation yields value, gradient, and Hessian.
-template <int N> struct Dual2 {
-    double v {0.0};
-    std::array<double, N> g {};
-    std::array<std::array<double, N>, N> h {};
+/// Second-order forward-over-forward dual: one evaluation yields value,
+/// gradient, and full symmetric Hessian.
+template <int N, class T = real> struct Dual2 {
+    T v {T(0)};
+    std::array<T, N> g {};
+    std::array<std::array<T, N>, N> h {};
 
     constexpr Dual2() = default;
-    constexpr Dual2(double value) : v(value) {}  // NOLINT: implicit
+    constexpr Dual2(T value) : v(value) {}  // NOLINT: implicit
 };
 
-template <int N> constexpr Dual2<N> operator+(const Dual2<N>& a, const Dual2<N>& b)
+/// @name Dual2 arithmetic (value + gradient + Hessian chain rules)
+/// @{
+template <int N, class T>
+constexpr Dual2<N, T> operator+(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
-    Dual2<N> r;
+    Dual2<N, T> r;
     r.v = a.v + b.v;
     for (int i = 0; i < N; ++i) {
         r.g[i] = a.g[i] + b.g[i];
@@ -113,9 +133,10 @@ template <int N> constexpr Dual2<N> operator+(const Dual2<N>& a, const Dual2<N>&
     return r;
 }
 
-template <int N> constexpr Dual2<N> operator-(const Dual2<N>& a, const Dual2<N>& b)
+template <int N, class T>
+constexpr Dual2<N, T> operator-(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
-    Dual2<N> r;
+    Dual2<N, T> r;
     r.v = a.v - b.v;
     for (int i = 0; i < N; ++i) {
         r.g[i] = a.g[i] - b.g[i];
@@ -124,9 +145,9 @@ template <int N> constexpr Dual2<N> operator-(const Dual2<N>& a, const Dual2<N>&
     return r;
 }
 
-template <int N> constexpr Dual2<N> operator-(const Dual2<N>& a)
+template <int N, class T> constexpr Dual2<N, T> operator-(const Dual2<N, T>& a)
 {
-    Dual2<N> r;
+    Dual2<N, T> r;
     r.v = -a.v;
     for (int i = 0; i < N; ++i) {
         r.g[i] = -a.g[i];
@@ -135,9 +156,10 @@ template <int N> constexpr Dual2<N> operator-(const Dual2<N>& a)
     return r;
 }
 
-template <int N> constexpr Dual2<N> operator*(const Dual2<N>& a, const Dual2<N>& b)
+template <int N, class T>
+constexpr Dual2<N, T> operator*(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
-    Dual2<N> r;
+    Dual2<N, T> r;
     r.v = a.v * b.v;
     for (int i = 0; i < N; ++i) { r.g[i] = a.g[i] * b.v + a.v * b.g[i]; }
     for (int i = 0; i < N; ++i) {
@@ -149,13 +171,12 @@ template <int N> constexpr Dual2<N> operator*(const Dual2<N>& a, const Dual2<N>&
     return r;
 }
 
-template <int N> constexpr Dual2<N> operator/(const Dual2<N>& a, const Dual2<N>& b)
+template <int N, class T>
+constexpr Dual2<N, T> operator/(const Dual2<N, T>& a, const Dual2<N, T>& b)
 {
-    // q = a / b. Differentiate a = q b twice:
-    //   q'  = (a' - q b') / b
-    //   q'' = (a'' - q' b' - q' b' - q b'') / b
-    Dual2<N> r;
-    const double inv = 1.0 / b.v;
+    // q = a / b, from a = q b: q' = (a' - q b')/b; q'' = (a'' - 2 q' b' - q b'')/b
+    Dual2<N, T> r;
+    const T inv = T(1) / b.v;
     r.v = a.v * inv;
     for (int i = 0; i < N; ++i) { r.g[i] = (a.g[i] - r.v * b.g[i]) * inv; }
     for (int i = 0; i < N; ++i) {
@@ -167,31 +188,34 @@ template <int N> constexpr Dual2<N> operator/(const Dual2<N>& a, const Dual2<N>&
 }
 
 // scalar mixed ops
-template <int N> constexpr Dual2<N> operator*(double s, const Dual2<N>& a)
-{ return Dual2<N>(s) * a; }
-template <int N> constexpr Dual2<N> operator*(const Dual2<N>& a, double s)
-{ return a * Dual2<N>(s); }
-template <int N> constexpr Dual2<N> operator/(const Dual2<N>& a, double s) { return a * (1.0 / s); }
-template <int N> constexpr Dual2<N> operator-(const Dual2<N>& a, double s)
-{ return a - Dual2<N>(s); }
+template <int N, class T> constexpr Dual2<N, T> operator*(T s, const Dual2<N, T>& a)
+{ return Dual2<N, T>(s) * a; }
+template <int N, class T> constexpr Dual2<N, T> operator*(const Dual2<N, T>& a, T s)
+{ return a * Dual2<N, T>(s); }
+template <int N, class T> constexpr Dual2<N, T> operator/(const Dual2<N, T>& a, T s)
+{ return a * (T(1) / s); }
+template <int N, class T> constexpr Dual2<N, T> operator-(const Dual2<N, T>& a, T s)
+{ return a - Dual2<N, T>(s); }
 
-template <int N> inline Dual2<N> sqrt(const Dual2<N>& a)
+/// f = sqrt(a): f' = a'/(2f); f'' = (a'' - 2 f' f') / (2f).
+template <int N, class T> inline Dual2<N, T> sqrt(const Dual2<N, T>& a)
 {
-    // f = sqrt(a): f' = a'/(2f); f'' = (a'' - 2 f' f') / (2f)
-    Dual2<N> r;
-    r.v = std::sqrt(a.v);
-    const double inv2f = 0.5 / r.v;
+    Dual2<N, T> r;
+    r.v = sycl::sqrt(a.v);
+    const T inv2f = T(0.5) / r.v;
     for (int i = 0; i < N; ++i) { r.g[i] = inv2f * a.g[i]; }
     for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < N; ++j) { r.h[i][j] = inv2f * (a.h[i][j] - 2.0 * r.g[i] * r.g[j]); }
+        for (int j = 0; j < N; ++j) { r.h[i][j] = inv2f * (a.h[i][j] - T(2) * r.g[i] * r.g[j]); }
     }
     return r;
 }
+/// @}
 
-template <int N> constexpr Dual2<N> seed_dual2(double x, int i)
+/// Variable with unit i-th partial.
+template <int N, class T = real> constexpr Dual2<N, T> seed_dual2(T x, int i)
 {
-    Dual2<N> r(x);
-    r.g[i] = 1.0;
+    Dual2<N, T> r(x);
+    r.g[i] = T(1);
     return r;
 }
 

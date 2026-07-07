@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """Tests for objective assembly — gradient gate via check_grad."""
 
 import numpy as np
@@ -16,8 +24,12 @@ from egg.topology.builder import TopologyBuilder
 def _make_test_grid_2d():
     """Build a simple 1-block valid grid for testing."""
     builder = TopologyBuilder(d=2)
-    for name, pos in [("A", (0., 0.)), ("B", (4., 0.)),
-                      ("C", (4., 4.)), ("D", (0., 4.))]:
+    for name, pos in [
+        ("A", (0.0, 0.0)),
+        ("B", (4.0, 0.0)),
+        ("C", (4.0, 4.0)),
+        ("D", (0.0, 4.0)),
+    ]:
         builder.add_corner(name, pos, fixed=True)
     builder.add_block("main", ("A", "D", "B", "C"), (8, 8))
     topo = builder.build()
@@ -28,10 +40,16 @@ def _make_test_grid_2d():
 def _make_test_grid_3d():
     """Build a simple 1-block valid 3D grid for testing."""
     builder = TopologyBuilder(d=3)
-    for name, pos in [("swn", (0., 0., 0.)), ("sew", (2., 0., 0.)),
-                      ("nes", (2., 1., 0.)), ("nwn", (0., 1., 0.)),
-                      ("sws", (0., 0., 1.)), ("see", (2., 0., 1.)),
-                      ("nee", (2., 1., 1.)), ("nww", (0., 1., 1.))]:
+    for name, pos in [
+        ("swn", (0.0, 0.0, 0.0)),
+        ("sew", (2.0, 0.0, 0.0)),
+        ("nes", (2.0, 1.0, 0.0)),
+        ("nwn", (0.0, 1.0, 0.0)),
+        ("sws", (0.0, 0.0, 1.0)),
+        ("see", (2.0, 0.0, 1.0)),
+        ("nee", (2.0, 1.0, 1.0)),
+        ("nww", (0.0, 1.0, 1.0)),
+    ]:
         builder.add_corner(name, pos, fixed=True)
     builder.add_block(
         "main",
@@ -82,8 +100,12 @@ class TestGradientGate:
                 nodes[i, j, 1] = float(j)
 
         builder = TopologyBuilder(d=2)
-        for name, pos in [("A", (0., 0.)), ("B", (4., 0.)),
-                          ("C", (4., 4.)), ("D", (0., 4.))]:
+        for name, pos in [
+            ("A", (0.0, 0.0)),
+            ("B", (4.0, 0.0)),
+            ("C", (4.0, 4.0)),
+            ("D", (0.0, 4.0)),
+        ]:
             builder.add_corner(name, pos, fixed=True)
         builder.add_block("main", ("A", "D", "B", "C"), (4, 4))
         topo = builder.build()

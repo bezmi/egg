@@ -154,4 +154,41 @@ wheel (ABI). After updating, tell users to clear the acpp JIT cache.
   JIT don't fit manylinux). Ship source + a documented acpp prereq, or a
   devcontainer.
 
-See [DEVELOPING.md](DEVELOPING.md) for the build/dev side.
+See [DEVELOPING.md](DEVELOPING.md) for the build/dev side, including
+[building the documentation site](DEVELOPING.md#documentation).
+
+---
+
+## Release authenticity
+
+The release tooling (`scripts/make_wheel_release.py`,
+`scripts/make_source_release.py`) and the PolyForm Countdown notice are public,
+so *anyone* can produce a look-alike artifact with a `LICENSE-COUNTDOWN.md`
+attached. What makes a release **official** is not the presence of that file —
+it is a signature under the maintainer's identity. (A Countdown notice attached
+by a non-licensor is legally void anyway: only the copyright holders can grant
+the conversion.)
+
+Official artifacts are signed with **keyless Sigstore** (cosign) — a short-lived
+certificate bound to the maintainer's OAuth identity, no long-lived key:
+
+```bash
+scripts/sign_release.py dist/wheel/egg-*.whl dist/egg-*-src.tar.gz
+```
+
+This writes `<artifact>.sig` + `<artifact>.pem` per artifact, published
+alongside it. The `.sha256` files the build scripts emit are for **integrity**
+(detect corruption); the signature is what proves **origin**.
+
+### Verifying an official release
+
+```bash
+cosign verify-blob egg-<ver>-...whl \
+  --signature egg-<ver>-...whl.sig --certificate egg-<ver>-...whl.pem \
+  --certificate-identity s.imran@tuta.io \
+  --certificate-oidc-issuer https://github.com/login/oauth
+```
+
+If it isn't signed by `s.imran@tuta.io` (verified against Sigstore's public
+transparency log), it is **not** an official release, regardless of which
+license files it carries.

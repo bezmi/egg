@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """Tests for tangential sliding and the DOF constraint hierarchy."""
 
 import numpy as np
@@ -52,7 +60,7 @@ class TestConstraintHierarchy:
             b.add_corner(n, p, fixed=False)
         b.add_block("blk", ("sw", "nw", "se", "ne"), (3, 3))
         b.associate("blk", 1, 0, bottom)  # axis1 side0 -> bottom (sw-se)
-        b.associate("blk", 0, 0, left)    # axis0 side0 -> left (sw-nw)
+        b.associate("blk", 0, 0, left)  # axis0 side0 -> left (sw-nw)
         topo = b.build()
         topo.initialize_grid()
         return topo, bottom, left

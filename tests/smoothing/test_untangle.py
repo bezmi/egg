@@ -1,4 +1,12 @@
-"""Tests for the δ-continuation untangler (M5).
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
+"""Tests for the δ-continuation untangler.
 
 The untangle driver delegates to the C++ backend via
 :func:`egg.smoothing.cpp_backend.cpp_untangle`. These tests exercise the
@@ -16,13 +24,16 @@ from egg.smoothing.targets import IdentityTarget
 from egg.smoothing.untangle import untangle, grid_min_det
 from egg.topology.builder import TopologyBuilder
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "circles"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "..", "..", "examples", "2D", "circles")
+)
 from topologies import build_circle_in_rectangle  # noqa: E402
 
 
 def _has_cpp() -> bool:
     try:
         from egg._cpp import cpp_core  # noqa: F401
+
         return True
     except ImportError:
         return False

@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """A from node patch; sample points (dimension-agnostic)."""
 
 from __future__ import annotations
@@ -15,9 +23,7 @@ __all__ = [
 ]
 
 
-def compute_jacobian(
-    nodes: np.ndarray, cell_base: tuple[int, ...]
-) -> np.ndarray:
+def compute_jacobian(nodes: np.ndarray, cell_base: tuple[int, ...]) -> np.ndarray:
     """Forward-difference Jacobian at a cell's lower-left corner.
 
     A[:, k] = nodes[base + e_k] - nodes[base]   for each axis k.

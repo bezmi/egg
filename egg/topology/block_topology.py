@@ -1,4 +1,16 @@
-"""Corners, edges, connectivity, associations, singularities."""
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
+"""Multiblock topology data model: corners, blocks, connectivity, associations.
+
+Usually constructed via :class:`egg.topology.builder.TopologyBuilder` rather
+than directly.
+"""
 
 from __future__ import annotations
 
@@ -47,8 +59,8 @@ class BlockSpec:
     """Specification for a structured block: corners and per-axis cell counts."""
 
     name: str
-    corner_names: tuple[str, ...]    # 2**d names in product((0,1), repeat=d) order
-    resolutions: tuple[int, ...]     # cells per axis: (n0, ..., n_{d-1})
+    corner_names: tuple[str, ...]  # 2**d names in product((0,1), repeat=d) order
+    resolutions: tuple[int, ...]  # cells per axis: (n0, ..., n_{d-1})
 
     @property
     def logical_shape(self) -> tuple[int, ...]:
@@ -57,6 +69,7 @@ class BlockSpec:
 
     @property
     def node_count(self) -> int:
+        """Total node count of the block."""
         return int(np.prod(self.logical_shape))
 
     def _corner_logical_indices(self, d: int) -> list[tuple[int, ...]]:
@@ -113,7 +126,13 @@ class Singularity:
 
 
 class BlockTopology:
-    """The full topology specification: corners, blocks, connectivity, associations."""
+    """Validated topology: corners, blocks, connectivity, associations.
+
+    Construction validates connections and boundary tags, resolves
+    interface orientations, builds the shared-DOF map (union-find over
+    interface nodes), and detects singularities. :meth:`initialize_grid`
+    then produces the TFI-initialised :class:`~egg.core.types.MultiBlockGrid`.
+    """
 
     def __init__(
         self,
@@ -123,6 +142,7 @@ class BlockTopology:
         connections: list[InterfaceConnection],
         associations: list[Association],
         boundary_layer_specs: dict | None = None,
+        boundary_tags: dict[str, list[FaceSpec]] | None = None,
     ):
         self.d = d
         self.corners = dict(corners)
@@ -131,9 +151,14 @@ class BlockTopology:
         self.associations = list(associations)
         # entity-id -> dict of BoundaryLayerTarget kwargs (first_height, growth, …)
         self.boundary_layer_specs = dict(boundary_layer_specs or {})
+        # marker name -> block faces carrying that boundary-condition tag
+        self.boundary_tags: dict[str, list[FaceSpec]] = {
+            name: list(faces) for name, faces in (boundary_tags or {}).items()
+        }
         self.singularities: list[Singularity] = []
 
         self._validate()
+        self._validate_boundary_tags()
         self._resolve_orientations()
         self.grid = self._build_dof_map()
         self.singularities = self._detect_singularities()
@@ -146,7 +171,6 @@ class BlockTopology:
                     raise ValueError(
                         f"Connection references unknown block '{face_spec.block_name}'"
                     )
-                spec = self.block_specs[face_spec.block_name]
                 if not (0 <= face_spec.axis < self.d):
                     raise ValueError(
                         f"Face axis {face_spec.axis} out of range for d={self.d}"
@@ -171,6 +195,27 @@ class BlockTopology:
                     f"{conn.face_b.block_name}[a={conn.face_b.axis},s={conn.face_b.side}]"
                     f": {names_a} vs {names_b}"
                 )
+
+    def _validate_boundary_tags(self) -> None:
+        """Check that boundary tags reference valid, non-interface block faces."""
+        shared = self._get_shared_face_set()
+        for name, faces in self.boundary_tags.items():
+            for face in faces:
+                if face.block_name not in self.block_specs:
+                    raise ValueError(
+                        f"Boundary tag '{name}' references unknown block "
+                        f"'{face.block_name}'"
+                    )
+                if not (0 <= face.axis < self.d) or face.side not in (0, 1):
+                    raise ValueError(
+                        f"Boundary tag '{name}' has invalid face "
+                        f"(axis={face.axis}, side={face.side}) for d={self.d}"
+                    )
+                if (face.block_name, face.axis, face.side) in shared:
+                    raise ValueError(
+                        f"Boundary tag '{name}' targets shared interface face "
+                        f"{face.block_name}[axis={face.axis}, side={face.side}]"
+                    )
 
     def _resolve_orientations(self) -> None:
         """For each InterfaceConnection, build the corner-name orientation dict."""
@@ -200,7 +245,6 @@ class BlockTopology:
         Returns a MultiBlockGrid with block_dof_maps populated.
         """
         block_names = list(self.block_specs.keys())
-        n_blocks = len(block_names)
 
         # 1. Compute per-block node counts and provisional offsets
         block_node_counts = [self.block_specs[n].node_count for n in block_names]
@@ -273,10 +317,6 @@ class BlockTopology:
             names_b = spec_b.face_corner_names(axis_b, side_b, self.d)
             corner_indices_b = spec_b.face_corner_indices(axis_b, side_b, self.d)
 
-            all_corner_indices = self.block_specs[block_names[0]]._corner_logical_indices(
-                self.d
-            )
-
             # Map each face_a corner to its corresponding face_b corner via orientation
             name_to_b_corner = {}
             for ci_b, name_b in zip(corner_indices_b, names_b):
@@ -311,9 +351,6 @@ class BlockTopology:
                     # Check orientation: does node walk in same or opposite direction?
                     c0_a_idx = corner_a_ci_to_b_ci.get(corner_indices_a[0])
                     if c0_a_idx is not None:
-                        c0_b_logical = all_corner_indices[c0_a_idx]
-                        # The free axis coordinate of this corner on B's face
-                        free_b_coord = c0_b_logical[free_axes_b[0]]
                         # Determine direction: if first corner of A maps to first corner of B, same direction
                         # A node at free index k walks from A's first corner to A's second corner
                         # The matching B index depends on the direction
@@ -474,18 +511,18 @@ class BlockTopology:
                 inward_b = list(logical_b)
                 inward_b[axis_b] += 1 if side_b == 0 else -1
                 if 0 <= inward_b[axis_b] < shape_b[axis_b]:
-                    cross_map[
-                        (conn.face_a.block_name, axis_a, side_a, la_t)
-                    ] = int(dof_b[tuple(inward_b)])
+                    cross_map[(conn.face_a.block_name, axis_a, side_a, la_t)] = int(
+                        dof_b[tuple(inward_b)]
+                    )
 
                 # Inward neighbor in block A
                 inward_a = list(logical_a)
                 inward_a[axis_a] += 1 if side_a == 0 else -1
                 if 0 <= inward_a[axis_a] < shape_a[axis_a]:
                     lb_t = tuple(logical_b)
-                    cross_map[
-                        (conn.face_b.block_name, axis_b, side_b, lb_t)
-                    ] = int(dof_a[tuple(inward_a)])
+                    cross_map[(conn.face_b.block_name, axis_b, side_b, lb_t)] = int(
+                        dof_a[tuple(inward_a)]
+                    )
 
         # Accumulate neighbours across ALL blocks (a shared DOF may live in
         # multiple blocks).  Also record per-DOF metadata.
@@ -513,7 +550,10 @@ class BlockTopology:
                     for axis in range(self.d):
                         for side in (0, 1):
                             sv = 0 if side == 0 else shape[axis] - 1
-                            if logical_idx[axis] == sv and (name, axis, side) not in shared_faces:
+                            if (
+                                logical_idx[axis] == sv
+                                and (name, axis, side) not in shared_faces
+                            ):
                                 on_bound = True
                     dof_on_boundary[dof] = on_bound
                 elif not dof_on_boundary[dof]:
@@ -522,7 +562,10 @@ class BlockTopology:
                     for axis in range(self.d):
                         for side in (0, 1):
                             sv = 0 if side == 0 else shape[axis] - 1
-                            if logical_idx[axis] == sv and (name, axis, side) not in shared_faces:
+                            if (
+                                logical_idx[axis] == sv
+                                and (name, axis, side) not in shared_faces
+                            ):
                                 dof_on_boundary[dof] = True
 
                 # Within-block neighbours
@@ -537,7 +580,10 @@ class BlockTopology:
                 for axis in range(self.d):
                     for side in (0, 1):
                         sv = 0 if side == 0 else shape[axis] - 1
-                        if logical_idx[axis] == sv and (name, axis, side) in shared_faces:
+                        if (
+                            logical_idx[axis] == sv
+                            and (name, axis, side) in shared_faces
+                        ):
                             cross_dof = cross_map.get((name, axis, side, logical_idx))
                             if cross_dof is not None:
                                 neighbour_sets[dof].add(cross_dof)
@@ -597,8 +643,7 @@ class BlockTopology:
             corner_indices = spec._corner_logical_indices(self.d)
             for ci, ci_logical in enumerate(corner_indices):
                 actual = tuple(
-                    0 if c == 0 else shape[dim] - 1
-                    for dim, c in enumerate(ci_logical)
+                    0 if c == 0 else shape[dim] - 1 for dim, c in enumerate(ci_logical)
                 )
                 cname = spec.corner_names[ci]
                 gidx = int(dof_map[actual])

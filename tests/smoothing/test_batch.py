@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """Tests for vectorized batch patch evaluation against per-corner reference."""
 
 from itertools import product
@@ -8,7 +16,6 @@ import numpy as np
 
 from egg.smoothing import batch as _batch
 from egg.smoothing.solver import (
-    SweepContext,
     _patch_energy_and_mindet,
     _patch_grad_hess,
     build_sweep_context,
@@ -19,8 +26,12 @@ from egg.topology.builder import TopologyBuilder
 
 def _make_test_grid_2d():
     builder = TopologyBuilder(d=2)
-    for name, pos in [("A", (0.0, 0.0)), ("B", (4.0, 0.0)),
-                      ("C", (4.0, 4.0)), ("D", (0.0, 4.0))]:
+    for name, pos in [
+        ("A", (0.0, 0.0)),
+        ("B", (4.0, 0.0)),
+        ("C", (4.0, 4.0)),
+        ("D", (0.0, 4.0)),
+    ]:
         builder.add_corner(name, pos, fixed=True)
     builder.add_block("main", ("A", "D", "B", "C"), (6, 6))
     topo = builder.build()
@@ -121,8 +132,12 @@ class TestEnergyAndMinDetEquivalence:
 
         e_batch, det_batch = _batch.energy_and_mindet(
             grid.global_nodes,
-            stencil["gc"], stencil["gn0"], stencil["gn1"],
-            stencil["s0"], stencil["s1"], stencil["W_inv"],
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
         )
         e_ref, det_ref = _patch_energy_and_mindet(grid, dof_idx, ctx)
 
@@ -150,8 +165,13 @@ class TestGradHessEquivalence:
 
         g_batch, H_batch = _batch.dof_grad_hess(
             grid.global_nodes,
-            stencil["gc"], stencil["gn0"], stencil["gn1"],
-            stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"],
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
+            stencil["role"],
         )
         g_ref, H_ref = _patch_grad_hess(grid, dof_idx, ctx)
 
@@ -173,8 +193,16 @@ class TestPatchEvalEquivalence:
 
         stencil = _extract_patch_stencils(grid, ctx, dof_idx)
         X = grid.global_nodes
-        args = (X, stencil["gc"], stencil["gn0"], stencil["gn1"],
-                stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"])
+        args = (
+            X,
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
+            stencil["role"],
+        )
 
         g_fused, H_fused, e_fused, d_fused = _batch.patch_eval(*args)
         g_sep, H_sep = _batch.dof_grad_hess(*args)
@@ -187,9 +215,14 @@ class TestPatchEvalEquivalence:
 
     def test_multi_block(self):
         builder = TopologyBuilder(d=2)
-        for name, pos in [("A", (0., 0.)), ("B", (2., 0.)),
-                          ("C", (2., 2.)), ("D", (0., 2.)),
-                          ("E", (4., 0.)), ("F", (4., 2.))]:
+        for name, pos in [
+            ("A", (0.0, 0.0)),
+            ("B", (2.0, 0.0)),
+            ("C", (2.0, 2.0)),
+            ("D", (0.0, 2.0)),
+            ("E", (4.0, 0.0)),
+            ("F", (4.0, 2.0)),
+        ]:
             builder.add_corner(name, pos, fixed=True)
         builder.add_block("L", ("A", "D", "B", "C"), (4, 4))
         builder.add_block("R", ("B", "C", "E", "F"), (4, 4))
@@ -207,8 +240,16 @@ class TestPatchEvalEquivalence:
 
         stencil = _extract_patch_stencils(grid, ctx, dof_idx)
         X = grid.global_nodes
-        args = (X, stencil["gc"], stencil["gn0"], stencil["gn1"],
-                stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"])
+        args = (
+            X,
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
+            stencil["role"],
+        )
 
         g_fused, H_fused, e_fused, d_fused = _batch.patch_eval(*args)
         g_sep, H_sep = _batch.dof_grad_hess(*args)
@@ -230,8 +271,16 @@ class TestPatchEvalEquivalence:
         dof_idx = free_dofs[len(free_dofs) // 2]
         stencil = _extract_patch_stencils(grid, ctx, dof_idx)
         X = grid.global_nodes
-        args = (X, stencil["gc"], stencil["gn0"], stencil["gn1"],
-                stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"])
+        args = (
+            X,
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
+            stencil["role"],
+        )
         args_energy = args[:7]
 
         # warm-up
@@ -272,8 +321,16 @@ class TestPrecomputedJEquivalence:
 
         J = _batch.make_chain_J(stencil["s0"], stencil["s1"], stencil["W_inv"])
         X = grid.global_nodes
-        args = (X, stencil["gc"], stencil["gn0"], stencil["gn1"],
-                stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"])
+        args = (
+            X,
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
+            stencil["role"],
+        )
 
         # with precomputed J
         g1, H1, e1, d1 = _batch.patch_eval(*args, J=J)
@@ -297,8 +354,16 @@ class TestPrecomputedJEquivalence:
 
         J = _batch.make_chain_J(stencil["s0"], stencil["s1"], stencil["W_inv"])
         X = grid.global_nodes
-        args = (X, stencil["gc"], stencil["gn0"], stencil["gn1"],
-                stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"])
+        args = (
+            X,
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
+            stencil["role"],
+        )
 
         g1, H1 = _batch.dof_grad_hess(*args, J=J)
         g2, H2 = _batch.dof_grad_hess(*args, J=None)
@@ -319,8 +384,16 @@ class TestPrecomputedJEquivalence:
 
         J = _batch.make_chain_J(stencil["s0"], stencil["s1"], stencil["W_inv"])
         X = grid.global_nodes
-        args = (X, stencil["gc"], stencil["gn0"], stencil["gn1"],
-                stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"])
+        args = (
+            X,
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
+            stencil["role"],
+        )
 
         # warm-up
         for _ in range(50):
@@ -358,8 +431,11 @@ class TestAssembleAEquivalence:
 
         A_batch = _batch.assemble_A(
             grid.global_nodes,
-            stencil["gc"], stencil["gn0"], stencil["gn1"],
-            stencil["s0"], stencil["s1"],
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
         )  # shape (P, 2, 2)
 
         # Build reference A arrays via per-corner corner_sample
@@ -374,9 +450,11 @@ class TestAssembleAEquivalence:
             nodes = grid.blocks[bi].nodes
             for co in product((0, 1), repeat=d):
                 from egg.smoothing.jacobian import corner_sample
+
                 A_ref, _, _ = corner_sample(nodes, cell_base, co)
-                np.testing.assert_allclose(A_batch[k], A_ref, atol=1e-12,
-                                           err_msg=f"Mismatch at sample {k}")
+                np.testing.assert_allclose(
+                    A_batch[k], A_ref, atol=1e-12, err_msg=f"Mismatch at sample {k}"
+                )
                 k += 1
 
         assert k == stencil["gc"].shape[0], "Sample count mismatch"
@@ -421,9 +499,7 @@ class TestAssembleAEquivalence:
             old_assemble_A(X, gc, gn0, gn1, s0, s1)
         t_old = time.perf_counter() - t0
 
-        assert t_new < t_old, (
-            f"New {t_new:.4f}s not faster than old {t_old:.4f}s"
-        )
+        assert t_new < t_old, f"New {t_new:.4f}s not faster than old {t_old:.4f}s"
 
 
 class TestNonParticipatingSamples:
@@ -444,23 +520,43 @@ class TestNonParticipatingSamples:
 
         g_batch, H_batch = _batch.dof_grad_hess(
             grid.global_nodes,
-            stencil["gc"], stencil["gn0"], stencil["gn1"],
-            stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"],
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
+            stencil["role"],
         )
 
         # Build gradient/Hessian from *only* participating samples
         mask = stencil["role"] >= 0
-        p_stencil = {k: v[mask] for k, v in stencil.items() if isinstance(v, np.ndarray)}
+        p_stencil = {
+            k: v[mask] for k, v in stencil.items() if isinstance(v, np.ndarray)
+        }
         g_part, H_part = _batch.dof_grad_hess(
             grid.global_nodes,
-            p_stencil["gc"], p_stencil["gn0"], p_stencil["gn1"],
-            p_stencil["s0"], p_stencil["s1"], p_stencil["W_inv"], p_stencil["role"],
+            p_stencil["gc"],
+            p_stencil["gn0"],
+            p_stencil["gn1"],
+            p_stencil["s0"],
+            p_stencil["s1"],
+            p_stencil["W_inv"],
+            p_stencil["role"],
         )
 
-        np.testing.assert_allclose(g_batch, g_part, atol=1e-12,
-                                   err_msg="Non-participating samples leaked into gradient")
-        np.testing.assert_allclose(H_batch, H_part, atol=1e-12,
-                                   err_msg="Non-participating samples leaked into Hessian")
+        np.testing.assert_allclose(
+            g_batch,
+            g_part,
+            atol=1e-12,
+            err_msg="Non-participating samples leaked into gradient",
+        )
+        np.testing.assert_allclose(
+            H_batch,
+            H_part,
+            atol=1e-12,
+            err_msg="Non-participating samples leaked into Hessian",
+        )
 
 
 class TestMultiBlock:
@@ -468,9 +564,14 @@ class TestMultiBlock:
 
     def test_two_block_grid(self):
         builder = TopologyBuilder(d=2)
-        for name, pos in [("A", (0., 0.)), ("B", (2., 0.)),
-                          ("C", (2., 2.)), ("D", (0., 2.)),
-                          ("E", (4., 0.)), ("F", (4., 2.))]:
+        for name, pos in [
+            ("A", (0.0, 0.0)),
+            ("B", (2.0, 0.0)),
+            ("C", (2.0, 2.0)),
+            ("D", (0.0, 2.0)),
+            ("E", (4.0, 0.0)),
+            ("F", (4.0, 2.0)),
+        ]:
             builder.add_corner(name, pos, fixed=True)
         builder.add_block("L", ("A", "D", "B", "C"), (4, 4))
         builder.add_block("R", ("B", "C", "E", "F"), (4, 4))
@@ -490,8 +591,12 @@ class TestMultiBlock:
 
         e_batch, det_batch = _batch.energy_and_mindet(
             grid.global_nodes,
-            stencil["gc"], stencil["gn0"], stencil["gn1"],
-            stencil["s0"], stencil["s1"], stencil["W_inv"],
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
         )
         e_ref, det_ref = _patch_energy_and_mindet(grid, dof_idx, ctx)
 
@@ -500,10 +605,41 @@ class TestMultiBlock:
 
         g_batch, H_batch = _batch.dof_grad_hess(
             grid.global_nodes,
-            stencil["gc"], stencil["gn0"], stencil["gn1"],
-            stencil["s0"], stencil["s1"], stencil["W_inv"], stencil["role"],
+            stencil["gc"],
+            stencil["gn0"],
+            stencil["gn1"],
+            stencil["s0"],
+            stencil["s1"],
+            stencil["W_inv"],
+            stencil["role"],
         )
         g_ref, H_ref = _patch_grad_hess(grid, dof_idx, ctx)
 
         np.testing.assert_allclose(g_batch, g_ref, atol=1e-10)
         np.testing.assert_allclose(H_batch, H_ref, atol=1e-10)
+
+
+class TestInteriorSynthesisGate:
+    """The C++ interior-patch synthesis assumes an identity W_inv, so the
+    wire may only classify interior DOFs when the target is (a scalar
+    multiple of) the identity everywhere."""
+
+    def test_identity_target_synthesizes_interior(self):
+        grid = _make_test_grid_2d()
+        ctx = build_sweep_context(grid, IdentityTarget(2))
+        g = ctx.wire["groups"][0]
+        assert np.any(np.asarray(g["interior_block"]) >= 0)
+
+    def test_varying_target_ships_stored_stencils(self):
+        grid = _make_test_grid_2d()
+
+        def varying(bi, block, cell_base, corner_offset):
+            s = 0.1 + 0.05 * cell_base[0]
+            return np.diag([s, 3.0 * s])
+
+        ctx = build_sweep_context(grid, varying)
+        g = ctx.wire["groups"][0]
+        assert np.all(np.asarray(g["interior_block"]) == -1)
+        # Interior DOFs must own stored samples again (P_of > 0 for all
+        # moving DOFs on a single fully-free block interior).
+        assert np.all(np.asarray(g["P_of"]) > 0)

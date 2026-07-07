@@ -24,12 +24,12 @@ The circle demos accept `--device {auto,cpu,gpu}` to select the SYCL device:
 
 ```bash
 # CPU
-uv run examples/circles/good-topo.py --tmop-sweeps 40 --device cpu
-uv run examples/circles/untangle.py --tmop-sweeps 1000 --device cpu
+uv run examples/2D/circles/good-topo.py --tmop-sweeps 40 --device cpu
+uv run examples/2D/circles/untangle.py --tmop-sweeps 1000 --device cpu
 
 # GPU
-uv run examples/circles/good-topo.py --tmop-sweeps 40 --device gpu
-uv run examples/circles/untangle.py --tmop-sweeps 1000 --device gpu
+uv run examples/2D/circles/good-topo.py --tmop-sweeps 40 --device gpu
+uv run examples/2D/circles/untangle.py --tmop-sweeps 1000 --device gpu
 ```
 
 Common flags: `--plot-live` (PyVista animation), `--plot-grid` (matplotlib

@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """Geometry entity encoding for constrained DOFs.
 
 Encodes a geometry entity into ``(type_tag, params)`` for use by the C++ core
@@ -21,8 +29,11 @@ Layouts (2D; ``d`` is the spatial dimension; angles/parameters in radians):
 | EllipseArc   | 7   | ``[center(2), a, b, phi, t0, t1, closed, ...pad]``    |
 | QuadBezier   | 8   | ``[P0(2), P1(2), P2(2), t0, t1, ...pad]``             |
 | CubicBezier  | 9   | ``[P0(2), P1(2), P2(2), P3(2), t0, t1]``              |
-| BSpline      | 10  | ``[degree, n_ctrl, knot_off, ctrl_off, t0, t1]``      |
+| BSpline      | 10  | ``[degree, n_ctrl, knot_off, ctrl_off, t0, t1, w_off, has_w]`` |
 | Composite    | 11  | ``[n_segs, rec_off]``                                 |
+
+A B-spline with ``has_w != 0`` is rational (NURBS): the ``n_ctrl`` weights live
+in the arena at ``w_off``.
 
 The B-spline and composite path are variable-length: their data lives in a
 shared ``arena`` (a flat float64 array uploaded alongside ``params``), and the
@@ -98,7 +109,7 @@ def encode_entity(entity, d: int = 2, arena: list | None = None):
         return TAG_FREE, params
     if isinstance(entity, LineSegment):
         params[:d] = entity.start[:d]
-        params[d:2 * d] = entity.end[:d]
+        params[d : 2 * d] = entity.end[:d]
         return TAG_LINESEG, params
     if isinstance(entity, Circle):
         params[:d] = entity.center[:d]
@@ -106,18 +117,19 @@ def encode_entity(entity, d: int = 2, arena: list | None = None):
         return TAG_CIRCLE, params
     if isinstance(entity, Ellipse):
         params[:d] = entity.center[:d]
-        params[d:2 * d] = np.array([entity.rx, entity.ry])
+        params[d : 2 * d] = np.array([entity.rx, entity.ry])
         return TAG_ELLIPSE, params
     if isinstance(entity, CircleArc):
         params[:2] = entity.center
         params[2] = entity.radius
-        params[3:5] = (entity.t0, entity.t1)
+        # Normalise a reversed (t1 < t0) traversal for the C++ clamp.
+        params[3:5] = sorted((entity.t0, entity.t1))
         params[5] = float(entity.closed)
         return TAG_CIRCLEARC, params
     if isinstance(entity, EllipseArc):
         params[:2] = entity.center
         params[2:5] = (entity.a, entity.b, entity.phi)
-        params[5:7] = (entity.t0, entity.t1)
+        params[5:7] = sorted((entity.t0, entity.t1))
         params[7] = float(entity.closed)
         return TAG_ELLIPSEARC, params
     if isinstance(entity, QuadBezier):
@@ -135,8 +147,20 @@ def encode_entity(entity, d: int = 2, arena: list | None = None):
         arena.extend(entity.knots.tolist())
         ctrl_off = len(arena)
         arena.extend(entity.ctrl.ravel().tolist())
-        params[:6] = (entity.degree, entity.ctrl.shape[0],
-                      knot_off, ctrl_off, entity.t0, entity.t1)
+        w_off = 0.0
+        if entity.weights is not None:
+            w_off = len(arena)
+            arena.extend(entity.weights.tolist())
+        params[:8] = (
+            entity.degree,
+            entity.ctrl.shape[0],
+            knot_off,
+            ctrl_off,
+            entity.t0,
+            entity.t1,
+            w_off,
+            float(entity.weights is not None),
+        )
         return TAG_BSPLINE, params
     if isinstance(entity, CompositePath):
         if arena is None:

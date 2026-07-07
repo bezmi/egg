@@ -24,3 +24,5 @@ compile_commands.json
 
 # Persistent devcontainer $HOME (shell state + your personal dotfiles)
 .devcontainer/.home/
+docs/_build/
+docs/_doxygen/

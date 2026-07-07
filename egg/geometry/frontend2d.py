@@ -1,37 +1,22 @@
-"""2D geometry construction front-end mirroring the gdtk ``geom`` API.
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
 
-This module provides gdtk-style constructors (:class:`Vector3`, :class:`Line`,
-:class:`Arc`, :class:`Bezier`, :class:`Polyline`, :class:`Spline`) that return
-:mod:`egg.geometry` entities directly, so geometry can be authored without a
-gdtk dependency. The mapping mirrors the former gdtk adapter:
+"""gdtk-style 2D geometry construction front-end.
 
-- :class:`Line`           -> :class:`~egg.geometry.analytic2d.LineSegment`
-  (subclass retaining the original ``p0`` / ``p1`` as :class:`Vector3`)
-- :class:`Arc`            -> :class:`~egg.geometry.curves2d.CircleArc`
-- :class:`Bezier`         -> :class:`~egg.geometry.curves2d.QuadBezier` /
-  :class:`~egg.geometry.curves2d.CubicBezier` for degree 2/3 (degree 1 is a
-  :class:`~egg.geometry.analytic2d.LineSegment`); any other degree becomes a
-  :class:`~egg.geometry.curves2d.BSplineCurve` (a degree-n Bézier is a B-spline
-  on the clamped knot vector ``{0 x (n+1), 1 x (n+1)}``).
-- :class:`Polyline`       -> :class:`~egg.geometry.curves2d.CompositePath`
-  (subclass; when ``closed=True`` a closing segment is appended if needed)
-- :class:`Spline`         -> :class:`~egg.geometry.curves2d.CompositePath` of
-  :class:`~egg.geometry.curves2d.CubicBezier` segments obtained from a natural
-  cubic spline fit through the input points. The closed variant appends the
-  first point to the end and solves an open natural spline (matching gdtk's
-  algorithm), rather than using periodic boundary conditions.
+Provides the gdtk ``geom`` constructors (:class:`Vector3`, :class:`Line`,
+:func:`Arc`, :func:`Bezier`, :class:`Polyline`, :func:`Spline`) as thin
+factories over :mod:`egg.geometry` entities, so geometry can be authored
+without a gdtk dependency. The results are ordinary entities and feed
+directly into the topology builder and the C++ encoding path.
 
-:class:`Vector3` supports the vector arithmetic (``+``, ``-``, scalar ``*``,
-negation, ``abs``) needed for gdtk-style point construction.
-
-The constructed entities are the same ones :mod:`egg.geometry` already
-understands, so they can be fed directly into the topology builder and the C++
-encoding path without any conversion step.
-
-Limitation (inherited from the C++ ``atan2`` inverse): an :class:`Arc` is
-converted to absolute angles in ``(-pi, pi]``; arcs whose angular interval
-cannot be represented without wrapping past +/-pi (after a possible direction
-flip) are rejected.
+:class:`Edge` wraps any parametric entity for normalized-parameter node
+placement; :class:`Node` records its host edge, which drives association
+inference in :meth:`egg.topology.builder.TopologyBuilder.build`.
 """
 
 from __future__ import annotations
@@ -54,25 +39,89 @@ __all__ = [
     "Bezier",
     "Polyline",
     "Spline",
+    "Edge",
+    "Node",
+    "split_cells",
+    "tfi_point",
 ]
 
 
-class Vector3:
-    """A 2D point with ``.x`` / ``.y`` / ``.z`` attributes and vector arithmetic.
+def split_cells(n: int, k: int) -> list[int]:
+    """Split ``n`` cells into ``k`` contiguous per-block counts.
 
-    Supports addition, subtraction, scalar multiplication, negation, and
-    magnitude (``abs``), matching the gdtk ``Vector3`` interface for 2D point
-    construction. The geometry is planar: ``z`` must be zero (defaults to 0.0).
+    As even as possible; the counts always sum to ``n``. Used to divide a
+    total resolution across a row of blocks (cf.
+    :meth:`egg.topology.builder.TopologyBuilder.add_block_array`).
+    """
+    return [round(n * (t + 1) / k) - round(n * t / k) for t in range(k)]
+
+
+def tfi_point(
+    u: float, v: float, south: "Edge", north: "Edge", west: "Edge", east: "Edge"
+) -> "Vector3":
+    """Bilinear transfinite interpolation of four bounding edges at (u, v).
+
+    Standard Coons-patch formula; used to place interior block corners of a
+    block array parametrically. ``south``/``north`` are parameterised
+    west -> east (by ``u``), ``west``/``east`` south -> north (by ``v``);
+    the patch corners are the shared edge endpoints.
+    """
+    s, n = south.point_at(u), north.point_at(u)
+    w, e = west.point_at(v), east.point_at(v)
+    p00, p10 = south.point_at(0.0), south.point_at(1.0)
+    p01, p11 = north.point_at(0.0), north.point_at(1.0)
+    x = (
+        (1 - v) * s.x
+        + v * n.x
+        + (1 - u) * w.x
+        + u * e.x
+        - (
+            (1 - u) * (1 - v) * p00.x
+            + u * (1 - v) * p10.x
+            + (1 - u) * v * p01.x
+            + u * v * p11.x
+        )
+    )
+    y = (
+        (1 - v) * s.y
+        + v * n.y
+        + (1 - u) * w.y
+        + u * e.y
+        - (
+            (1 - u) * (1 - v) * p00.y
+            + u * (1 - v) * p10.y
+            + (1 - u) * v * p01.y
+            + u * v * p11.y
+        )
+    )
+    return Vector3(x, y)
+
+
+class Vector3:
+    """2D point with gdtk ``Vector3`` semantics.
+
+    Supports ``+``, ``-``, scalar ``*``, negation, and ``abs`` (magnitude);
+    arithmetic results are never ``fixed``. The geometry is planar: ``z``
+    must be zero.
+
+    Parameters
+    ----------
+    x, y, z : float
+        Coordinates. ``z`` must be 0 (default 0.0).
+    fixed : bool, optional
+        Mark the point as a pinned grid corner when used as a topology
+        corner position.
     """
 
-    __slots__ = ("x", "y", "z")
+    __slots__ = ("x", "y", "z", "fixed")
 
-    def __init__(self, x, y, z=0.0):
+    def __init__(self, x, y, z=0.0, *, fixed=False):
         if abs(float(z)) > 1e-12:
             raise ValueError(f"Vector3 z must be 0 for 2D geometry, got {z}")
         self.x = float(x)
         self.y = float(y)
         self.z = float(z)
+        self.fixed = bool(fixed)
 
     def __repr__(self) -> str:
         return f"Vector3({self.x}, {self.y}, {self.z})"
@@ -119,7 +168,7 @@ class Vector3:
 def _vec2(v) -> np.ndarray:
     """Coerce ``v`` (Vector3 / tuple / list / array) to a 2D numpy point.
 
-    Vector3 instances must lie in the z=0 plane (checked at construction).
+    Points with a third coordinate must lie in the z=0 plane.
     """
     if isinstance(v, Vector3):
         return np.array([v.x, v.y])
@@ -132,13 +181,11 @@ def _vec2(v) -> np.ndarray:
 
 
 class Line(LineSegment):
-    """A straight segment from ``p0`` to ``p1``.
+    """Straight segment from ``p0`` to ``p1``.
 
-    A subclass of :class:`~egg.geometry.analytic2d.LineSegment` that also
-    retains the original ``p0`` / ``p1`` constructor arguments as
-    :class:`Vector3` objects, so call sites can read ``line.p0.x`` etc. like a
-    gdtk ``Line``.  Passes ``isinstance(..., LineSegment)`` checks for
-    encoding and projection.
+    A :class:`~egg.geometry.analytic2d.LineSegment` that also retains the
+    constructor arguments as :class:`Vector3` attributes ``p0`` / ``p1``
+    (gdtk-style access, e.g. ``line.p0.x``).
     """
 
     def __init__(self, p0, p1):
@@ -147,60 +194,81 @@ class Line(LineSegment):
         super().__init__(_vec2(p0), _vec2(p1))
 
 
-class Arc:
-    """A circular arc through endpoints ``a``, ``b`` about centre ``c``.
+def Arc(p0, p1, centre) -> CircleArc:
+    """Circular arc from ``p0`` to ``p1`` about ``centre``.
 
-    Returns a :class:`~egg.geometry.curves2d.CircleArc`. The signed sweep from
-    ``a`` to ``b`` (about ``c``) picks the arc direction. As with the former
-    gdtk adapter, the C++ inverse returns angles in ``(-pi, pi]``, so the
-    angular range is rejected if it cannot be represented in that branch (after
-    a possible antipodal flip of the start angle).
+    Keyword names match the gdtk/Eilmer ``Arc:new{p0=, p1=, centre=}`` form.
+
+    Parameters
+    ----------
+    p0, p1 : Vector3 or array_like
+        Endpoints; must be equidistant from ``centre``.
+    centre : Vector3 or array_like
+        Arc centre.
+
+    Returns
+    -------
+    CircleArc
+        Parameter runs from the angle of ``p0`` to the angle of ``p1``
+        (``t1 < t0`` for a clockwise sweep), so ``eval(t0) == p0`` and
+        composites traverse the arc in the authored direction.
+
+    Raises
+    ------
+    ValueError
+        If the endpoint radii differ, or the angular interval cannot be
+        represented in the C++ ``atan2`` inverse branch ``(-pi, pi]``
+        (after a possible antipodal flip of the start angle) — split such
+        arcs.
     """
+    center = _vec2(centre)
+    pa = _vec2(p0)
+    pb = _vec2(p1)
+    ra = float(np.linalg.norm(pa - center))
+    rb = float(np.linalg.norm(pb - center))
+    if abs(ra - rb) > 1e-9 * max(ra, 1.0):
+        raise ValueError("Arc radii do not match")
+    ta = float(np.arctan2(pa[1] - center[1], pa[0] - center[0]))
+    da, db = pa - center, pb - center
+    sweep = float(np.arctan2(da[0] * db[1] - da[1] * db[0], da @ db))
+    t0, t1 = ta, ta + sweep
+    if max(t0, t1) > np.pi or min(t0, t1) <= -np.pi:
+        ta2 = float(ta - 2.0 * np.pi * np.sign(ta))
+        t0, t1 = ta2, ta2 + sweep
+        if max(t0, t1) > np.pi or min(t0, t1) <= -np.pi:
+            raise ValueError(
+                "Arc angular range wraps past the +/-pi branch cut; split it"
+            )
+    return CircleArc(center, ra, float(t0), float(t1))
 
-    def __new__(cls, a, b, c) -> CircleArc:
-        center = _vec2(c)
-        pa = _vec2(a)
-        pb = _vec2(b)
-        ra = float(np.linalg.norm(pa - center))
-        rb = float(np.linalg.norm(pb - center))
-        if abs(ra - rb) > 1e-9 * max(ra, 1.0):
-            raise ValueError("Arc radii do not match")
-        ta = float(np.arctan2(pa[1] - center[1], pa[0] - center[0]))
-        da, db = pa - center, pb - center
-        sweep = float(np.arctan2(da[0] * db[1] - da[1] * db[0], da @ db))
-        t0, t1 = (ta, ta + sweep) if sweep >= 0.0 else (ta + sweep, ta)
-        if t1 > np.pi or t0 <= -np.pi:
-            ta2 = float(ta - 2.0 * np.pi * np.sign(ta))
-            t0, t1 = (ta2, ta2 + sweep) if sweep >= 0.0 else (ta2 + sweep, ta2)
-            if t1 > np.pi or t0 <= -np.pi:
-                raise ValueError(
-                    "Arc angular range wraps past the +/-pi branch cut; split it")
-        return CircleArc(center, ra, float(t0), float(t1))
 
+def Bezier(points) -> LineSegment | QuadBezier | CubicBezier | BSplineCurve:
+    """Bézier curve over the given control points.
 
-class Bezier:
-    """A Bézier curve over the given control points.
+    Parameters
+    ----------
+    points : sequence of Vector3 or array_like
+        Control points; the degree is ``len(points) - 1 >= 1``.
 
-    Returns a :class:`~egg.geometry.analytic2d.LineSegment` (degree 1),
-    :class:`~egg.geometry.curves2d.QuadBezier` (degree 2),
-    :class:`~egg.geometry.curves2d.CubicBezier` (degree 3), or
-    :class:`~egg.geometry.curves2d.BSplineCurve` (degree >= 4 — a degree-n
-    Bézier is a B-spline on the clamped knot vector).
+    Returns
+    -------
+    LineSegment or QuadBezier or CubicBezier or BSplineCurve
+        By degree 1 / 2 / 3 / >= 4 respectively. A degree-n Bézier is
+        returned as a B-spline on the clamped knot vector
+        ``{0 x (n+1), 1 x (n+1)}``.
     """
-
-    def __new__(cls, points) -> LineSegment | QuadBezier | CubicBezier | BSplineCurve:
-        pts = [_vec2(p) for p in points]
-        n = len(pts) - 1  # degree
-        if n < 1:
-            raise ValueError("Bezier needs at least two control points")
-        if n == 1:
-            return LineSegment(pts[0], pts[1])
-        if n == 2:
-            return QuadBezier(pts[0], pts[1], pts[2])
-        if n == 3:
-            return CubicBezier(pts[0], pts[1], pts[2], pts[3])
-        knots = np.concatenate([np.zeros(n + 1), np.ones(n + 1)])
-        return BSplineCurve(n, knots, np.stack(pts))
+    pts = [_vec2(p) for p in points]
+    n = len(pts) - 1  # degree
+    if n < 1:
+        raise ValueError("Bezier needs at least two control points")
+    if n == 1:
+        return LineSegment(pts[0], pts[1])
+    if n == 2:
+        return QuadBezier(pts[0], pts[1], pts[2])
+    if n == 3:
+        return CubicBezier(pts[0], pts[1], pts[2], pts[3])
+    knots = np.concatenate([np.zeros(n + 1), np.ones(n + 1)])
+    return BSplineCurve(n, knots, np.stack(pts))
 
 
 def _seg_start(seg) -> np.ndarray:
@@ -218,13 +286,18 @@ def _seg_end(seg) -> np.ndarray:
 
 
 class Polyline(CompositePath):
-    """An ordered sequence of egg curve segments.
+    """Ordered sequence of curve segments joined into one path.
 
-    A subclass of :class:`~egg.geometry.curves2d.CompositePath`. When
-    ``closed=True`` and the end of the last segment does not coincide with the
-    start of the first segment (within ``tolerance``), a closing
-    :class:`LineSegment` is appended — matching gdtk's ``Polyline`` behaviour.
-    Nested composites/polylines are rejected by ``CompositePath`` itself.
+    Parameters
+    ----------
+    segments : sequence of curve entities
+        Joined end-to-end. Nested composites/polylines are rejected by
+        :class:`~egg.geometry.curves2d.CompositePath` itself.
+    closed : bool, optional
+        Append a closing :class:`~egg.geometry.analytic2d.LineSegment` when
+        the last segment's end is farther than ``tolerance`` from the first
+        segment's start (gdtk ``Polyline`` behaviour).
+    tolerance : float, optional
     """
 
     def __init__(self, segments, closed=False, tolerance=1.0e-10):
@@ -238,10 +311,10 @@ class Polyline(CompositePath):
 
 
 def _natural_cubic_second_derivatives(points: np.ndarray) -> np.ndarray:
-    """Solve for the per-knot second derivatives of a natural cubic spline.
+    """Per-knot second derivatives of a natural cubic spline.
 
-    Uniform parameterisation (knot spacing ``h = 1``). Natural end conditions
-    ``M_0 = M_{n-1} = 0`` are imposed.
+    Uniform parameterisation (knot spacing ``h = 1``); natural end
+    conditions ``M_0 = M_{n-1} = 0``.
 
     Parameters
     ----------
@@ -249,8 +322,7 @@ def _natural_cubic_second_derivatives(points: np.ndarray) -> np.ndarray:
 
     Returns
     -------
-    (N, 2) array of second derivatives ``M_i``. ``M_0`` and ``M_{N-1}`` are
-    zero.
+    (N, 2) array of second derivatives ``M_i``.
     """
     n = points.shape[0]
     if n < 3:
@@ -269,8 +341,8 @@ def _natural_cubic_second_derivatives(points: np.ndarray) -> np.ndarray:
 def _spline_to_beziers(points: np.ndarray) -> list[CubicBezier]:
     """Convert a natural cubic spline through ``points`` into cubic Béziers.
 
-    Uses the standard second-derivative → Bézier control-point relation
-    (uniform knot spacing ``h = 1``):
+    Standard second-derivative -> Bézier control-point relation (uniform
+    knot spacing ``h = 1``):
 
     - ``B0 = P_i``
     - ``B1 = P_i + (P_{i+1} - P_i)/3 - (2 M_i + M_{i+1}) / 18``
@@ -291,26 +363,183 @@ def _spline_to_beziers(points: np.ndarray) -> list[CubicBezier]:
     return segs
 
 
-class Spline:
-    """A natural cubic spline through the given points.
+def Spline(points, closed=False, tolerance=1.0e-10) -> CompositePath:
+    """Natural cubic spline through the given points.
 
-    Returns a :class:`~egg.geometry.curves2d.CompositePath` of
-    :class:`~egg.geometry.curves2d.CubicBezier` segments (one per interval).
-    The spline uses uniform parameterisation with natural end conditions
-    (zero second derivative at the ends).
+    Uniform parameterisation with natural end conditions (zero second
+    derivative at the ends).
 
-    For ``closed=True``, the first point is appended to the end (if it does not
-    already coincide with the last) and an open natural spline is solved through
-    the extended point list — matching gdtk's algorithm.  This means the
-    wrap-around joint is C0 but not C1 (the second derivative is zero at both
-    ends of the open spline, not periodic).
+    Parameters
+    ----------
+    points : sequence of Vector3 or array_like
+        At least two through-points.
+    closed : bool, optional
+        Append the first point to the end (if farther than ``tolerance``)
+        and solve an *open* natural spline through the extended list —
+        gdtk's algorithm, not periodic end conditions. The wrap-around
+        joint is therefore C0 but not C1.
+    tolerance : float, optional
+
+    Returns
+    -------
+    CompositePath
+        One :class:`~egg.geometry.curves2d.CubicBezier` per interval.
+    """
+    pts = np.stack([_vec2(p) for p in points])
+    if pts.shape[0] < 2:
+        raise ValueError("Spline needs at least two points")
+    if closed and np.linalg.norm(pts[0] - pts[-1]) > tolerance:
+        pts = np.vstack([pts, pts[0:1]])
+    segs = _spline_to_beziers(pts)
+    return CompositePath(segs)
+
+
+class Edge:
+    """Grid edge: a 1D entity re-parameterized over normalized t in [0, 1].
+
+    Wraps any entity exposing the standalone-Python parametric interface
+    (``eval``/``t0``/``t1`` — everything this module constructs, plus
+    :class:`~egg.geometry.analytic2d.Circle` /
+    :class:`~egg.geometry.analytic2d.Ellipse`). The wrapper is pure Python
+    and never reaches the C++ core: consumers that encode entities (e.g.
+    the topology builder) unwrap :attr:`entity` first, and projection-style
+    queries delegate to it.
+
+    Parameters
+    ----------
+    entity : geometry entity
+        Must expose ``eval`` / ``t0`` / ``t1``.
+    arc_length : bool, optional
+        Re-parameterize by normalized arc length (numerically sampled with
+        ``samples`` subdivisions), so equal steps in t give equal distance
+        along curves with non-uniform native speed (Béziers, splines,
+        composite wires).
+    samples : int, optional
+
+    Examples
+    --------
+    >>> bottom = Edge(Line(Vector3(0, 0), Vector3(4, 0)))
+    >>> n = bottom.place_node(0.25)  # Node a quarter of the way along
+    >>> p = bottom.point_at(0.25)    # plain Vector3, no grid identity
+
+    Both methods take the fractional parameter by default; pass
+    ``param="native"`` to use the wrapped entity's own parameter instead
+    (e.g. placing a node on an arc at an exact angle). The entities
+    themselves expose the same pair as ``eval`` (native) / ``eval_frac``
+    (fractional).
     """
 
-    def __new__(cls, points, closed=False, tolerance=1.0e-10) -> CompositePath:
-        pts = np.stack([_vec2(p) for p in points])
-        if pts.shape[0] < 2:
-            raise ValueError("Spline needs at least two points")
-        if closed and np.linalg.norm(pts[0] - pts[-1]) > tolerance:
-            pts = np.vstack([pts, pts[0:1]])
-        segs = _spline_to_beziers(pts)
-        return CompositePath(segs)
+    def __init__(self, entity, arc_length: bool = False, samples: int = 256):
+        for attr in ("eval", "t0", "t1"):
+            if not hasattr(entity, attr):
+                raise TypeError(
+                    f"Edge needs an entity with a parametric interface "
+                    f"(missing '{attr}'): {entity!r}"
+                )
+        self.entity = entity
+        self._table = None
+        if arc_length:
+            ts = np.linspace(entity.t0, entity.t1, samples + 1)
+            pts = np.stack([np.asarray(entity.eval(t), dtype=float) for t in ts])
+            s = np.concatenate(
+                [[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+            )
+            if s[-1] <= 0.0:
+                raise ValueError("Edge has zero arc length")
+            self._table = (s / s[-1], ts)
+
+    @property
+    def dim(self) -> int:
+        """1 (a curve)."""
+        return 1
+
+    def _tau(self, t: float) -> float:
+        """Native parameter for fractional t in [0, 1]."""
+        t = float(np.clip(t, 0.0, 1.0))
+        if self._table is not None:
+            frac, ts = self._table
+            return float(np.interp(t, frac, ts))
+        return self.entity.t0 + t * (self.entity.t1 - self.entity.t0)
+
+    def _frac(self, tau: float) -> float:
+        """Fractional parameter in [0, 1] for native parameter tau."""
+        lo, hi = sorted((self.entity.t0, self.entity.t1))
+        tau = float(np.clip(tau, lo, hi))
+        if self._table is not None:
+            frac, ts = self._table
+            if ts[0] > ts[-1]:  # reversed traversal: np.interp needs xp ascending
+                return float(np.interp(tau, ts[::-1], frac[::-1]))
+            return float(np.interp(tau, ts, frac))
+        return (tau - self.entity.t0) / (self.entity.t1 - self.entity.t0)
+
+    @staticmethod
+    def _as_frac_param(t: float, param: str, frac_of_native) -> float:
+        """Normalize ``t`` to the fractional parametrisation."""
+        if param == "frac":
+            return float(t)
+        if param == "native":
+            return frac_of_native(t)
+        raise ValueError(f"param must be 'frac' or 'native', got {param!r}")
+
+    def point_at(self, t: float, param: str = "frac") -> Vector3:
+        """Physical point at parameter t (a plain :class:`Vector3`).
+
+        ``param`` selects the parametrisation of ``t``: ``"frac"`` (default)
+        is the fraction in [0, 1] along the edge; ``"native"`` is the wrapped
+        entity's own parameter (radians for arcs, knot values for B-splines).
+        """
+        t = self._as_frac_param(t, param, self._frac)
+        p = np.asarray(self.entity.eval(self._tau(t)), dtype=float)
+        return Vector3(p[0], p[1])
+
+    def place_node(
+        self, t: float, param: str = "frac", *, fixed: bool = False
+    ) -> "Node":
+        """Grid node placed on this edge at parameter t.
+
+        ``param`` as in :meth:`point_at`; the node's ``t`` attribute is
+        always stored fractionally. ``fixed=True`` pins the node when used
+        as a topology corner.
+        """
+        return Node(self, self._as_frac_param(t, param, self._frac), fixed=fixed)
+
+    def point_at_native(self, t: float) -> Vector3:
+        """Convenience for ``point_at(t, param="native")``."""
+        return self.point_at(t, param="native")
+
+    def place_node_native(self, t: float, *, fixed: bool = False) -> "Node":
+        """Convenience for ``place_node(t, param="native")``."""
+        return self.place_node(t, param="native", fixed=fixed)
+
+    # Entity-protocol queries delegate to the wrapped entity.
+    def project(self, p):
+        """Closest point on the wrapped entity to p."""
+        return self.entity.project(p)
+
+    def tangent_space(self, q):
+        """Tangent space of the wrapped entity at q."""
+        return self.entity.tangent_space(q)
+
+    def normal(self, q):
+        """Normal of the wrapped entity at q."""
+        return self.entity.normal(q)
+
+
+class Node(Vector3):
+    """Point placed on an :class:`Edge` at normalized parameter ``t``.
+
+    Behaves as a :class:`Vector3` (usable anywhere a point is expected,
+    e.g. as a topology corner position) while remembering its host
+    ``edge`` and parameter ``t``.
+    """
+
+    __slots__ = ("edge", "t")
+
+    def __init__(self, edge: Edge, t: float, *, fixed: bool = False):
+        p = edge.point_at(t)
+        super().__init__(p.x, p.y, fixed=fixed)
+        self.edge = edge
+        self.t = float(t)
+
+    def __repr__(self) -> str:
+        return f"Node({self.x}, {self.y}, t={self.t})"

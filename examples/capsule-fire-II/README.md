@@ -1,3 +1,0 @@
-# Capsule FIRE II
-
-WIP

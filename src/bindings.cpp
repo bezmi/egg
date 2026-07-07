@@ -1,3 +1,15 @@
+// Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+//
+// PolyForm Noncommercial License 2.0.0-pre.2
+// https://github.com/bezmi/egg/blob/main/LICENSE.md
+// Free to use and redistribute for personal and noncommercial purposes.
+// See the license for details.
+// For commercial licensing, contact s.imran@tuta.io
+
+/// @file bindings.cpp
+/// pybind11 boundary: context unpack + validation, the resident structured
+/// block-Jacobi session, and SYCL-free oracle wrappers for golden tests.
+/// Python passes float64; precision is narrowed to egg::real here.
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -8,16 +20,21 @@ namespace py = pybind11;
 #include "metric.hpp"
 #include "patch.hpp"
 #include "solve.hpp"
+#include "structured_patch.hpp"
+#include "structured_sweep.hpp"
 #include "sweep.hpp"
 
+#include <array>
+#include <cstdint>
 #include <numeric>
 #include <stdexcept>
 #include <string>
 #include <sycl/sycl.hpp>
-
-#ifndef NDEBUG
-    #include <unordered_set>
-#endif
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace
 {
@@ -28,12 +45,19 @@ sycl::queue select_queue(const std::string& device)
     // cpu_selector_v / gpu_selector_v throw sycl::exception with a terse message
     // when no matching device is present; rewrap with a clear, actionable error.
     try {
+        // Coarse-grained events: elide per-op backend event creation on the
+        // in-order HIP/CUDA stream — lower per-launch latency. Safe here because
+        // the sweep loop never inspects returned events; all sync is via
+        // q.wait() at chunk boundaries. See AdaptiveCpp doc/extensions.md
+        // ACPP_EXT_COARSE_GRAINED_EVENTS, and performance.md "Strong-scaling/
+        // latency-bound problems".
+        constexpr auto coarse = sycl::property::queue::AdaptiveCpp_coarse_grained_events {};
         if (device == "cpu") {
-            return sycl::queue {sycl::cpu_selector_v};
+            return sycl::queue {sycl::cpu_selector_v, {coarse}};
         } else if (device == "gpu") {
-            return sycl::queue {sycl::gpu_selector_v};
+            return sycl::queue {sycl::gpu_selector_v, {coarse}};
         }
-        return sycl::queue {};  // "auto" — default selector
+        return sycl::queue {{coarse}};  // "auto" — default selector
     } catch (const sycl::exception& e) {
         throw std::runtime_error("select_queue: no SYCL device available for device='" + device +
                                  "' (" + e.what() +
@@ -42,9 +66,9 @@ sycl::queue select_queue(const std::string& device)
     }
 }
 
-// num_nodes from a flat X array, with a hard shape check: X must be a 1-D array
-// whose length is a multiple of d (d coordinates per node). Catches the silent-UB
-// case where an (N, d) array is passed and num_nodes is miscomputed (#1).
+// num_nodes from a flat X array, with a hard shape check: X must be 1-D with
+// length a multiple of d. Catches the silent-UB case where an (N, d) array is
+// passed and num_nodes is miscomputed.
 std::size_t
   checked_num_nodes(const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr,
                     int d)
@@ -63,18 +87,18 @@ std::size_t
     return static_cast<std::size_t>(buf.shape[0]) / d;
 }
 
-// Host-side validation of an unpacked context against num_nodes: array-length
-// invariants, the ragged sum(P_of) == total_samples contract, and index bounds
-// for every gc/gn0/gn1/dof_idx. Throws std::invalid_argument before any device
-// work, so a malformed context can never reach the kernels as silent OOB / UB
-// (#1). This is the single biggest guard for a memory-safe core.
+// Host-side validation of an unpacked context: array-length invariants, the
+// ragged sum(P_of) == total_samples contract, and index bounds for every
+// gc/gn/dof_idx. Throws before any device work, so a malformed context never
+// reaches the kernels as silent OOB/UB — the single biggest guard for a
+// memory-safe core.
 template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
 {
     const std::size_t N = host.num_nodes;
 
     auto check_index = [N](const std::vector<int>& idx, const char* name, const std::string& grp) {
         for (int v : idx) {
-            if (v < 0 || static_cast<std::size_t>(v) >= N) {
+            if (std::cmp_less(v, 0) || std::cmp_greater_equal(v, N)) {
                 throw std::invalid_argument("validate_context: " + grp + " " + name + " index " +
                                             std::to_string(v) + " out of range [0, " +
                                             std::to_string(N) + ")");
@@ -93,6 +117,7 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         const std::size_t ts = g.total_samples;
         auto eq = [&](std::size_t got, std::size_t want, const std::string& what) {
             if (got != want) {
+                // NOLINTNEXTLINE(performance-inefficient-string-concatenation): cold throw path
                 throw invalid_argument("validate_context: " + grp + " " + what + " size " +
                                        std::to_string(got) + " != " + std::to_string(want));
             }
@@ -103,12 +128,15 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
             eq(g.s[k].size(), ts, "s" + std::to_string(k));
         }
         eq(g.role.size(), ts, "role");
-        eq(g.W_inv.size(), ts * egg::dim::wInv(D), "W_inv");
-        eq(g.J.size(), ts * egg::dim::jSize(D), "J");
+        if (g.w_uniform) {
+            eq(g.W_inv.size(), egg::dim::wInv(D), "W_inv (uniform row)");
+        } else {
+            eq(g.W_inv.size(), ts * egg::dim::wInv(D), "W_inv");
+        }
+        // J is optional (recomputed in-kernel); only size-check it when supplied.
+        if (!g.J.empty()) { eq(g.J.size(), ts * egg::dim::jSize(D), "J"); }
         eq(g.dof_idx.size(), g.ndof, "dof_idx");
-        eq(g.tag.size(), g.ndof, "tag");
         eq(g.P_of.size(), g.ndof, "P_of");
-        eq(g.params.size(), g.ndof * egg::kParamPad, "params");
 
         // role selects the per-corner stencil branch (corner / neighbour axis /
         // absent) and, via c0 = D*role, the J columns in patch_eval — an
@@ -139,6 +167,55 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
             check_index(g.gn[k], ("gn" + std::to_string(k)).c_str(), grp);
         }
         check_index(g.dof_idx, "dof_idx", grp);
+
+        // Per-type SoA record + segmented field validation. Also verify the
+        // SoA partitions cover every group-local DOF exactly once: entity data
+        // is carried solely by `soa`, so an uncovered DOF would silently never
+        // be swept.
+        std::vector<int> covered(g.ndof, 0);
+        for (std::size_t si = 0; si < g.soa.size(); ++si) {
+            const auto& s = g.soa[si];
+            const std::string snm = grp + " soa[" + std::to_string(si) +
+                                    "] (tag=" + std::to_string(egg::to_int(s.tag)) + ")";
+            if (s.records.size() != s.count * static_cast<std::size_t>(s.k_fields)) {
+                throw std::invalid_argument(
+                  "validate_context: " + snm + " records size " + std::to_string(s.records.size()) +
+                  " != count*kFields " +
+                  std::to_string(s.count * static_cast<std::size_t>(s.k_fields)));
+            }
+            if (s.dof_local.size() != s.count) {
+                throw std::invalid_argument("validate_context: " + snm + " dof_local size " +
+                                            std::to_string(s.dof_local.size()) + " != count " +
+                                            std::to_string(s.count));
+            }
+            for (std::size_t j = 0; j < s.seg.size(); ++j) {
+                if (s.seg[j].off.size() != s.count + 1) {
+                    throw std::invalid_argument("validate_context: " + snm + " seg[" +
+                                                std::to_string(j) + "].off size " +
+                                                std::to_string(s.seg[j].off.size()) +
+                                                " != count+1 " + std::to_string(s.count + 1));
+                }
+            }
+            for (int dl : s.dof_local) {
+                if (dl < 0 || static_cast<std::size_t>(dl) >= g.ndof) {
+                    throw std::invalid_argument("validate_context: " + snm + " dof_local " +
+                                                std::to_string(dl) + " out of range [0, " +
+                                                std::to_string(g.ndof) + ")");
+                }
+                if (covered[static_cast<std::size_t>(dl)]++ != 0) {
+                    throw std::invalid_argument("validate_context: " + snm + " dof_local " +
+                                                std::to_string(dl) +
+                                                " covered by more than one SoA partition");
+                }
+            }
+        }
+        for (std::size_t d = 0; d < g.ndof; ++d) {
+            if (covered[d] == 0) {
+                throw std::invalid_argument("validate_context: " + grp + " DOF " +
+                                            std::to_string(d) +
+                                            " not covered by any SoA partition");
+            }
+        }
     }
 
     const auto& es = host.energy_stencil;
@@ -154,47 +231,16 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         eqs(es.gn[k].size(), ns, "gn" + std::to_string(k));
         eqs(es.s[k].size(), ns, "s" + std::to_string(k));
     }
-    eqs(es.W_inv.size(), ns * egg::dim::wInv(D), "W_inv");
+    // W_inv is either one row per sample or a single shared row (uniform target,
+    // read with stride 0 by the energy reduction — mirrors the group metric table).
+    if (es.W_inv.size() != egg::dim::wInv(D)) {
+        eqs(es.W_inv.size(), ns * egg::dim::wInv(D), "W_inv");
+    }
     check_index(es.gc, "gc", "energy_stencil");
     for (int k = 0; k < D; ++k) {
         check_index(es.gn[k], ("gn" + std::to_string(k)).c_str(), "energy_stencil");
     }
 }
-
-#ifndef NDEBUG
-// Debug-only check of the host colouring contract: within one colour group no
-// DOF's patch may reference another concurrently-moved DOF, otherwise the
-// same-colour parallel scatter races against a neighbour's update (#6). Compiled
-// out in Release (NDEBUG), where the host promises a valid greedy colouring.
-template <int D> void assert_group_race_free(const egg::SweepContextHostT<D>& host)
-{
-    for (std::size_t gi = 0; gi < host.groups.size(); ++gi) {
-        const auto& g = host.groups[gi];
-        const std::unordered_set<int> moved(g.dof_idx.begin(), g.dof_idx.end());
-        for (std::size_t d = 0; d < g.ndof; ++d) {
-            const int self = g.dof_idx[d];
-            const std::size_t off = static_cast<std::size_t>(g.sample_offset[d]);
-            const std::size_t P = static_cast<std::size_t>(g.P_of[d]);
-            for (std::size_t p = off; p < off + P; ++p) {
-                bool ref = g.gc[p] != self && moved.count(g.gc[p]);
-                int culprit = g.gc[p];
-                for (int k = 0; k < D && !ref; ++k) {
-                    if (g.gn[k][p] != self && moved.count(g.gn[k][p])) {
-                        ref = true;
-                        culprit = g.gn[k][p];
-                    }
-                }
-                if (ref) {
-                    throw std::logic_error("race-free colouring violated: group " +
-                                           std::to_string(gi) + " DOF " + std::to_string(self) +
-                                           " patch references concurrently-moved DOF " +
-                                           std::to_string(culprit));
-                }
-            }
-        }
-    }
-}
-#endif
 
 // Extract a contiguous int32 numpy array from a dict key, returning a vector.
 std::vector<int> extract_int(const py::dict& d, const std::string& key)
@@ -203,12 +249,39 @@ std::vector<int> extract_int(const py::dict& d, const std::string& key)
     return std::vector<int>(arr.data(), arr.data() + arr.size());
 }
 
-// Extract a contiguous float64 numpy array from a dict key, returning a vector.
-std::vector<double> extract_double(const py::dict& d, const std::string& key)
+// Extract a contiguous float64 numpy array from a dict key, narrowing into the
+// device value type egg::real. The Python API stays float64; precision is
+// converted here at the boundary (a no-op copy when real == double).
+std::vector<egg::real> extract_real(const py::dict& d, const std::string& key)
 {
     auto arr =
       d[key.c_str()].cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
-    return std::vector<double>(arr.data(), arr.data() + arr.size());
+    const double* p = arr.data();
+    std::vector<egg::real> v(static_cast<std::size_t>(arr.size()));
+    for (std::size_t i = 0; i < v.size(); ++i) { v[i] = static_cast<egg::real>(p[i]); }
+    return v;
+}
+
+// Widen an egg::real span back to a freshly-allocated float64 numpy array (the
+// download side of the boundary; a plain copy when real == double).
+py::array_t<double> to_f64(const egg::real* src, py::ssize_t n)
+{
+    py::array_t<double> out(n);
+    double* dst = out.mutable_data();
+    for (py::ssize_t i = 0; i < n; ++i) { dst[i] = static_cast<double>(src[i]); }
+    return out;
+}
+
+// Narrow a contiguous float64 numpy array into an egg::real buffer (for the
+// SYCL-free math bindings that take const real* / real-typed views). The
+// returned vector must outlive the consuming call.
+std::vector<egg::real>
+  narrow(const py::array_t<double, py::array::c_style | py::array::forcecast>& a)
+{
+    const double* p = a.data();
+    std::vector<egg::real> v(static_cast<std::size_t>(a.size()));
+    for (std::size_t i = 0; i < v.size(); ++i) { v[i] = static_cast<egg::real>(p[i]); }
+    return v;
 }
 
 template <int D>
@@ -221,11 +294,10 @@ egg::SweepContextHostT<D>
     host.num_nodes = num_nodes;
     host.X.assign(X_data, X_data + (num_nodes * D));
 
-    // Groups — one ragged group per colour. Per-sample arrays are flat over the
-    // concatenated DOFs (DOF-major, variable P per DOF); per-DOF arrays carry the
-    // patch size P_of and we derive the sample_offset prefix sum here. The wire
-    // format keeps per-axis keys gn0..gn{D-1} / s0..s{D-1}; we map them into the
-    // gn[k]/s[k] array slots. See cpp_backend_plan.md §5 and flatten_context.
+    // Groups — one ragged group over all free DOFs. Per-sample arrays are flat
+    // over the concatenated DOFs (DOF-major, variable P per DOF); per-DOF
+    // arrays carry P_of, and sample_offset is derived here as its prefix sum.
+    // The wire keeps per-axis keys gn0../s0.., mapped into gn[k]/s[k].
     auto groups_list = ctx_arrays["groups"].cast<py::list>();
     for (auto g_item : groups_list) {
         auto gd = g_item.cast<py::dict>();
@@ -235,18 +307,64 @@ egg::SweepContextHostT<D>
         sg.gc = extract_int(gd, "gc");
         for (int k = 0; k < D; ++k) {
             sg.gn[k] = extract_int(gd, "gn" + std::to_string(k));
-            sg.s[k] = extract_double(gd, "s" + std::to_string(k));
+            sg.s[k] = extract_real(gd, "s" + std::to_string(k));
         }
-        sg.W_inv = extract_double(gd, "W_inv");
+        sg.W_inv = extract_real(gd, "W_inv");
+        // A single-row W_inv (length wInv, not total_samples*wInv) is a uniform
+        // target: every sample shares it, read with stride 0 in the metric table.
+        sg.w_uniform = (sg.W_inv.size() == egg::dim::wInv(D));
         sg.role = extract_int(gd, "role");
-        sg.J = extract_double(gd, "J");
+        // J is optional: no kernel reads it (the role-selected chain-Jacobian
+        // block is recomputed in-kernel from s + W_inv). Contexts may omit it.
+        if (gd.contains("J")) { sg.J = extract_real(gd, "J"); }
         sg.dof_idx = extract_int(gd, "dof_idx");
-        sg.tag = extract_int(gd, "tag");
         sg.P_of = extract_int(gd, "P_of");
-        sg.params = extract_double(gd, "params");
-        // Optional: variable-length entity data (B-spline nets/knots). Absent for
-        // contexts with only fixed-size entities.
-        if (gd.contains("arena")) { sg.arena = extract_double(gd, "arena"); }
+        // Interior DOFs come pre-classified by build_flat_context: their patch is
+        // synthesized off the block layout (identity target), so they carry no
+        // stored stencil (P_of == 0). interior_block[d] >= 0 names the block,
+        // interior_logical the (D-wide) 0-based logical index; both empty on a wire
+        // that predates the classification (then nothing is synthesized).
+        if (gd.contains("interior_block")) {
+            sg.interior_block = extract_int(gd, "interior_block");
+            sg.interior_logical = extract_int(gd, "interior_logical");
+        }
+
+        // Typed per-entity-type SoA sub-dicts (the sole carrier of entity
+        // data). Each present type contributes {tag, kFields, dof_local,
+        // records, [seg]}: records is a packed (count, kFields) row-major
+        // array, seg a list of {data, off} CSR fields (absent for fixed-size
+        // types). Every DOF is covered by exactly one sub-dict (validated).
+        if (gd.contains("entities")) {
+            auto entities = gd["entities"].cast<py::dict>();
+            for (auto [name, val] : entities) {
+                auto ed = val.cast<py::dict>();
+                if (!ed.contains("tag")) {  // "__blob__" marker: unsupported
+                    throw std::invalid_argument(
+                      "unpack_context: entities carries a '__blob__' group (an entity "
+                      "with no SoA encoder, e.g. a composite with a nested B-spline); "
+                      "the positional blob path was retired");
+                }
+                egg::SoAHostRecord rec;
+                rec.tag = static_cast<egg::EntityTag>(ed["tag"].cast<int>());
+                rec.k_fields = ed["kFields"].cast<int>();
+                rec.records = extract_real(ed, "records");
+                rec.dof_local = extract_int(ed, "dof_local");  // group-local DOF indices
+                rec.count = rec.dof_local.size();
+                // Ingest segmented CSR fields (B-spline knots/ctrl). Each slot
+                // is {data: f64, off: i32[count+1]}. Absent for fixed-size types.
+                if (ed.contains("seg")) {
+                    auto seg_list = ed["seg"].cast<py::list>();
+                    for (auto seg_val : seg_list) {
+                        auto sd = seg_val.cast<py::dict>();
+                        egg::SoAHostRecord::SegmentedField sf;
+                        sf.data = extract_real(sd, "data");
+                        sf.off = extract_int(sd, "off");
+                        rec.seg.push_back(std::move(sf));
+                    }
+                }
+                sg.soa.push_back(std::move(rec));
+            }
+        }
 
         sg.total_samples = sg.gc.size();
 
@@ -263,90 +381,459 @@ egg::SweepContextHostT<D>
     host.energy_stencil.gc = extract_int(es, "gc");
     for (int k = 0; k < D; ++k) {
         host.energy_stencil.gn[k] = extract_int(es, "gn" + std::to_string(k));
-        host.energy_stencil.s[k] = extract_double(es, "s" + std::to_string(k));
+        host.energy_stencil.s[k] = extract_real(es, "s" + std::to_string(k));
     }
-    host.energy_stencil.W_inv = extract_double(es, "W_inv");
+    host.energy_stencil.W_inv = extract_real(es, "W_inv");
 
     // Fail fast on a malformed context before any device allocation / kernel.
     validate_context<D>(host);
-#ifndef NDEBUG
-    assert_group_race_free<D>(host);
-#endif
 
     return host;
 }
 
-// Runtime dispatch on the input's actual dimension d. Phase 1 instantiates only
-// the D=2 body; d=3 is the scaffold (a clean "not yet implemented" error), so the
-// 2D-only static_asserts in the core never fire and the binary does not grow.
-[[noreturn]] void throw_unsupported_dim(int d)
+// Extract a (rows, D) int32 numpy array as a vector of per-row D-index arrays.
+// An empty (0, D) array yields an empty vector (no entries to exchange).
+template <int D>
+std::vector<std::array<std::size_t, D>> extract_index_rows(const py::dict& d,
+                                                           const std::string& key)
 {
-    if (d == 3) {
-        throw std::runtime_error(
-          "egg C++ core: 3D (d=3) sweep not yet implemented; only d=2 is built.");
+    auto arr = d[key.c_str()].cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
+    const auto info = arr.request();
+    const std::size_t rows =
+      (info.ndim >= 1 && info.shape[0] > 0) ? static_cast<std::size_t>(info.shape[0]) : 0;
+    std::vector<std::array<std::size_t, D>> out(rows);
+    const int* p = arr.data();
+    for (std::size_t r = 0; r < rows; ++r) {
+        for (int k = 0; k < D; ++k) { out[r][k] = static_cast<std::size_t>(p[(r * D) + k]); }
     }
-    throw std::invalid_argument("egg C++ core: dimension must be 2 or 3, got " + std::to_string(d));
+    return out;
 }
 
-// Persistent device-resident session: the context is uploaded once and X is
-// kept resident across .run() calls
-// Thin RAII wrapper over Executor, which already owns the in-order queue and
-// keeps X device-resident.
-// Validate the dimension before the (D=2) Executor is built; d != 2 throws the
-// clean scaffold error. Returns d so it can sequence ahead of exec_ in the
-// initializer list. Phase 2 replaces this with a real <D> dispatch.
+// The result of re-homing a global SweepContextHostT onto a halo-padded
+// structured store: the packing layout and the global-DOF -> structured-node-index
+// map (also used to gather the padded X back to global node order after the run).
+template <int D> struct StructuredRemap {
+    egg::BlockLayout<D> layout;
+    std::vector<int> g2s;          // global node id -> owner-interior (padded) node index
+    std::size_t global_num_nodes;  // M (pre-remap host.num_nodes)
+    // Singular-fan mirrors: extra interior->ghost copies (already as double offsets)
+    // the host allocated when a patch node fell outside the regular interior+face
+    // ghost shell. Appended to the device halo so they refresh every sweep.
+    std::vector<std::size_t> fan_src_off;
+    std::vector<std::size_t> fan_dst_off;
+    // Owner -> non-owner shared-node broadcast, derived here from the per-block
+    // interior maps (lowest-index block owns each global node; the others hold a
+    // copy refreshed from the owner every sweep). Element offsets into packed X.
+    std::vector<std::size_t> share_src_off;
+    std::vector<std::size_t> share_dst_off;
+};
+
+// Re-index a global-indexed SweepContextHostT onto the halo-padded structured
+// store described by `structured` (interior shapes, per-block global-DOF maps,
+// halo table + owner map, built host-side by build_block_structured_context).
+// Mutates `host` in place: gc/gn/dof_idx and the energy-stencil indices are
+// remapped global -> structured node index, host.X becomes the packed buffer
+// (interiors scattered, ghosts 0), and host.num_nodes becomes the padded node
+// count. BlockLayout owns all offset math (no padded-index arithmetic in Python).
+//
+// Conforming multiblock (step 2): a shared interface node is duplicated across
+// blocks but relaxed only by its OWNER block (owner_block, lowest index). Each
+// group's DOF is therefore remapped relative to its owner block: own-block nodes
+// resolve to the owner's interior slot, cross-block neighbours to the owner's
+// GHOST copy (frozen per sweep). The energy stencil + the X gather-back use the
+// single owner-interior slot per global node (g2s).
+template <int D>
+StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
+                                          const py::dict& structured)
+{
+    using namespace egg;
+
+    auto shapes_list = structured["interior_shapes"].cast<py::list>();
+    std::vector<typename BlockLayout<D>::Shape> shapes;
+    shapes.reserve(py::len(shapes_list));
+    for (auto s : shapes_list) {
+        auto arr = s.cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
+        if (arr.size() != D) {
+            throw std::invalid_argument("structured: each interior shape must have D entries");
+        }
+        typename BlockLayout<D>::Shape sh;
+        for (int k = 0; k < D; ++k) { sh[k] = static_cast<std::size_t>(arr.data()[k]); }
+        shapes.push_back(sh);
+    }
+    BlockLayout<D> layout {shapes};
+    const std::size_t num_blocks = shapes.size();
+
+    const std::size_t M = host.num_nodes;
+    const std::vector<egg::real>& Xg = host.X;
+
+    // Unravel a row-major flat logical index (last axis fastest), matching the
+    // C-order build_block_structured_context flattens block_global_dof in.
+    auto unravel = [](std::size_t f,
+                      const BlockLayout<D>::Shape& shape) -> std::array<std::size_t, D> {
+        std::array<std::size_t, D> logical {};
+        std::size_t rem = f;
+        for (int k = D - 1; k >= 0; --k) {
+            logical[static_cast<std::size_t>(k)] = rem % shape[static_cast<std::size_t>(k)];
+            rem /= shape[static_cast<std::size_t>(k)];
+        }
+        return logical;
+    };
+    auto ravel = [](const std::array<std::size_t, D>& logical,
+                    const BlockLayout<D>::Shape& shape) -> std::size_t {
+        std::size_t f = 0;
+        for (int k = 0; k < D; ++k) { f = (f * shape[static_cast<std::size_t>(k)]) + logical[k]; }
+        return f;
+    };
+
+    // Cache the per-block global-DOF maps.
+    auto bgd_list = structured["block_global_dof"].cast<py::list>();
+    if (py::len(bgd_list) != num_blocks) {
+        throw std::invalid_argument("structured: block_global_dof count != interior_shapes count");
+    }
+    std::vector<std::vector<int>> bgd(num_blocks);
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+        auto arr = bgd_list[b].cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
+        std::size_t n = 1;
+        for (int k = 0; k < D; ++k) { n *= shapes[b][static_cast<std::size_t>(k)]; }
+        if (std::cmp_not_equal(arr.size(), n)) {
+            throw std::invalid_argument("structured: block_global_dof length != prod(shape)");
+        }
+        bgd[b].assign(arr.data(), arr.data() + arr.size());
+    }
+
+    // Per-block map: global node id -> padded node index in that block. Interior
+    // slots come from block_global_dof; the ghost shell from the halo table (a
+    // dst-block ghost holds the src-block's interior node, keyed by its global id).
+    std::vector<std::unordered_map<int, int>> block_map(num_blocks);
+    std::vector<egg::real> Xp(layout.total_doubles(), egg::real {0});
+    // Owner block + owner interior slot of each global node, derived in this same
+    // interior pass: the lowest-index block that contains a node owns (relaxes)
+    // it; every later block holds a copy refreshed by an owner->copy broadcast.
+    std::vector<int> owner_block(M, -1);
+    std::vector<int> owner_slot(M, -1);
+    std::vector<std::size_t> share_src_off, share_dst_off;
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+        const std::size_t n = bgd[b].size();
+        for (std::size_t f = 0; f < n; ++f) {
+            const std::array<std::size_t, D> logical = unravel(f, shapes[b]);
+            const int gid = bgd[b][f];
+            const int sidx = interior_node_index<D>(layout, b, logical);
+            block_map[b][gid] = sidx;
+            if (owner_block[static_cast<std::size_t>(gid)] < 0) {
+                owner_block[static_cast<std::size_t>(gid)] = static_cast<int>(b);
+                owner_slot[static_cast<std::size_t>(gid)] = sidx;
+            } else {
+                // A non-owner copy: broadcast the owner interior -> this interior
+                // (element offsets; the copy order is immaterial, see
+                // fused_halo_broadcast).
+                share_src_off.push_back(
+                  static_cast<std::size_t>(owner_slot[static_cast<std::size_t>(gid)]) * D);
+                share_dst_off.push_back(static_cast<std::size_t>(sidx) * D);
+            }
+            // Scatter the initial position into every block's copy (owner +
+            // non-owner) of the node; the broadcast keeps them in sync thereafter.
+            for (int k = 0; k < D; ++k) {
+                Xp[(static_cast<std::size_t>(sidx) * D) + k] =
+                  Xg[(static_cast<std::size_t>(gid) * D) + k];
+            }
+        }
+    }
+
+    const std::vector<int> halo_src_block = extract_int(structured, "halo_src_block");
+    const std::vector<int> halo_dst_block = extract_int(structured, "halo_dst_block");
+    const auto halo_src_padded = extract_index_rows<D>(structured, "halo_src_padded");
+    const auto halo_dst_padded = extract_index_rows<D>(structured, "halo_dst_padded");
+    for (std::size_t e = 0; e < halo_src_block.size(); ++e) {
+        const auto sb = static_cast<std::size_t>(halo_src_block[e]);
+        const auto db = static_cast<std::size_t>(halo_dst_block[e]);
+        // The halo source is an INTERIOR padded index (1-based per axis); recover
+        // the neighbour's global id, then register db's ghost slot under it.
+        std::array<std::size_t, D> src_logical {};
+        for (int k = 0; k < D; ++k) {
+            src_logical[static_cast<std::size_t>(k)] = halo_src_padded[e][k] - 1;
+        }
+        const int gid = bgd[sb][ravel(src_logical, shapes[sb])];
+        block_map[db][gid] = padded_node_index<D>(layout, db, halo_dst_padded[e]);
+    }
+
+    // owner_block[] was derived in the interior pass above (the only block that
+    // relaxes each global DOF).
+
+    // g2s[g] = the owner-interior slot of global node g (energy stencil + gather-back).
+    std::vector<int> g2s(M, -1);
+    for (std::size_t g = 0; g < M; ++g) {
+        const int ob = owner_block[g];
+        if (ob < 0) { continue; }  // node in no block's interior (never referenced)
+        const auto it = block_map[static_cast<std::size_t>(ob)].find(static_cast<int>(g));
+        if (it == block_map[static_cast<std::size_t>(ob)].end()) {
+            throw std::invalid_argument("structured: owner_block names a block that does not "
+                                        "contain its global node");
+        }
+        g2s[g] = it->second;
+    }
+
+    // Spare ghost-ring slots per block, for foreign patch nodes (singular fans).
+    // A few of a singular node's fan neighbours cross non-axis-aligned interfaces,
+    // so they are not in any face-ghost slot; we mirror each into an otherwise
+    // unused ghost-ring slot of the owner block and refresh it every sweep from the
+    // node's owner interior (frozen halo). The pool excludes interior slots (never
+    // on the ring) and the regular face-ghost destinations.
+    std::vector<std::unordered_set<int>> used_ghost(num_blocks);
+    for (std::size_t e = 0; e < halo_dst_block.size(); ++e) {
+        used_ghost[static_cast<std::size_t>(halo_dst_block[e])].insert(
+          padded_node_index<D>(layout,
+                               static_cast<std::size_t>(halo_dst_block[e]),
+                               halo_dst_padded[e]));
+    }
+    std::vector<std::vector<int>> free_ghosts(num_blocks);
+    std::vector<std::size_t> free_cursor(num_blocks, 0);
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+        std::array<std::size_t, D> ext {};
+        std::size_t total = 1;
+        for (int k = 0; k < D; ++k) {
+            ext[static_cast<std::size_t>(k)] = shapes[b][static_cast<std::size_t>(k)] + 2;
+            total *= ext[static_cast<std::size_t>(k)];
+        }
+        for (std::size_t f = 0; f < total; ++f) {
+            std::array<std::size_t, D> padded {};
+            std::size_t rem = f;
+            bool ring = false;
+            for (int k = D - 1; k >= 0; --k) {
+                padded[static_cast<std::size_t>(k)] = rem % ext[static_cast<std::size_t>(k)];
+                rem /= ext[static_cast<std::size_t>(k)];
+            }
+            for (int k = 0; k < D; ++k) {
+                if (padded[static_cast<std::size_t>(k)] == 0 ||
+                    padded[static_cast<std::size_t>(k)] == ext[static_cast<std::size_t>(k)] - 1) {
+                    ring = true;
+                }
+            }
+            if (!ring) { continue; }
+            const int nidx = padded_node_index<D>(layout, b, padded);
+            if (!used_ghost[b].contains(nidx)) { free_ghosts[b].push_back(nidx); }
+        }
+    }
+
+    std::vector<std::size_t> fan_src_off, fan_dst_off;
+
+    // Remap one global node id relative to block b's interior-or-ghost map. A node
+    // outside it is a singular-fan neighbour: allocate it a spare ghost slot in b,
+    // sourced from its owner interior, and record the extra halo copy.
+    auto lookup = [&](std::size_t b, int gid, const char* what) -> int {
+        const auto it = block_map[b].find(gid);
+        if (it != block_map[b].end()) { return it->second; }
+        const int src = g2s[static_cast<std::size_t>(gid)];  // owner-interior node index
+        if (src < 0) {
+            throw std::invalid_argument(std::string("structured: ") + what +
+                                        " references global node " + std::to_string(gid) +
+                                        " absent from every block's interior map");
+        }
+        if (free_cursor[b] >= free_ghosts[b].size()) {
+            throw std::invalid_argument(
+              "structured: block " + std::to_string(b) +
+              " ran out of spare ghost slots for singular-fan / foreign patch nodes");
+        }
+        const int slot = free_ghosts[b][free_cursor[b]++];
+        block_map[b][gid] = slot;
+        fan_src_off.push_back(static_cast<std::size_t>(src) * D);
+        fan_dst_off.push_back(static_cast<std::size_t>(slot) * D);
+        return slot;
+    };
+
+    // Each group's DOF is remapped relative to its OWNER block: the relaxed node
+    // and all its patch samples resolve to that block's interior or ghost slots.
+    for (auto& g : host.groups) {
+        for (std::size_t d = 0; d < g.ndof; ++d) {
+            const auto ob =
+              static_cast<std::size_t>(owner_block[static_cast<std::size_t>(g.dof_idx[d])]);
+            const auto off = static_cast<std::size_t>(g.sample_offset[d]);
+            const auto P = static_cast<std::size_t>(g.P_of[d]);
+            for (std::size_t p = off; p < off + P; ++p) {
+                g.gc[p] = lookup(ob, g.gc[p], "gc");
+                for (int k = 0; k < D; ++k) { g.gn[k][p] = lookup(ob, g.gn[k][p], "gn"); }
+            }
+            g.dof_idx[d] = lookup(ob, g.dof_idx[d], "dof_idx");
+        }
+        // soa[*].dof_local are GROUP-LOCAL DOF positions, not global ids — never remapped.
+    }
+
+    // Interior DOFs (patch synthesized off the block layout) are classified by
+    // build_flat_context and arrive on the wire as interior_block/interior_logical
+    // (see the unpack above); nothing to compute here.
+
+    auto remap_stencil = [&](std::vector<int>& v) {
+        for (int& x : v) {
+            const int s = g2s[static_cast<std::size_t>(x)];
+            if (s < 0) {
+                throw std::invalid_argument(
+                  "structured: an energy-stencil index references a global node absent from "
+                  "every block's interior map");
+            }
+            x = s;
+        }
+    };
+    remap_stencil(host.energy_stencil.gc);
+    for (int k = 0; k < D; ++k) { remap_stencil(host.energy_stencil.gn[k]); }
+
+    host.X = std::move(Xp);
+    host.num_nodes = layout.total_doubles() / static_cast<std::size_t>(D);
+
+    // Flatten the block layout into node-unit arrays the device synthesis reads
+    // (block base + padded node strides per block). Doubles/D are exact: a block
+    // base and every stride is a whole multiple of D (D coords per node).
+    host.block_off.assign(num_blocks, 0);
+    host.nstride.assign(num_blocks * static_cast<std::size_t>(D), 0);
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+        host.block_off[b] = static_cast<int>(layout.block_offset(b) / static_cast<std::size_t>(D));
+        const auto ns = layout.node_strides(b);
+        for (int k = 0; k < D; ++k) {
+            host.nstride[(b * static_cast<std::size_t>(D)) + static_cast<std::size_t>(k)] =
+              static_cast<int>(ns[static_cast<std::size_t>(k)] / static_cast<std::size_t>(D));
+        }
+    }
+
+    return StructuredRemap<D> {std::move(layout),
+                               std::move(g2s),
+                               M,
+                               std::move(fan_src_off),
+                               std::move(fan_dst_off),
+                               std::move(share_src_off),
+                               std::move(share_dst_off)};
+}
+
+// Build the device halo topology from the host-side padded-index tables, plus
+// any singular-fan mirror copies the remap allocated (pre-resolved to offsets).
+template <int D>
+egg::BlockTopologyDevice<D> build_topology(sycl::queue& q,
+                                           const egg::BlockLayout<D>& layout,
+                                           const py::dict& structured,
+                                           const std::vector<std::size_t>& share_src_off,
+                                           const std::vector<std::size_t>& share_dst_off,
+                                           const std::vector<std::size_t>& fan_src_off,
+                                           const std::vector<std::size_t>& fan_dst_off)
+{
+    return egg::BlockTopologyDevice<D> {q,
+                                        layout,
+                                        extract_int(structured, "halo_src_block"),
+                                        extract_index_rows<D>(structured, "halo_src_padded"),
+                                        extract_int(structured, "halo_dst_block"),
+                                        extract_index_rows<D>(structured, "halo_dst_padded"),
+                                        extract_int(structured, "sing_block"),
+                                        extract_index_rows<D>(structured, "sing_logical"),
+                                        share_src_off,
+                                        share_dst_off,
+                                        fan_src_off,
+                                        fan_dst_off};
+}
+
+// Runtime dispatch on the input's actual dimension d: 2 and 3 are built.
 int require_supported_dim(int d)
 {
-    if (d != 2) { throw_unsupported_dim(d); }
+    if (d != 2 && d != 3) {
+        throw std::invalid_argument("egg C++ core: dimension must be 2 or 3, got " +
+                                    std::to_string(d));
+    }
     return d;
 }
 
-class CppSweepSession
+// A device-resident structured session: the executor (owning the packed X +
+// halo topology) and the gather-back remap for one dimension.
+template <int D> struct StructuredSession {
+    egg::StructuredExecutorT<D> exec;
+    StructuredRemap<D> rm;
+};
+
+// Build a device-resident structured session: re-home the global context onto
+// the halo-padded store once, upload it, and keep it resident.
+template <int D>
+StructuredSession<D> make_structured_session(const py::dict& ctx_arrays,
+                                             const py::dict& structured,
+                                             const double* X,
+                                             std::size_t num_nodes,
+                                             const std::string& device)
+{
+    sycl::queue q = select_queue(device);
+    auto host = unpack_context<D>(ctx_arrays, X, num_nodes);
+    StructuredRemap<D> rm = apply_structured_remap<D>(host, structured);
+    auto topo = build_topology<D>(q,
+                                  rm.layout,
+                                  structured,
+                                  rm.share_src_off,
+                                  rm.share_dst_off,
+                                  rm.fan_src_off,
+                                  rm.fan_dst_off);
+    egg::StructuredExecutorT<D> exec(q, host, std::move(topo));
+    return StructuredSession<D> {std::move(exec), std::move(rm)};
+}
+
+// Persistent device-resident structured block-Jacobi session. The context is
+// re-homed onto the halo-padded store and uploaded once; X stays resident
+// (packed) across .run() calls, so the per-sweep halo exchange + coalesced
+// stencil reads are measured warm with no re-staging.
+class CppStructuredSweepSession
 {
   public:
-    CppSweepSession(const py::dict& ctx_arrays,
-                    const py::array_t<double, py::array::c_style | py::array::forcecast>& X0,
-                    const std::string& device,
-                    int dim) :
+    CppStructuredSweepSession(
+      const py::dict& ctx_arrays,
+      const py::dict& structured,
+      const py::array_t<double, py::array::c_style | py::array::forcecast>& X0,
+      const std::string& device,
+      int dim) :
         dim_(require_supported_dim(dim)), num_nodes_(checked_num_nodes(X0, dim_)),
-        exec_(select_queue(device), unpack_context<2>(ctx_arrays, X0.data(), num_nodes_))
+        sess_(dim_ == 2 ? SessVariant {std::in_place_type<StructuredSession<2>>,
+                                       make_structured_session<2>(
+                                         ctx_arrays, structured, X0.data(), num_nodes_, device)}
+                        : SessVariant {std::in_place_type<StructuredSession<3>>,
+                                       make_structured_session<3>(
+                                         ctx_arrays, structured, X0.data(), num_nodes_, device)})
     {
     }
 
-    // Run n_sweeps on the resident X. No upload/download.
+    // Run n_sweeps of block-Jacobi on the resident packed X (per-sweep halo +
+    // broadcast included); omega is the SOR/damping weight.
+    // @p report_every throttles the energy/min-det reduction cadence; default 0
+    // (chunk-end) returns a single (energy, min_det) pair for the final sweep,
+    // cutting up to (n_sweeps - 1) reduction launches per call. Pass 1 for the
+    // legacy per-sweep contract.
     std::tuple<py::array_t<double>, py::array_t<double>>
-      run(int n_sweeps, const std::string& phase, double delta)
+      run(int n_sweeps, const std::string& phase, double delta, double omega, int report_every)
     {
-        const egg::ObjectiveKind objective = egg::make_objective(phase, delta);
-        auto [energies, mindets] = exec_.run_sweeps(n_sweeps, objective);
-        py::array_t<double> e_ret(static_cast<py::ssize_t>(n_sweeps), energies.data());
-        py::array_t<double> m_ret(static_cast<py::ssize_t>(n_sweeps), mindets.data());
-        return std::make_tuple(e_ret, m_ret);
+        auto [energies, mindets] = std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              const egg::ObjectiveKindT<D> objective = egg::make_objective<D>(phase, delta);
+              return s.exec.run_jacobi(n_sweeps, objective, omega, report_every);
+          },
+          sess_);
+        const auto n_reported = static_cast<py::ssize_t>(energies.size());
+        return std::make_tuple(to_f64(energies.data(), n_reported),
+                               to_f64(mindets.data(), n_reported));
     }
 
-    // Download a host copy of the resident X.
+    // Download the packed buffer and gather it back to global node order.
     py::array_t<double> get_X()
     {
-        std::vector<double> X_out(num_nodes_ * egg::kDim);
-        exec_.ctx().download_X(X_out.data());
-        return py::array_t<double>(static_cast<py::ssize_t>(num_nodes_ * egg::kDim), X_out.data());
-    }
-
-    // Re-upload X to the device.
-    void set_X(const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr)
-    {
-        auto buf = X_arr.request();
-        if (static_cast<std::size_t>(buf.shape[0]) != num_nodes_ * egg::kDim) {
-            throw std::invalid_argument("set_X: shape mismatch with session num_nodes");
-        }
-        std::vector<double> host(X_arr.data(), X_arr.data() + (num_nodes_ * egg::kDim));
-        exec_.ctx().upload_X(host);
+        return std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              std::vector<egg::real> X_pad(s.rm.layout.total_doubles());
+              s.exec.ctx().download_X(X_pad.data());
+              std::vector<double> X_out(s.rm.global_num_nodes * D);
+              for (std::size_t g = 0; g < s.rm.global_num_nodes; ++g) {
+                  const auto slot = static_cast<std::size_t>(s.rm.g2s[g]);
+                  for (int k = 0; k < D; ++k) {
+                      X_out[(g * D) + k] = static_cast<double>(X_pad[(slot * D) + k]);
+                  }
+              }
+              return py::array_t<double>(static_cast<py::ssize_t>(s.rm.global_num_nodes * D),
+                                         X_out.data());
+          },
+          sess_);
     }
 
   private:
+    using SessVariant = std::variant<StructuredSession<2>, StructuredSession<3>>;
     int dim_;
     std::size_t num_nodes_;
-    egg::Executor exec_;
+    SessVariant sess_;
 };
 
 }  // namespace
@@ -356,81 +843,117 @@ PYBIND11_MODULE(cpp_core, m)
     m.doc() = "egg C++ compute core (AdaptiveCpp).";
     m.def("ping", [] { return 0; }, "Liveness check; returns 0.");
 
-    py::class_<CppSweepSession>(
+    // The compiled de Boor degree caps, so host-side encoders can reject an
+    // over-degree B-spline with a clean error instead of letting it index the
+    // fixed device work arrays out of bounds (a segfault). Curve and surface
+    // caps are decoupled (see geometry.hpp): the surface cap drives the 3D
+    // boundary kernel's VGPR budget, the curve cap carries 2D-profile headroom.
+    m.attr("MAX_BSPLINE_DEGREE") = egg::kMaxBSplineDegree;
+    m.attr("MAX_BSPLINE_CURVE_DEGREE") = egg::kMaxBSplineCurveDegree;
+
+    // The compiled precision of egg::real (float vs double). Cross-precision
+    // parity tests read this to floor their double-tuned tolerances at the fp32
+    // level in the float build (see tests/real_tol.py, the mirror of
+    // tests/cpp/real_tol.hpp). True when built with -DEGG_REAL_IS_FP32=ON.
+    m.attr("REAL_IS_FLOAT") = (sizeof(egg::real) == 4);
+
+    py::class_<CppStructuredSweepSession>(
       m,
-      "CppSweepSession",
-      "Persistent device-resident smoothing session.\n\n"
-      "The flattened context is uploaded once at construction and X is kept\n"
-      "device-resident across .run() calls — no per-call upload/download or\n"
-      "re-JIT, so steady-state per-sweep cost can be measured warm.")
+      "CppStructuredSweepSession",
+      "Persistent device-resident structured smoothing session.\n\n"
+      "Runs structured block-Jacobi: the context is re-homed onto\n"
+      "the halo-padded per-block store and uploaded once, and the packed X stays\n"
+      "device-resident across .run() calls, so the coalesced stencil + per-sweep\n"
+      "halo exchange are measured warm with no re-staging.")
       .def(py::init<py::dict,
+                    py::dict,
                     py::array_t<double, py::array::c_style | py::array::forcecast>,
                     const std::string&,
                     int>(),
            py::arg("ctx_arrays"),
+           py::arg("structured"),
            py::arg("X"),
            py::kw_only(),
            py::arg("device") = "auto",
            py::arg("dim") = 2)
       .def("run",
-           &CppSweepSession::run,
+           &CppStructuredSweepSession::run,
            py::arg("n_sweeps"),
            py::kw_only(),
            py::arg("phase") = "barrier",
            py::arg("delta") = 0.0,
-           "Run n_sweeps on the resident X; returns (energies, mindets).")
+           py::arg("omega") = 1.0,
+           py::arg("report_every") = 0,
+           "Run n_sweeps of block-Jacobi on the resident packed X; returns\n"
+           "(energies, mindets). omega is the SOR/damping weight.\n\n"
+           "report_every: 0 (default) reports a single (energy, min_det) pair for\n"
+           "the final sweep of this call (chunk-end cadence, minimal reduction\n"
+           "launches); 1 reports every sweep (legacy per-sweep contract); k > 1\n"
+           "reports every k-th sweep plus the final one.")
       .def("get_X",
-           &CppSweepSession::get_X,
-           "Download a host copy of the resident X, shape (N*2,).")
-      .def("set_X",
-           &CppSweepSession::set_X,
-           py::arg("X"),
-           "Re-upload X to the device, shape (N*2,).");
+           &CppStructuredSweepSession::get_X,
+           "Download X gathered back to global node order, shape (N*dim,).");
 
     m.def(
-      "cpp_sweep",
+      "cpp_structured_sweep",
       [](const py::dict& ctx_arrays,
+         const py::dict& structured,
          const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr,
          int n_sweeps,
          const std::string& device,
          const std::string& phase,
          double delta,
-         int dim) -> std::tuple<py::array_t<double>, py::array_t<double>, py::array_t<double>> {
-          // Runtime dispatch on the requested dimension. Phase 1 builds only d=2;
-          // d=3 raises the clean scaffold error (Phase 2 flips this on).
+         int dim,
+         double omega,
+         int report_every)
+        -> std::tuple<py::array_t<double>, py::array_t<double>, py::array_t<double>> {
           require_supported_dim(dim);
 
-          // Select queue
-          sycl::queue q = select_queue(device);
+          const auto run = [&]<int D>() {
+              sycl::queue q = select_queue(device);
 
-          // Unpack context (X shape is checked here; the context is validated
-          // inside unpack_context before any device work).
-          const std::size_t num_nodes = checked_num_nodes(X_arr, dim);
-          auto host_ctx = unpack_context<2>(ctx_arrays, X_arr.data(), num_nodes);
+              // Build the global-indexed context (validated here), then re-home
+              // it onto the halo-padded structured store: indices become
+              // structured node indices, X the packed buffer, num_nodes the
+              // padded count. The structured executor then runs block-Jacobi
+              // with a per-sweep halo exchange.
+              const std::size_t num_nodes = checked_num_nodes(X_arr, dim);
+              auto host_ctx = unpack_context<D>(ctx_arrays, X_arr.data(), num_nodes);
+              StructuredRemap<D> rm = apply_structured_remap<D>(host_ctx, structured);
+              egg::BlockTopologyDevice<D> topo = build_topology<D>(q,
+                                                                   rm.layout,
+                                                                   structured,
+                                                                   rm.share_src_off,
+                                                                   rm.share_dst_off,
+                                                                   rm.fan_src_off,
+                                                                   rm.fan_dst_off);
 
-          // Build device context + executor
-          egg::Executor exec(q, host_ctx);
+              egg::StructuredExecutorT<D> exec(q, host_ctx, std::move(topo));
+              const egg::ObjectiveKindT<D> objective = egg::make_objective<D>(phase, delta);
+              auto [energies, mindets] = exec.run_jacobi(n_sweeps, objective, omega, report_every);
 
-          // Dispatch the objective kind (barrier / δ-untangle) once via the variant.
-          const egg::ObjectiveKind objective = egg::make_objective(phase, delta);
+              // Download the padded buffer and gather it back to global node order.
+              std::vector<egg::real> X_pad(rm.layout.total_doubles());
+              exec.ctx().download_X(X_pad.data());
+              std::vector<double> X_out(rm.global_num_nodes * D);
+              for (std::size_t g = 0; g < rm.global_num_nodes; ++g) {
+                  const auto s = static_cast<std::size_t>(rm.g2s[g]);
+                  for (int k = 0; k < D; ++k) {
+                      X_out[(g * D) + k] = static_cast<double>(X_pad[(s * D) + k]);
+                  }
+              }
 
-          // Run sweeps
-          auto [energies, mindets] = exec.run_sweeps(n_sweeps, objective);
-
-          // Copy X back
-          std::vector<double> X_out(num_nodes * egg::kDim);
-          exec.ctx().download_X(X_out.data());
-
-          // Return (X_out, energies, mindets) as numpy arrays
-          py::array_t<double> X_ret(static_cast<py::ssize_t>(num_nodes * egg::kDim), X_out.data());
-          py::array_t<double> e_ret(static_cast<py::ssize_t>(n_sweeps), energies.data());
-          py::array_t<double> m_ret(static_cast<py::ssize_t>(n_sweeps), mindets.data());
-
-          // pybind11 copies by default when returning from raw pointers — that is
-          // the correct behaviour here (the vectors go out of scope).
-          return std::make_tuple(X_ret, e_ret, m_ret);
+              const auto n_reported = static_cast<py::ssize_t>(energies.size());
+              py::array_t<double> X_ret(static_cast<py::ssize_t>(rm.global_num_nodes * D),
+                                        X_out.data());
+              py::array_t<double> e_ret = to_f64(energies.data(), n_reported);
+              py::array_t<double> m_ret = to_f64(mindets.data(), n_reported);
+              return std::make_tuple(X_ret, e_ret, m_ret);
+          };
+          return dim == 2 ? run.template operator()<2>() : run.template operator()<3>();
       },
       py::arg("ctx_arrays"),
+      py::arg("structured"),
       py::arg("X"),
       py::arg("n_sweeps"),
       py::kw_only(),
@@ -438,31 +961,28 @@ PYBIND11_MODULE(cpp_core, m)
       py::arg("phase") = "barrier",
       py::arg("delta") = 0.0,
       py::arg("dim") = 2,
-      "Run n_sweeps of colored Gauss-Seidel smoothing.\n\n"
-      "Mirrors build_fused_multisweep.run(): same X0 and sweep count\n"
-      "produce matching per-sweep energies and min det A.\n\n"
+      py::arg("omega") = 1.0,
+      py::arg("report_every") = 0,
+      "Run n_sweeps of block-Jacobi over a halo-padded structured store.\n\n"
+      "The context is re-homed onto per-block halo-padded arrays (coalesced stencil\n"
+      "reads) with a per-sweep halo exchange and shared-node broadcast; omega is the\n"
+      "SOR/damping weight. Conforming multiblock (shared interfaces) is supported via\n"
+      "owner-per-shared-node + cross-block-neighbour ghost remap (frozen-halo additive\n"
+      "Schwarz, cadence 1.4b).\n\n"
       "Parameters\n"
       "----------\n"
       "ctx_arrays : dict\n"
-      "    Flattened context (groups + energy_stencil) from cpp_backend.flatten_context.\n"
-      "X : ndarray, shape (N*2,)\n"
-      "    Initial node positions, flat.\n"
-      "n_sweeps : int\n"
-      "    Number of sweeps to run.\n"
-      "device : str, optional\n"
-      "    'auto' (default), 'cpu', or 'gpu'.\n"
-      "phase : str, optional\n"
-      "    'barrier' (default) or 'untangle' (δ-continuation surrogate).\n"
-      "delta : float, optional\n"
-      "    δ for the untangle surrogate (ignored for the barrier phase).\n\n"
+      "    Flattened context from cpp_backend.flatten_context (global indices).\n"
+      "structured : dict\n"
+      "    Halo-padded structured tables from build_block_structured_context\n"
+      "    (interior_shapes, block_global_dof, halo_*, sing_*).\n"
+      "X : ndarray, shape (N*d,)\n"
+      "    Initial node positions, flat (global node order).\n"
+      "X : ndarray, shape (N*d,)\n"
+      "    Initial node positions, flat (global node order).\n\n"
       "Returns\n"
       "-------\n"
-      "X_out : ndarray, shape (N*2,)\n"
-      "    Final node positions.\n"
-      "energies : ndarray, shape (n_sweeps,)\n"
-      "    Per-sweep total energy.\n"
-      "mindets : ndarray, shape (n_sweeps,)\n"
-      "    Per-sweep min det A.");
+      "(X_out, energies, mindets) — X_out in global node order.");
 
     // --------------------------------------------------------------------------
     // Oracle primitives — host-side wrappers for golden-generator reference values.
@@ -474,17 +994,30 @@ PYBIND11_MODULE(cpp_core, m)
       [](const py::array_t<double, py::array::c_style | py::array::forcecast>& t_arr)
         -> std::tuple<double, py::array_t<double>, py::array_t<double>> {
           const auto* t = t_arr.data();
-          egg::VecT vt {t[0], t[1], t[2], t[3]};
+          egg::VecT vt {static_cast<egg::real>(t[0]),
+                        static_cast<egg::real>(t[1]),
+                        static_cast<egg::real>(t[2]),
+                        static_cast<egg::real>(t[3])};
           egg::ShapeObjective objective;
-          double mu = objective.value(vt);
+          const auto mu = static_cast<double>(objective.value(vt));
           auto g = objective.grad(vt);
           auto h = objective.hess(vt);
-          py::array_t<double> grad(4, g.data());
-          py::array_t<double> hess(16, h.data());
-          return std::make_tuple(mu, grad, hess);
+          return std::make_tuple(mu, to_f64(g.data(), 4), to_f64(h.data(), 16));
       },
       py::arg("t"),
       "Evaluate shape_2d metric. Returns (mu, grad(4,), hess(16,)).");
+
+    m.def(
+      "metric_eval_3d",
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& t_arr)
+        -> std::tuple<double, py::array_t<double>, py::array_t<double>> {
+          const std::vector<egg::real> t = narrow(t_arr);
+          egg::MuCond3Eval r = egg::mu_cond3_eval(t.data());
+          return std::make_tuple(static_cast<double>(r.val), to_f64(r.grad, 9), to_f64(r.hess, 81));
+      },
+      py::arg("t"),
+      "Evaluate mu_cond3 metric (3D). vec(T) row-major [t00..t22]. "
+      "Returns (mu, grad(9,), hess(81,)).");
 
     m.def(
       "geometry_project",
@@ -492,9 +1025,11 @@ PYBIND11_MODULE(cpp_core, m)
          int tag,
          const py::array_t<double, py::array::c_style | py::array::forcecast>& params_arr)
         -> py::array_t<double> {
-          egg::Pt p {p_arr.data()[0], p_arr.data()[1]};
-          egg::Pt proj = egg::project(p, tag, params_arr.data());
-          return py::array_t<double>(2, proj.data());
+          egg::Pt p {static_cast<egg::real>(p_arr.data()[0]),
+                     static_cast<egg::real>(p_arr.data()[1])};
+          const std::vector<egg::real> params = narrow(params_arr);
+          egg::Pt proj = egg::project(p, tag, params.data());
+          return to_f64(proj.data(), 2);
       },
       py::arg("p"),
       py::arg("tag"),
@@ -507,9 +1042,11 @@ PYBIND11_MODULE(cpp_core, m)
          int tag,
          const py::array_t<double, py::array::c_style | py::array::forcecast>& params_arr)
         -> py::array_t<double> {
-          egg::Pt p {p_arr.data()[0], p_arr.data()[1]};
-          egg::Pt tang = egg::tangent_space(p, tag, params_arr.data());
-          return py::array_t<double>(2, tang.data());
+          egg::Pt p {static_cast<egg::real>(p_arr.data()[0]),
+                     static_cast<egg::real>(p_arr.data()[1])};
+          const std::vector<egg::real> params = narrow(params_arr);
+          egg::Pt tang = egg::tangent_space(p, tag, params.data());
+          return to_f64(tang.data(), 2);
       },
       py::arg("p"),
       py::arg("tag"),
@@ -528,20 +1065,41 @@ PYBIND11_MODULE(cpp_core, m)
          const py::array_t<int, py::array::c_style | py::array::forcecast>& role_arr,
          const py::array_t<double, py::array::c_style | py::array::forcecast>& J_arr)
         -> std::tuple<py::array_t<double>, py::array_t<double>, double, double> {
+          // Narrow the real-typed views at the boundary (no-ops when real==double).
+          const std::vector<egg::real> X = narrow(X_arr);
+          // s is ±1; PatchView stores it as int8, so narrow the signs to match.
+          const auto to_sign = [](const py::array_t<double>& a) {
+              std::vector<std::int8_t> out(static_cast<std::size_t>(a.size()));
+              const double* p = a.data();
+              for (std::size_t i = 0; i < out.size(); ++i) {
+                  out[i] = static_cast<std::int8_t>(p[i]);
+              }
+              return out;
+          };
+          const std::vector<std::int8_t> s0 = to_sign(s0_arr);
+          const std::vector<std::int8_t> s1 = to_sign(s1_arr);
+          const std::vector<egg::real> W_inv = narrow(W_inv_arr);
+          // J_arr is accepted for API stability but ignored: patch_eval recomputes
+          // the role-selected chain-Jacobian block from s + W_inv (role_Jb).
+          static_cast<void>(J_arr);
           egg::PatchView pv;
           pv.P = static_cast<int>(gc_arr.size());
+          // Identity sample_id: this single patch's arrays are its own metric table.
+          std::vector<int> sid(static_cast<std::size_t>(pv.P));
+          for (int p = 0; p < pv.P; ++p) { sid[static_cast<std::size_t>(p)] = p; }
+          pv.sample_id = sid.data();
           pv.gc = gc_arr.data();
           pv.gn[0] = gn0_arr.data();
           pv.gn[1] = gn1_arr.data();
-          pv.s[0] = s0_arr.data();
-          pv.s[1] = s1_arr.data();
-          pv.W_inv = W_inv_arr.data();
+          pv.s[0] = s0.data();
+          pv.s[1] = s1.data();
+          pv.W_inv = W_inv.data();
           pv.role = role_arr.data();
-          pv.J = J_arr.data();
-          auto result = egg::patch_eval(pv, X_arr.data());
-          py::array_t<double> grad(2, result.grad.data());
-          py::array_t<double> hess(4, result.hess.data());
-          return std::make_tuple(grad, hess, result.energy, result.mindet);
+          auto result = egg::patch_eval(pv, X.data());
+          return std::make_tuple(to_f64(result.grad.data(), 2),
+                                 to_f64(result.hess.data(), 4),
+                                 static_cast<double>(result.energy),
+                                 static_cast<double>(result.mindet));
       },
       py::arg("X"),
       py::arg("gc"),
@@ -564,17 +1122,22 @@ PYBIND11_MODULE(cpp_core, m)
          const py::array_t<double, py::array::c_style | py::array::forcecast>& s1_arr,
          const py::array_t<double, py::array::c_style | py::array::forcecast>& W_inv_arr)
         -> std::tuple<double, double> {
+          const std::vector<egg::real> X = narrow(X_arr);
+          const std::vector<egg::real> s0 = narrow(s0_arr);
+          const std::vector<egg::real> s1 = narrow(s1_arr);
+          const std::vector<egg::real> W_inv = narrow(W_inv_arr);
           egg::StencilSampleView sv;
           sv.P = static_cast<int>(gc_arr.size());
           sv.gc = gc_arr.data();
           sv.gn[0] = gn0_arr.data();
           sv.gn[1] = gn1_arr.data();
-          sv.s[0] = s0_arr.data();
-          sv.s[1] = s1_arr.data();
-          sv.W_inv = W_inv_arr.data();
-          double energy = 0.0, mindet = 0.0;
-          egg::patch_energy_mindet<2>(sv, X_arr.data(), energy, mindet);
-          return std::make_tuple(energy, mindet);
+          sv.s[0] = s0.data();
+          sv.s[1] = s1.data();
+          sv.W_inv = W_inv.data();
+          egg::real energy {0};
+          egg::real mindet {0};
+          egg::patch_energy_mindet<2>(sv, X.data(), energy, mindet);
+          return std::make_tuple(static_cast<double>(energy), static_cast<double>(mindet));
       },
       py::arg("X"),
       py::arg("gc"),
@@ -595,11 +1158,16 @@ PYBIND11_MODULE(cpp_core, m)
         -> py::array_t<double> {
           const auto* g = grad_arr.data();
           const auto* h = hess_arr.data();
-          egg::Vec2 gv {g[0], g[1]};
-          egg::Mat2 hv {h[0], h[1], h[2], h[3]};
-          egg::Pt pos {pos_arr.data()[0], pos_arr.data()[1]};
-          egg::Vec2 delta = egg::newton_delta<2>(gv, hv, pos, tag, params_arr.data());
-          return py::array_t<double>(2, delta.data());
+          egg::Vec2 gv {static_cast<egg::real>(g[0]), static_cast<egg::real>(g[1])};
+          egg::Mat2 hv {static_cast<egg::real>(h[0]),
+                        static_cast<egg::real>(h[1]),
+                        static_cast<egg::real>(h[2]),
+                        static_cast<egg::real>(h[3])};
+          egg::Pt pos {static_cast<egg::real>(pos_arr.data()[0]),
+                       static_cast<egg::real>(pos_arr.data()[1])};
+          const std::vector<egg::real> params = narrow(params_arr);
+          egg::Vec2 delta = egg::newton_delta<2>(gv, hv, pos, tag, params.data());
+          return to_f64(delta.data(), 2);
       },
       py::arg("grad"),
       py::arg("hess"),

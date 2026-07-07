@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """mu(T): shape, shape+size, barrier + untangling variants.
 
 All metrics are pure scalar functions of T = A W^{-1}.
@@ -20,10 +28,12 @@ __all__ = [
 # MIRROR: keep in sync with egg.smoothing.batch._HESS_P (Python) and
 # egg::kHessP in src/metric.hpp (C++). Three copies across two languages.
 _HESS_P = np.array(
-    [[0.0, 0.0, 0.0, 1.0],
-     [0.0, 0.0, -1.0, 0.0],
-     [0.0, -1.0, 0.0, 0.0],
-     [1.0, 0.0, 0.0, 0.0]]
+    [
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ]
 )
 
 
@@ -45,8 +55,7 @@ def _shape2d_value_grad(T: np.ndarray) -> tuple[float, np.ndarray]:
     val = s / (2.0 * D) - 1.0
     coef = s / (2.0 * D * D)
     grad = np.array(
-        [[a / D - coef * d, b / D + coef * c],
-         [c / D + coef * b, d / D - coef * a]]
+        [[a / D - coef * d, b / D + coef * c], [c / D + coef * b, d / D - coef * a]]
     )
     return float(val), grad
 
@@ -62,7 +71,7 @@ def _shape2d_hess_T(T: np.ndarray) -> np.ndarray:
     H = (
         (1.0 / D) * np.eye(4)
         - (1.0 / (D * D)) * (np.outer(t, cof) + np.outer(cof, t))
-        + (s / (D ** 3)) * np.outer(cof, cof)
+        + (s / (D**3)) * np.outer(cof, cof)
         - (s / (2.0 * D * D)) * _HESS_P
     )
     return H
@@ -74,6 +83,7 @@ def _shape2d_hess_T(T: np.ndarray) -> np.ndarray:
 # Gradient:  dmu/dT = s*T/D^2 - (s^2/(2 D^3)) * cof(T)
 # Hessian:   H = 2 * g_c * g_c^T + 2*(mu_c+1) * H_c
 #             where g_c, H_c are the classic 2D shape metric gradient/Hessian.
+
 
 def _shape_value(T: np.ndarray) -> float:
     d = T.shape[-1]
@@ -101,8 +111,10 @@ def _shape_value_grad(T: np.ndarray) -> tuple[float, np.ndarray]:
     coef_s = s / (D * D)
     coef_cof = s * s / (2.0 * D * D * D)
     grad = np.array(
-        [[coef_s * a - coef_cof * d_, coef_s * b + coef_cof * c],
-         [coef_s * c + coef_cof * b, coef_s * d_ - coef_cof * a]]
+        [
+            [coef_s * a - coef_cof * d_, coef_s * b + coef_cof * c],
+            [coef_s * c + coef_cof * b, coef_s * d_ - coef_cof * a],
+        ]
     )
     return float(val), grad
 
@@ -125,6 +137,7 @@ def _shape_hess_T(T: np.ndarray) -> np.ndarray:
 
 
 # --- shape+size metric: shape + (det(T)-1)^2 ---
+
 
 def _shape_size_value(T: np.ndarray) -> float:
     if T.shape[-1] != 2:
@@ -168,6 +181,7 @@ def _shape_size_hess_T(T: np.ndarray) -> np.ndarray:
 
 # --- internal helpers ---
 
+
 def _untangle_surrogate(det_T: np.ndarray | float, delta: float) -> np.ndarray | float:
     """Smooth positive surrogate: h(tau) = 0.5*(tau + sqrt(tau^2 + 4*delta^2))."""
     return 0.5 * (det_T + np.sqrt(det_T * det_T + 4.0 * delta * delta))
@@ -184,6 +198,7 @@ def _get_hess_T_fn(metric: str):
 
 
 # --- public API ---
+
 
 def shape_metric(T: np.ndarray) -> float:
     """Condition-number shape metric (any d)."""
@@ -233,6 +248,7 @@ def metric_value_and_grad(
 
 # --- Jacobian helpers ---
 
+
 def _corner_jacobian_chain(s0: int, s1: int, W_inv: np.ndarray) -> np.ndarray:
     """Constant J = d vec(T) / d coords, shape (4, 6).
 
@@ -243,21 +259,26 @@ def _corner_jacobian_chain(s0: int, s1: int, W_inv: np.ndarray) -> np.ndarray:
     s0, s1 = int(s0), int(s1)
     wi = np.asarray(W_inv)
     dA = np.array(
-        [[-s0, 0.0, s0, 0.0, 0.0, 0.0],
-         [-s1, 0.0, 0.0, 0.0, s1, 0.0],
-         [0.0, -s0, 0.0, s0, 0.0, 0.0],
-         [0.0, -s1, 0.0, 0.0, 0.0, s1]]
+        [
+            [-s0, 0.0, s0, 0.0, 0.0, 0.0],
+            [-s1, 0.0, 0.0, 0.0, s1, 0.0],
+            [0.0, -s0, 0.0, s0, 0.0, 0.0],
+            [0.0, -s1, 0.0, 0.0, 0.0, s1],
+        ]
     )
     M = np.array(
-        [[wi[0, 0], wi[1, 0], 0.0, 0.0],
-         [wi[0, 1], wi[1, 1], 0.0, 0.0],
-         [0.0, 0.0, wi[0, 0], wi[1, 0]],
-         [0.0, 0.0, wi[0, 1], wi[1, 1]]]
+        [
+            [wi[0, 0], wi[1, 0], 0.0, 0.0],
+            [wi[0, 1], wi[1, 1], 0.0, 0.0],
+            [0.0, 0.0, wi[0, 0], wi[1, 0]],
+            [0.0, 0.0, wi[0, 1], wi[1, 1]],
+        ]
     )
     return M @ dA
 
 
 # --- Cell-level Hessians (2D, analytic NumPy) ---
+
 
 def cell_hessian_2d(
     base: np.ndarray,
@@ -277,22 +298,25 @@ def cell_hessian_2d(
     wi = np.asarray(W_inv)
 
     A = np.array(
-        [[nb0[0] - base[0], nb1[0] - base[0]],
-         [nb0[1] - base[1], nb1[1] - base[1]]]
+        [[nb0[0] - base[0], nb1[0] - base[0]], [nb0[1] - base[1], nb1[1] - base[1]]]
     )
     T = A @ wi
     H_T = _get_hess_T_fn(metric)(T)
     dA = np.array(
-        [[-1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-         [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-         [0.0, -1.0, 0.0, 1.0, 0.0, 0.0],
-         [0.0, -1.0, 0.0, 0.0, 0.0, 1.0]]
+        [
+            [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 0.0, 0.0, 1.0],
+        ]
     )
     M = np.array(
-        [[wi[0, 0], wi[1, 0], 0.0, 0.0],
-         [wi[0, 1], wi[1, 1], 0.0, 0.0],
-         [0.0, 0.0, wi[0, 0], wi[1, 0]],
-         [0.0, 0.0, wi[0, 1], wi[1, 1]]]
+        [
+            [wi[0, 0], wi[1, 0], 0.0, 0.0],
+            [wi[0, 1], wi[1, 1], 0.0, 0.0],
+            [0.0, 0.0, wi[0, 0], wi[1, 0]],
+            [0.0, 0.0, wi[0, 1], wi[1, 1]],
+        ]
     )
     J = M @ dA
     return J.T @ H_T @ J
@@ -319,8 +343,10 @@ def corner_cell_hessian_2d(
     wi = np.asarray(W_inv)
 
     A = np.array(
-        [[s0 * (nbr0[0] - corner[0]), s1 * (nbr1[0] - corner[0])],
-         [s0 * (nbr0[1] - corner[1]), s1 * (nbr1[1] - corner[1])]]
+        [
+            [s0 * (nbr0[0] - corner[0]), s1 * (nbr1[0] - corner[0])],
+            [s0 * (nbr0[1] - corner[1]), s1 * (nbr1[1] - corner[1])],
+        ]
     )
     T = A @ wi
     H_T = _get_hess_T_fn(metric)(T)

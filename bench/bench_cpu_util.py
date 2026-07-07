@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """Focused CPU-utilisation benchmark for the C++ coloured Gauss-Seidel sweep.
 
 Builds a large circle-in-rectangle O-grid, then runs many barrier sweeps on a
@@ -64,7 +72,9 @@ def main() -> None:
     )
     # Fraction of total wall the (multi-threaded) sweep represents — the closer to
     # 1, the more "Percent of CPU" reflects the sweep rather than setup.
-    print(f"sweep fraction of timed-region wall ≈ {dt / (dt + t_setup):.2f}", flush=True)
+    print(
+        f"sweep fraction of timed-region wall ≈ {dt / (dt + t_setup):.2f}", flush=True
+    )
 
 
 if __name__ == "__main__":

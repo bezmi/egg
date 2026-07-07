@@ -21,6 +21,14 @@ dependencies = [
   "scipy>=1.17.1",
 ]
 
+[dependency-groups]
+# Docs build: `uv run --group docs sphinx-build -b html docs docs/_build/html`
+docs = [
+  "sphinx>=8.2",
+  "pallets-sphinx-themes>=2.3",
+  "breathe>=4.36",
+]
+
 [tool.scikit-build]
 cmake.version = ">=3.25"
 cmake.build-type = "Release"
@@ -71,3 +79,8 @@ if.state = "editable"
 cmake.define.EGG_BUILD_TESTS = "ON"
 build.targets = []                  # [] = build the default (all) target, not just cpp_core
 
+
+# Python formatting/linting: ruff with default settings.
+# C++ formatting/linting: .clang-format / .clang-tidy.
+[tool.ruff]
+line-length = 88

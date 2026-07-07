@@ -8,7 +8,18 @@ Make sure you have podman installed.
 ./.devcontainer/podman-run.sh # CPU-only
 ./.devcontainer/podman-run.sh rocm
 ./.devcontainer/podman-run.sh cuda
+./.devcontainer/podman-run.sh all  # both CUDA + ROCm in one image (egg-gpu)
 ```
+
+Override the ROCm version with `--rocm-version` (before the backend), e.g.
+`./.devcontainer/podman-run.sh --rocm-version 7.0.2 rocm`. It maps to the
+Containerfile's `ROCM_VERSION` build arg and only affects `rocm`/`all` builds.
+
+`all` builds acpp with the CUDA *and* ROCm backends in a single image — the
+build needs no GPU, so it can produce a `core;cuda;hip` distribution for every
+supported platform from one host. At run time it passes through whichever
+vendor's GPU the host has a CDI spec for (`/etc/cdi/nvidia.yaml`,
+`/etc/cdi/amd.yaml`).
 
 On start, the container runs `uv sync` to build the project. This happens in both the CLI (`podman-run.sh`) and VS Code. The environment is then ready to use. For the next steps, see the editable workflow in [DEVELOPING.md](../DEVELOPING.md#a-devcontainer-workflow-recommended).
 
@@ -44,7 +55,7 @@ podman build --no-cache -t egg-dev .devcontainer
 
 Notes:
 
-- The GPU builds are separate images. Remove them by name: `podman rmi -f egg-rocm` or `podman rmi -f egg-cuda`.
+- The GPU builds are separate images. Remove them by name: `podman rmi -f egg-rocm`, `podman rmi -f egg-cuda`, or `podman rmi -f egg-gpu` (the `all` image).
 - The Python packages live in the repo, not the image. To install them fresh, delete the virtual environment first: `rm -rf .venv`.
 
 ## VS Code / Dev Containers

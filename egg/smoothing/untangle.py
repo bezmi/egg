@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """Modified-determinant continuation (delta schedule).
 
 Recovers a folded start (some ``det A <= 0``) to an all-positive-determinant mesh
@@ -27,10 +35,10 @@ class UntangleResult:
     """Outcome of an :func:`untangle` run."""
 
     converged: bool
-    min_det: float          # final raw min det A over the grid
-    delta: float            # final continuation parameter
-    outer_iters: int        # delta-steps taken
-    no_op: bool = False     # input already valid (margin met), nothing done
+    min_det: float  # final raw min det A over the grid
+    delta: float  # final continuation parameter
+    outer_iters: int  # delta-steps taken
+    no_op: bool = False  # input already valid (margin met), nothing done
 
 
 def grid_min_det(X: np.ndarray, energy_stencil: dict) -> float:
@@ -45,7 +53,7 @@ def untangle(
     grid,
     ctx,
     *,
-    shrink: float = 0.5,
+    shrink: float = 0.8,
     margin: float = 1e-9,
     sweeps_per_delta: int = 20,
     delta0_factor: float = 2.0,
@@ -87,7 +95,9 @@ def untangle(
         return UntangleResult(True, md, 0.0, 0, no_op=True)
 
     X_out, md_final, outer_iters, delta_final = cpp_untangle(
-        ctx, grid.global_nodes,
+        ctx,
+        grid,
+        grid.global_nodes,
         sweeps_per_delta=sweeps_per_delta,
         delta0_factor=delta0_factor,
         shrink=shrink,
@@ -100,4 +110,6 @@ def untangle(
         block.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]
 
     converged = md_final > margin
-    return UntangleResult(converged, md_final, float(delta_final), outer_iters, no_op=False)
+    return UntangleResult(
+        converged, md_final, float(delta_final), outer_iters, no_op=False
+    )

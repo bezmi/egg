@@ -1,3 +1,11 @@
+// Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+//
+// PolyForm Noncommercial License 2.0.0-pre.2
+// https://github.com/bezmi/egg/blob/main/LICENSE.md
+// Free to use and redistribute for personal and noncommercial purposes.
+// See the license for details.
+// For commercial licensing, contact s.imran@tuta.io
+
 // test_metric.cpp — shape_2d metric value/grad/Hessian parity.
 //
 // Asserts, for every curated golden sample (reference values from the NumPy
@@ -9,6 +17,7 @@
 //   * mu_hess_dual         == closed-form hess and golden hess    (2nd-order AD)
 #include "golden_metric.hpp"
 #include "metric.hpp"
+#include "real_tol.hpp"
 #include "ut_cfg.hpp"
 
 #include <cmath>
@@ -23,11 +32,15 @@ namespace
 constexpr double kTol = 1e-10;  // value / 1st-order
 constexpr double kTol2 = 1e-9;  // 2nd-order AD (looser; near-singular case)
 
-VecT to_vecT(const std::array<double, 4>& a) { return VecT {a[0], a[1], a[2], a[3]}; }
+VecT to_vecT(const std::array<double, 4>& a) { return VecT {static_cast<egg::real>(a[0]), static_cast<egg::real>(a[1]), static_cast<egg::real>(a[2]), static_cast<egg::real>(a[3])}; }
 
 // Absolute-or-relative closeness, robust to the larger Hessian magnitudes in
 // the near-singular sample.
-bool close(double a, double b, double tol) { return std::abs(a - b) <= tol * (1.0 + std::abs(b)); }
+bool close(double a, double b, double tol)
+{
+    tol = egg_test::real_tol(tol);
+    return std::abs(a - b) <= tol * (1.0 + std::abs(b));
+}
 
 }  // namespace
 

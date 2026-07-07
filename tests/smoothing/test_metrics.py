@@ -1,14 +1,20 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """Tests for TMOP quality metrics."""
 
 import numpy as np
 
-from egg.smoothing import metrics as m
 from egg.smoothing.metrics import (
     shape_metric,
     shape_metric_2d,
     shape_size_metric,
     untangle_surrogate,
-    metric_value,
     metric_value_and_grad,
 )
 
@@ -37,17 +43,13 @@ class TestShapeMetric:
     def test_rotation_invariance(self):
         T = np.array([[2.0, 0.0], [0.0, 0.5]])
         theta = 0.7
-        Q = np.array(
-            [[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]
-        )
+        Q = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
         T_rot = Q @ T @ Q.T
         np.testing.assert_allclose(shape_metric(T), shape_metric(T_rot), atol=1e-12)
 
     def test_scale_invariance(self):
         T = np.array([[2.0, 0.0], [0.0, 0.5]])
-        np.testing.assert_allclose(
-            shape_metric(T), shape_metric(3.0 * T), atol=1e-12
-        )
+        np.testing.assert_allclose(shape_metric(T), shape_metric(3.0 * T), atol=1e-12)
 
     def test_barrier_blowup(self):
         """μ → ∞ as det(T) → 0⁺."""
@@ -79,9 +81,7 @@ class TestShapeMetric2D:
     def test_rotation_invariance(self):
         T = np.array([[2.0, 0.0], [0.0, 0.5]])
         theta = 0.7
-        Q = np.array(
-            [[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]
-        )
+        Q = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
         T_rot = Q @ T @ Q.T
         np.testing.assert_allclose(
             shape_metric_2d(T), shape_metric_2d(T_rot), atol=1e-12
@@ -108,9 +108,7 @@ class TestShapeSizeMetric:
     def test_det_one_gives_zero_size_term(self):
         """When det(T) = 1, the size term is zero."""
         T = np.array([[1.5, 0.0], [0.0, 1.0 / 1.5]])
-        np.testing.assert_allclose(
-            shape_size_metric(T), shape_metric(T), atol=1e-14
-        )
+        np.testing.assert_allclose(shape_size_metric(T), shape_metric(T), atol=1e-14)
 
 
 class TestUntangleSurrogate:
@@ -121,12 +119,8 @@ class TestUntangleSurrogate:
 
     def test_h_converges_as_delta_zero(self):
         """h(τ, δ) → τ as δ → 0 for τ > 0."""
-        np.testing.assert_allclose(
-            untangle_surrogate(2.0, 0.0), 2.0, atol=1e-14
-        )
-        np.testing.assert_allclose(
-            untangle_surrogate(2.0, 1e-10), 2.0, atol=1e-8
-        )
+        np.testing.assert_allclose(untangle_surrogate(2.0, 0.0), 2.0, atol=1e-14)
+        np.testing.assert_allclose(untangle_surrogate(2.0, 1e-10), 2.0, atol=1e-8)
 
     def test_h_at_negative_tau(self):
         """h is finite and positive for τ < 0."""

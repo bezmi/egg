@@ -1,3 +1,11 @@
+// Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+//
+// PolyForm Noncommercial License 2.0.0-pre.2
+// https://github.com/bezmi/egg/blob/main/LICENSE.md
+// Free to use and redistribute for personal and noncommercial purposes.
+// See the license for details.
+// For commercial licensing, contact s.imran@tuta.io
+
 #pragma once
 
 #include <cstddef>
@@ -11,13 +19,15 @@ namespace stdex = std::experimental;
 namespace egg
 {
 
-// Non-owning multidimensional views, trivially
-// copyable, so they can be captured by value into a SYCL kernel
+/// @name Non-owning multidimensional views
+/// Trivially copyable, so capturable by value into a SYCL kernel.
+/// @{
 template <class T> using View1 = stdex::mdspan<T, stdex::dextents<std::size_t, 1>>;
 template <class T> using View2 = stdex::mdspan<T, stdex::dextents<std::size_t, 2>>;
 template <class T> using View3 = stdex::mdspan<T, stdex::dextents<std::size_t, 3>>;
+/// @}
 
-// Move-only RAII owner of a device USM array of `T` on a given queue.
+/// Move-only RAII owner of a device USM array of T on a given queue.
 template <class T> class UsmBuffer
 {
   public:
@@ -28,7 +38,7 @@ template <class T> class UsmBuffer
     {
     }
 
-    // Allocate and upload a host vector in one step.
+    /// Allocate and upload a host vector in one step.
     UsmBuffer(sycl::queue q, const std::vector<T>& host) : UsmBuffer(q, host.size())
     {
         if (n_) { q_.memcpy(ptr_, host.data(), n_ * sizeof(T)).wait(); }

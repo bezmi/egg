@@ -1,3 +1,11 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
 """PyVista (2D+3D grids) + matplotlib (scalar diagnostics)."""
 
 from __future__ import annotations
@@ -18,8 +26,32 @@ __all__ = [
     "plot_topology",
     "plot_grid",
     "plot_quality",
+    "plot_convergence",
     "LiveGridView",
 ]
+
+
+def plot_convergence(
+    energy_history,
+    mindet_history,
+    *,
+    mindet_title="min det A",
+    xlabel="chunk",
+    show=True,
+):
+    """Two-pane matplotlib figure: TMOP energy and min det A per step."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+    ax[0].plot(energy_history, "-o", ms=3)
+    ax[0].set(title="TMOP energy", xlabel=xlabel, ylabel="F")
+    ax[1].axhline(0, color="r", lw=0.8)
+    ax[1].plot(mindet_history, "-o", ms=2)
+    ax[1].set(title=mindet_title, xlabel=xlabel)
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
 
 
 def _get_plotter(show: bool) -> "pv.Plotter | None":
@@ -63,14 +95,21 @@ def plot_geometry_entity(
     if isinstance(entity, type) or entity.dim == 1:
         t_vals = np.linspace(0, 1, n_curve)
         if hasattr(entity, "start") and hasattr(entity, "end"):
-            pts = np.array([entity.project(entity.start + t * (entity.end - entity.start)) for t in t_vals])
+            pts = np.array(
+                [
+                    entity.project(entity.start + t * (entity.end - entity.start))
+                    for t in t_vals
+                ]
+            )
         else:
             # Circle: sample roughly around it
             angles = np.linspace(0, 2 * np.pi, n_curve)
-            pts = np.column_stack([
-                entity.center[0] + entity.radius * np.cos(angles),
-                entity.center[1] + entity.radius * np.sin(angles),
-            ])
+            pts = np.column_stack(
+                [
+                    entity.center[0] + entity.radius * np.cos(angles),
+                    entity.center[1] + entity.radius * np.sin(angles),
+                ]
+            )
     else:
         # Generic: just project some reference points (not exhaustive)
         pts = np.array([entity.project(np.array([0.0, 0.0]))])
@@ -90,7 +129,9 @@ def plot_geometry_entity(
     for idx in sample_idxs:
         q = pts[idx]
         q_3d = pts_3d[idx]
-        scale = 0.3 * np.linalg.norm(entity.project(np.array([5.0, 5.0])) - q) * 0.2 + 0.15
+        scale = (
+            0.3 * np.linalg.norm(entity.project(np.array([5.0, 5.0])) - q) * 0.2 + 0.15
+        )
 
         try:
             n = entity.normal(q)
@@ -148,11 +189,15 @@ def plot_projection(
 
     # Source points
     src_pd = pv.PolyData(points_3d)
-    plotter.add_mesh(src_pd, color="orange", point_size=8, render_points_as_spheres=True)
+    plotter.add_mesh(
+        src_pd, color="orange", point_size=8, render_points_as_spheres=True
+    )
 
     # Projected points
     dst_pd = pv.PolyData(proj_3d)
-    plotter.add_mesh(dst_pd, color="green", point_size=10, render_points_as_spheres=True)
+    plotter.add_mesh(
+        dst_pd, color="green", point_size=10, render_points_as_spheres=True
+    )
 
     # Connection lines
     for i in range(len(points)):
@@ -174,23 +219,31 @@ def _add_entity_curve(plotter: "pv.Plotter", entity: "GeometryEntity") -> None:
     """Add the entity curve to the plotter (internal helper)."""
     import pyvista as pv
 
-    if hasattr(entity, "center") and hasattr(entity, "radius"):
+    if hasattr(entity, "segments"):  # CompositePath
+        for seg in entity.segments:
+            _add_entity_curve(plotter, seg)
+        return
+
+    if hasattr(entity, "eval"):
+        # Trimmed parametric curve: sample within its own parameter range.
+        t_vals = np.linspace(entity.t0, entity.t1, 200)
+        pts2 = np.array([entity.eval(t) for t in t_vals])
+    elif hasattr(entity, "center") and hasattr(entity, "radius"):
+        # Analytic full circle.
         angles = np.linspace(0, 2 * np.pi, 200)
-        pts = np.column_stack([
-            entity.center[0] + entity.radius * np.cos(angles),
-            entity.center[1] + entity.radius * np.sin(angles),
-            np.zeros(200),
-        ])
+        pts2 = np.column_stack(
+            [
+                entity.center[0] + entity.radius * np.cos(angles),
+                entity.center[1] + entity.radius * np.sin(angles),
+            ]
+        )
     elif hasattr(entity, "start") and hasattr(entity, "end"):
         t_vals = np.linspace(0, 1, 200)
-        pts = np.column_stack([
-            entity.start[0] + t_vals * (entity.end[0] - entity.start[0]),
-            entity.start[1] + t_vals * (entity.end[1] - entity.start[1]),
-            np.zeros(200),
-        ])
+        pts2 = entity.start[None, :] + t_vals[:, None] * (entity.end - entity.start)
     else:
         return
-    curve = pv.PolyData(pts)
+    pts = np.column_stack([pts2, np.zeros(len(pts2))])
+    curve = pv.lines_from_points(pts)
     plotter.add_mesh(curve, color="black", line_width=2)
 
 
@@ -215,6 +268,15 @@ def plot_topology(
 
     import pyvista as pv
 
+    # Marker sizes scale with the topology extent so mm-scale and m-scale
+    # geometries render alike.
+    positions = np.array([c.position for c in topology.corners.values()])
+    span = float(np.linalg.norm(positions.max(axis=0) - positions.min(axis=0)))
+    if span <= 0.0:
+        span = 1.0
+    corner_radius = 0.015 * span
+    singularity_size = 0.03 * span
+
     for name, spec in topology.block_specs.items():
         corner_positions = []
         for cname in spec.corner_names:
@@ -231,7 +293,7 @@ def plot_topology(
 
         corners_order = list(product((0, 1), repeat=d))
         for i, offset_a in enumerate(corners_order):
-            for offset_b in corners_order[i + 1:]:
+            for offset_b in corners_order[i + 1 :]:
                 diff = sum(abs(a - b) for a, b in zip(offset_a, offset_b))
                 if diff == 1:
                     name_a = spec.corner_names[corners_order.index(offset_a)]
@@ -245,13 +307,21 @@ def plot_topology(
 
     # Corners
     for name, corner in topology.corners.items():
-        pos = np.append(corner.position, 0.0) if len(corner.position) == 2 else corner.position
+        pos = (
+            np.append(corner.position, 0.0)
+            if len(corner.position) == 2
+            else corner.position
+        )
         color = "blue" if corner.fixed else "green"
-        sphere = pv.Sphere(radius=0.08, center=pos)
+        sphere = pv.Sphere(radius=corner_radius, center=pos)
         plotter.add_mesh(sphere, color=color)
         plotter.add_point_labels(
-            np.array([pos]), [name], font_size=12, point_size=0,
-            shape_opacity=0.5, always_visible=True,
+            np.array([pos]),
+            [name],
+            font_size=12,
+            point_size=0,
+            shape_opacity=0.5,
+            always_visible=True,
         )
 
     # Singularities
@@ -264,8 +334,7 @@ def plot_topology(
             pos = None
             for ci_logical, cname in zip(corner_indices, spec.corner_names):
                 actual = tuple(
-                    0 if c == 0 else shape[dim] - 1
-                    for dim, c in enumerate(ci_logical)
+                    0 if c == 0 else shape[dim] - 1 for dim, c in enumerate(ci_logical)
                 )
                 if actual == s.logical_idx:
                     corner = topology.corners[cname]
@@ -274,12 +343,21 @@ def plot_topology(
                     break
             if pos is None:
                 pos = np.zeros(3)
-            box = pv.Cube(center=pos, x_length=0.16, y_length=0.16, z_length=0.16)
+            box = pv.Cube(
+                center=pos,
+                x_length=singularity_size,
+                y_length=singularity_size,
+                z_length=singularity_size,
+            )
             plotter.add_mesh(box, color="red", style="wireframe", line_width=2)
             plotter.add_point_labels(
-                np.array([pos + np.array([0.15, 0.1, 0.0])]),
+                np.array(
+                    [pos + np.array([singularity_size, 0.6 * singularity_size, 0.0])]
+                ),
                 [f"v={s.valence}"],
-                font_size=10, point_size=0, always_visible=True,
+                font_size=10,
+                point_size=0,
+                always_visible=True,
             )
 
     plotter.view_xy()
@@ -289,16 +367,24 @@ def plot_topology(
     return plotter
 
 
-def plot_grid(grid, *, show: bool = True) -> Optional["pv.Plotter"]:
+def plot_grid(
+    grid, *, show: bool = True, geometry_entities: list | None = None
+) -> Optional["pv.Plotter"]:
     """Render a structured multiblock grid as wireframe.
 
     Each block gets a distinct color. Works for 2D and 3D grids.
+    ``geometry_entities`` are drawn as black curves over the wireframe
+    (2D only), so boundary nodes can be checked against their geometry.
     """
     plotter = _get_plotter(show)
     if plotter is None:
         return None
 
     import pyvista as pv
+
+    if geometry_entities:
+        for entity in geometry_entities:
+            _add_entity_curve(plotter, entity)
 
     # Greedy-colour the block adjacency graph so adjacent blocks never
     # share a wireframe colour.
@@ -418,8 +504,11 @@ def plot_quality_field(
                 surf.cell_data["quality"] = values.ravel()
                 scalars_all.extend(values.ravel())
                 plotter.add_mesh(
-                    surf, scalars="quality", cmap="viridis",
-                    show_scalar_bar=(len(mesh_blocks) == 0), clim=None,
+                    surf,
+                    scalars="quality",
+                    cmap="viridis",
+                    show_scalar_bar=(len(mesh_blocks) == 0),
+                    clim=None,
                 )
                 mesh_blocks.append(surf)
 
@@ -454,8 +543,8 @@ def plot_energy_history(energy_history: list[float], *, show: bool = True) -> No
 
 
 def plot_quality(grid, *, show: bool = True):
-    """Plot quality metrics (deferred to M3)."""
-    raise NotImplementedError("Quality plotting deferred to M3 (metrics)")
+    """Plot quality metrics (not yet implemented)."""
+    raise NotImplementedError("Quality plotting is not implemented yet")
 
 
 def plot_grid_live(
@@ -504,8 +593,14 @@ def _add_grid_meshes(
     import pyvista as pv
 
     block_fill_colors = [
-        "lightblue", "lightcoral", "lightgreen", "lightyellow",
-        "lightsalmon", "plum", "palegreen", "wheat",
+        "lightblue",
+        "lightcoral",
+        "lightgreen",
+        "lightyellow",
+        "lightsalmon",
+        "plum",
+        "palegreen",
+        "wheat",
     ]
     block_edge_colors = ["cyan", "magenta", "yellow", "lime", "orange", "white"]
 
@@ -541,8 +636,11 @@ def _add_grid_meshes(
             faces_array = np.hstack(cells)
             surf = pv.PolyData(pts_3d, faces_array)
             plotter.add_mesh(
-                surf, color=block_fill_colors[bi % len(block_fill_colors)],
-                opacity=0.35, show_edges=True, edge_color="gray",
+                surf,
+                color=block_fill_colors[bi % len(block_fill_colors)],
+                opacity=0.35,
+                show_edges=True,
+                edge_color="gray",
                 line_width=0.5,
             )
 
@@ -551,8 +649,10 @@ def _add_grid_meshes(
         z = np.zeros_like(x)
         sg = pv.StructuredGrid(x, y, z)
         plotter.add_mesh(
-            sg, color=block_edge_colors[bi % len(block_edge_colors)],
-            style="wireframe", line_width=1.5,
+            sg,
+            color=block_edge_colors[bi % len(block_edge_colors)],
+            style="wireframe",
+            line_width=1.5,
         )
 
     for bi, block in enumerate(grid.blocks):
@@ -587,15 +687,16 @@ class LiveGridView:
     """
 
     _FILL_COLORS = [
-        "lightblue", "lightcoral", "lightgreen", "lightyellow",
-        "lightsalmon", "plum", "palegreen", "wheat",
+        "lightblue",
+        "lightcoral",
+        "lightgreen",
+        "lightyellow",
+        "lightsalmon",
+        "plum",
+        "palegreen",
+        "wheat",
     ]
     _EDGE_COLORS = ["cyan", "magenta", "yellow", "lime", "orange", "white"]
-
-    _GRAPH_COLOUR_MAP = [
-        "red", "green", "blue", "orange", "purple", "brown",
-        "pink", "cyan", "magenta", "yellow",
-    ]
 
     def __init__(
         self,
@@ -603,7 +704,6 @@ class LiveGridView:
         grid,
         boundary_tags: dict[int, str] | None = None,
         geometry_entities: list | None = None,
-        graph_colours: "list[int] | None" = None,
         show_edge_verts: bool = True,
     ) -> None:
         import pyvista as pv
@@ -611,7 +711,6 @@ class LiveGridView:
         self.plotter = plotter
         self.grid = grid
         boundary_tags = boundary_tags or {}
-        self._graph_clouds: list = []
 
         if geometry_entities:
             for entity in geometry_entities:
@@ -637,8 +736,8 @@ class LiveGridView:
             fill_colour_idx[bi] = c
 
         # Per-block fill (PolyData) + wireframe (StructuredGrid), built once.
-        self._fills: list = []          # (surf, block_idx)
-        self._wires: list = []          # (sg, block_idx)
+        self._fills: list = []  # (surf, block_idx)
+        self._wires: list = []  # (sg, block_idx)
         for bi, block in enumerate(grid.blocks):
             if block.d != 2:
                 continue
@@ -654,20 +753,28 @@ class LiveGridView:
             if cells:
                 surf = pv.PolyData(pts_3d, np.hstack(cells))
                 plotter.add_mesh(
-                    surf, color=self._FILL_COLORS[fill_colour_idx[bi] % len(self._FILL_COLORS)],
-                    opacity=0.35, show_edges=True, edge_color="gray", line_width=0.5,
+                    surf,
+                    color=self._FILL_COLORS[
+                        fill_colour_idx[bi] % len(self._FILL_COLORS)
+                    ],
+                    opacity=0.35,
+                    show_edges=True,
+                    edge_color="gray",
+                    line_width=0.5,
                 )
                 self._fills.append((surf, bi))
 
             sg = pv.StructuredGrid(*self._wire_coords(nodes))
             plotter.add_mesh(
-                sg, color=self._EDGE_COLORS[bi % len(self._EDGE_COLORS)],
-                style="wireframe", line_width=1.5,
+                sg,
+                color=self._EDGE_COLORS[bi % len(self._EDGE_COLORS)],
+                style="wireframe",
+                line_width=1.5,
             )
             self._wires.append((sg, bi))
 
         # Boundary markers: one point cloud per tag, updated in place.
-        self._clouds: list = []         # (cloud, gids)
+        self._clouds: list = []  # (cloud, gids)
         if show_edge_verts:
             for tag, color in (("circle", "red"), ("outer", "blue")):
                 gids = np.array(
@@ -677,25 +784,12 @@ class LiveGridView:
                     continue
                 cloud = pv.PolyData(self._cloud_points(gids))
                 plotter.add_mesh(
-                    cloud, color=color, point_size=10, render_points_as_spheres=True,
-                )
-                self._clouds.append((cloud, gids))
-
-        # Graph-colour point clouds: one per colour, rendered as small spheres.
-        if graph_colours is not None:
-            colours_np = np.asarray(graph_colours, dtype=int)
-            max_c = int(colours_np.max()) if len(colours_np) > 0 else -1
-            for c in range(max_c + 1):
-                gids = np.where(colours_np == c)[0]
-                if gids.size == 0:
-                    continue
-                color = self._GRAPH_COLOUR_MAP[c % len(self._GRAPH_COLOUR_MAP)]
-                cloud = pv.PolyData(self._cloud_points(gids))
-                plotter.add_mesh(
-                    cloud, color=color, point_size=6,
+                    cloud,
+                    color=color,
+                    point_size=10,
                     render_points_as_spheres=True,
                 )
-                self._graph_clouds.append((cloud, gids))
+                self._clouds.append((cloud, gids))
 
     @staticmethod
     def _fill_points(nodes) -> np.ndarray:
@@ -723,14 +817,13 @@ class LiveGridView:
             )
         for cloud, gids in self._clouds:
             cloud.points = self._cloud_points(gids)
-        for cloud, gids in self._graph_clouds:
-            cloud.points = self._cloud_points(gids)
         if render:
             self.plotter.render()
 
 
-def animate_pipeline(grid, geometry_entities, steps, *, title="pipeline",
-                     graph_colours=None, show_edge_verts=True):
+def animate_pipeline(
+    grid, geometry_entities, steps, *, title="pipeline", show_edge_verts=True
+):
     """Drive a :func:`egg.pipeline.generate_steps` generator from a PyVista
     timer so the grid animates the folded → untangled → smoothed transition.
 
@@ -744,15 +837,18 @@ def animate_pipeline(grid, geometry_entities, steps, *, title="pipeline",
     def _fmt(info: dict) -> str:
         return " ".join(
             f"{k}={v:.4e}" if isinstance(v, float) else f"{k}={v}"
-            for k, v in info.items())
+            for k, v in info.items()
+        )
 
-    tags = {g: ("circle" if isinstance(e, Circle) else "outer")
-            for g, e in grid.dof_constraints.items()}
+    tags = {
+        g: ("circle" if isinstance(e, Circle) else "outer")
+        for g, e in grid.dof_constraints.items()
+    }
 
     plotter = pv.Plotter()
-    view = LiveGridView(plotter, grid, tags, geometry_entities,
-                        graph_colours=graph_colours,
-                        show_edge_verts=show_edge_verts)
+    view = LiveGridView(
+        plotter, grid, tags, geometry_entities, show_edge_verts=show_edge_verts
+    )
     plotter.view_xy()
     plotter.show_axes()
     plotter.add_text(f"{title}: tangled start", name="t", font_size=12)

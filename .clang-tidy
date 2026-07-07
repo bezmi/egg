@@ -26,6 +26,7 @@ Checks: >
      google-build-namespaces,
      google-global-names-in-headers,
      misc-*,
+       -misc-include-cleaner,
        -misc-const-correctness,
        -misc-non-private-member-variables-in-classes,
        -misc-no-recursion,
