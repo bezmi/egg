@@ -22,37 +22,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from driver import finish, parse_single_args
-from egg.pipeline import PipelineConfig, generate_steps
-from egg.smoothing import build_boundary_layer_target
-from topologies import build_circle_in_rectangle
+from egg.pipeline import generate_steps
+from topologies import setup_single
 
 
 def main():
     a = parse_single_args("folded circle-in-rectangle → untangle → smooth")
-
-    # Geometry + topology; optional boundary-layer spec on the circle.
-    bl = (
-        dict(first_height=a.bl_first_height, growth=a.bl_growth, n_fixed=a.pin_layers)
-        if a.bl_first_height > 0.0
-        else None
-    )
-    topo, ents = build_circle_in_rectangle(rough=True, bl=bl)
-
-    # Quality target (aspect-ratio clustering where specs exist), grid, and
-    # the step-wise pipeline: TFI init -> boundary snap -> untangle -> TMOP
-    # (-> pinned layers with --pin-layers).
-    target = build_boundary_layer_target(topo)
-    grid = topo.initialize_grid()
-    cfg = PipelineConfig(
-        sweeps_per_delta=a.sweeps_per_delta,
-        tmop_sweeps=a.tmop_sweeps,
-        tmop_chunk=a.chunk,
-        tmop_smoother=a.smoother,
-        omega=a.omega,
-        device=a.device,
-        pin_sweeps=a.pin_sweeps if bl and a.pin_layers > 0 else 0,
-    )
-    steps = generate_steps(grid, target, cfg, untangle_direct=not a.plot_live)
+    topo, ents, grid, cfg = setup_single(vars(a), rough=True)
+    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
 
     finish(
         grid,
@@ -64,6 +41,25 @@ def main():
         mindet_title="min det A (untangle+TMOP)",
     )
 
+
+if __name__ == "__egg_webui__":  # running inside the egg web UI
+    import egg_webui
+
+    # CLI defaults, mirroring driver.py — edit freely
+    a = egg_webui.params(
+        bl_first_height=0.0,
+        bl_growth=1.3,
+        pin_layers=0,
+        pin_sweeps=500,
+        sweeps_per_delta=200,
+        tmop_sweeps=1000,
+        chunk=100,
+        smoother="jacobi",
+        omega=0.8,
+        device="cpu",
+    )
+    topo, ents, grid, cfg = setup_single(a, rough=True)
+    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
 
 if __name__ == "__main__":
     main()

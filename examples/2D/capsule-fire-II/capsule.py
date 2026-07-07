@@ -20,6 +20,24 @@ One deviation from the gdtk case: the outflow is vertical rather than
 slanted, meeting the (horizontal) post-shoulder wall at a right angle so
 the boundary-layer cells stay orthogonal into that corner.
 
+The acute (~36°) corner where the inflow arc meets the outflow gets the
+best treatment found across an extensive comparison (nested 3-valent
+dipole + the size-aware ``shape_size`` metric, both on by default):
+
+- ``dipole=True`` telescopes n nested 3-valent splits into the corner
+  block, refining the corner cell geometrically from topology alone.
+- ``metric="shape_size"`` adds ``(det T - 1)^2`` to the objective, so the
+  smoother actively equalises cell areas (the pure shape metric is
+  scale-invariant and cannot).
+
+Measured at res 10x10 (cell-area CV / max-min ratio): stock + shape
+1.78 / 568; dipole + shape 0.74 / 400; stock + shape_size 0.65 / 47;
+**dipole + shape_size 0.47 / 79** — and with the BL target active the
+combination still wins (0.53 / 41 vs 1.00 / 419). Set ``dipole=False`` /
+``metric="shape"`` to reproduce the standard single-block-corner approach.
+The other corner experiments (boundary fan, apex split, sliding corner,
+reversed 5→3 polarity) live in the git history of this file.
+
 The command-line surface lives in ``driver.py``; run
 ``uv run capsule.py --help`` for options.
 """
@@ -64,21 +82,41 @@ def build_paths():
     return outer, body, south, north
 
 
-def build_capsule(res_i=20, res_j=20, bl_first_height=0.0, bl_growth=1.3, n_fixed=0):
-    """3 x 12 block array between the capsule body and the outer arc."""
+def build_capsule(
+    res_i=20, res_j=20, bl_first_height=0.0, bl_growth=1.3, n_fixed=2, dipole=True
+):
+    """3 x 12 block array between the capsule body and the outer arc.
+
+    With ``dipole`` (default) the inflow/outflow corner block is rebuilt
+    around n nested 3-valent splits telescoping into the acute corner —
+    every level's diagonal runs from the previous singularity to the new
+    one and its lines land on the inflow and outflow faces, wrapping the
+    shrinking corner block. Adding a level regularises the previous
+    singularity to 4-valent, so ANY n carries exactly one 3-valent (the
+    innermost s_n) and one 5-valent (c1_11, the classic 3-5 pair) — a
+    geometric corner refinement built purely from topology, every node
+    free. ``dipole=False`` keeps the plain tensor block array.
+    """
     outer, body, south, north = build_paths()
 
-    # Grid edges (axis 0 = inflow -> wall, axis 1 = along the body).
-    inflow = Edge(outer)  # west, symmetry -> outflow
-    wall = Edge(body, arc_length=True)  # east, symmetry -> outflow
-    symmetry = Edge(south)  # south, inflow -> wall
-    outflow = Edge(north)  # north, inflow -> wall
+    # Grid edges (axis 0 = inflow -> wall, axis 1 = along the body). Naming each
+    # edge auto-derives its SU2 marker on every associated face (the block array
+    # associates the outer faces below), so no tag_boundary calls are needed.
+    inflow = Edge(outer, name="inflow")  # west, symmetry -> outflow
+    wall = Edge(body, arc_length=True, name="wall")  # east, symmetry -> outflow
+    symmetry = Edge(south, name="symmetry")  # south, inflow -> wall
+    outflow = Edge(north, name="outflow")  # north, inflow -> wall
 
     nib, njb = 3, 12
+    j1 = njb - 1
     b = TopologyBuilder(d=2)
+
     # Sub-block corners on the bounding paths (TFI inside), blocks from the
     # shared corner objects, boundary faces associated with their edges.
-    _corner, names = b.add_block_array(
+    # With the dipole, the corner block (0, j1) is skipped and rebuilt by
+    # hand below.
+    skip = {(0, j1)} if dipole else set()
+    corner, names = b.add_block_array(
         south=symmetry,
         north=outflow,
         west=inflow,
@@ -86,13 +124,66 @@ def build_capsule(res_i=20, res_j=20, bl_first_height=0.0, bl_growth=1.3, n_fixe
         nib=nib,
         njb=njb,
         res=(nib * res_i, njb * res_j),
+        skip=skip,
     )
-    for j in range(njb):
-        b.tag_boundary("inflow", names[0][j], 0, 0)
-        b.tag_boundary("wall", names[nib - 1][j], 0, 1)
-    for i in range(nib):
-        b.tag_boundary("symmetry", names[i][0], 1, 0)
-        b.tag_boundary("outflow", names[i][njb - 1], 1, 1)
+    # The array associated the outer faces with their named edges, so inflow /
+    # wall / symmetry / outflow markers auto-derive.
+
+    boundary = []
+    if dipole:
+        from egg.geometry.frontend2d import tfi_point
+
+        n = 2  # nesting depth (1 = the plain 3-block dipole)
+        f = 0.5  # per-level extent shrink toward the corner
+        # Radial cells per ring, outermost -> innermost. This is each
+        # ring's one free count (tangential counts are inherited from the
+        # array: res_i along the arc, res_j along the outflow), so the
+        # cell size blends into the corner at a controllable rate: with
+        # extents shrinking by f, equal counts already halve the radial
+        # size per ring.
+        kr = [max(2, res_j // 2)] * n
+        u1, v1 = 1 / nib, 1 - 1 / njb  # b0_11's outflow/inflow face spans
+        s_prev, an_prev, aw_prev = corner[1, j1], corner[1, njb], corner[0, j1]
+        for m in range(1, n + 1):
+            um, vm = u1 * f**m, 1 - (1 - v1) * f**m
+            b.add_corner(f"an{m}", outflow.place_node(um), fixed=False)
+            b.add_corner(f"aw{m}", inflow.place_node(vm), fixed=False)
+            b.add_corner(
+                f"s{m}",
+                tfi_point(um, vm, symmetry, outflow, inflow, wall),
+                fixed=False,
+            )
+            b.add_block(
+                f"b0_11b{m}",
+                sw=f"s{m}",
+                se=s_prev,
+                ne=an_prev,
+                nw=f"an{m}",
+                res=(kr[m - 1], res_j),
+            )
+            b.add_block(
+                f"b0_11c{m}",
+                sw=aw_prev,
+                se=s_prev,
+                ne=f"s{m}",
+                nw=f"aw{m}",
+                res=(res_i, kr[m - 1]),
+            )
+            boundary.append((f"b0_11c{m}", 0, 0, inflow))
+            boundary.append((f"b0_11b{m}", 1, 1, outflow))
+            s_prev, an_prev, aw_prev = f"s{m}", f"an{m}", f"aw{m}"
+        b.add_block(
+            "b0_11a",
+            sw=aw_prev,
+            se=s_prev,
+            ne=an_prev,
+            nw=corner[0, njb],
+            res=(res_i, res_j),
+        )
+        boundary.append(("b0_11a", 0, 0, inflow))
+        boundary.append(("b0_11a", 1, 1, outflow))
+    for name, axis, side, edge in boundary:
+        b.associate(name, axis, side, edge)  # marker auto-derives from edge name
 
     if bl_first_height > 0.0:
         # relax_orthogonality is a no-op while the outflow meets the wall at
@@ -108,13 +199,49 @@ def build_capsule(res_i=20, res_j=20, bl_first_height=0.0, bl_growth=1.3, n_fixe
         )
 
     topology = b.build()
-    entities = {
-        "inflow": inflow.entity,
-        "wall": wall.entity,
-        "symmetry": symmetry.entity,
-        "outflow": outflow.entity,
-    }
-    return topology, entities
+    return topology, topology.entities
+
+
+def setup(a):
+    """Topology, grid, and config from parsed args — shared by the CLI
+    ``main()`` and the web UI (which passes the parser defaults).
+
+    NB: ``--pin-layers`` (→ ``n_fixed``) only takes effect when
+    ``--bl-first-height`` > 0 — without a first height there is no
+    boundary layer to pin, and ``--pin-sweeps`` pins those same layers,
+    so it too is a no-op without one.
+    """
+    topo, ents = build_capsule(
+        res_i=a["res_i"],
+        res_j=a["res_j"],
+        bl_first_height=a["bl_first_height"],
+        bl_growth=a["bl_growth"],
+        n_fixed=a["pin_layers"],
+        dipole=a.get("dipole", True),
+    )
+
+    # --pin-layers > 0 smooths against the boundary-layer clustering target
+    # and pins the first n_fixed layers exactly; the default path runs on the
+    # plain metric (no clustering) and restores the wall spacing with the
+    # respace post-pass. cluster_boundary_layers picks between them: the
+    # pipeline builds the clustering target from the set_boundary_layer specs
+    # itself, sizing the shape_size far field correctly (see PipelineConfig).
+    pin = a["bl_first_height"] > 0.0 and a["pin_layers"] > 0
+    grid = topo.initialize_grid()
+    metric = a.get("metric", "shape")
+    cfg = PipelineConfig(
+        sweeps_per_delta=a["sweeps_per_delta"],
+        tmop_sweeps=a["tmop_sweeps"],
+        tmop_chunk=a["chunk"],
+        tmop_smoother=a["smoother"],
+        tmop_metric=metric,
+        cluster_boundary_layers=pin,
+        omega=a["omega"],
+        device=a["device"],
+        pin_sweeps=a["pin_sweeps"] if pin else 0,
+        respace=a["bl_first_height"] > 0.0 and not pin,
+    )
+    return topo, ents, grid, cfg
 
 
 def main():
@@ -124,35 +251,9 @@ def main():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from driver import finish, parse_args
 
-    from egg.smoothing import build_boundary_layer_target
-
     a = parse_args()
-
-    topo, ents = build_capsule(
-        res_i=a.res_i,
-        res_j=a.res_j,
-        bl_first_height=a.bl_first_height,
-        bl_growth=a.bl_growth,
-        n_fixed=a.pin_layers,
-    )
-
-    # --pin-layers > 0 smooths against the aspect-ratio target and pins the
-    # first n_fixed layers exactly; the default path runs the pure shape
-    # metric and restores the wall spacing with the respace post-pass.
-    pin = a.bl_first_height > 0.0 and a.pin_layers > 0
-    target = build_boundary_layer_target(topo) if pin else None
-    grid = topo.initialize_grid()
-    cfg = PipelineConfig(
-        sweeps_per_delta=a.sweeps_per_delta,
-        tmop_sweeps=a.tmop_sweeps,
-        tmop_chunk=a.chunk,
-        tmop_smoother=a.smoother,
-        omega=a.omega,
-        device=a.device,
-        pin_sweeps=a.pin_sweeps if pin else 0,
-        respace=a.bl_first_height > 0.0 and not pin,
-    )
-    steps = generate_steps(grid, target, cfg, untangle_direct=not a.plot_live)
+    topo, ents, grid, cfg = setup(vars(a))
+    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
 
     finish(
         grid,
@@ -164,6 +265,32 @@ def main():
         mindet_title="min det A (TMOP only)",
     )
 
+
+if __name__ == "__egg_webui__":  # running inside the egg web UI
+    import egg_webui
+
+    # CLI defaults, mirroring driver.py — edit freely
+    a = egg_webui.params(
+        res_i=10,
+        res_j=10,
+        bl_first_height=4.0e-4,
+        bl_growth=1.3,
+        pin_layers=2,
+        pin_sweeps=40,
+        sweeps_per_delta=20,
+        tmop_sweeps=5000,
+        chunk=10,
+        smoother="jacobi",
+        # editable() surfaces a value in the run-parameters panel with a
+        # typed input; choices=[...] renders a dropdown. The classic
+        # combination for comparison: metric="shape", dipole=False.
+        metric=egg_webui.editable("shape_size", choices=["shape", "shape_size"]),
+        dipole=egg_webui.editable(True, label="corner dipole"),
+        omega=0.8,
+        device="cpu",
+    )
+    topo, ents, grid, cfg = setup(a)
+    egg_webui.run(grid, generate_steps(grid, config=cfg))
 
 if __name__ == "__main__":
     main()

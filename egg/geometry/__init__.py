@@ -32,6 +32,7 @@ from .frontend2d import (
     tfi_point,
 )
 from .surfaces3d import BSplineSurface
+from .svg2d import SvgDomain, SvgItem, svg_import, svg_topology
 
 __all__ = [
     # base
@@ -65,4 +66,9 @@ __all__ = [
     "Sphere",
     # 3D surfaces
     "BSplineSurface",
+    # SVG import
+    "svg_import",
+    "svg_topology",
+    "SvgDomain",
+    "SvgItem",
 ]

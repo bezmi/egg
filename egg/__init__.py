@@ -22,13 +22,16 @@ entities in :mod:`egg.geometry`, TMOP targets and the smoother bridge in
 
 _EXPORTS = {
     "TopologyBuilder": "egg.topology.builder",
+    "ExplicitTopology": "egg.topology.explicit",
+    "editable": "egg.topology.explicit",
     "PipelineConfig": "egg.pipeline",
     "PipelineReport": "egg.pipeline",
     "generate": "egg.pipeline",
     "generate_steps": "egg.pipeline",
     "run_pipeline": "egg.pipeline",
     "drain_steps": "egg.pipeline",
-    "build_boundary_layer_target": "egg.smoothing",
+    "build_topology_target": "egg.smoothing",
+    "webui_print": "egg._webui_print",
 }
 
 __all__ = sorted(_EXPORTS)

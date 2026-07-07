@@ -141,6 +141,61 @@ inline T mu_untangle(const T& a, const T& b, const T& c, const T& d, real delta)
     return s / (2.0_r * Dh) - 1.0_r;
 }
 
+/// Generic scalar shape+size metric (2D), reused for real / Dual<4> / Dual2<4>:
+/// mu = (s/(2D))² − 1 + (D − 1)² — the condition-number shape part plus a size
+/// term minimal at det T = 1, i.e. cell area = det W. NOT scale-invariant: the
+/// target W must carry the desired physical cell size (see
+/// egg.smoothing.targets.mean_size_target). Mirrors
+/// egg.smoothing.metrics._shape_size_value.
+template <typename T> constexpr T mu_shape_size2d(const T& a, const T& b, const T& c, const T& d)
+{
+    const T D = a * d - b * c;
+    const T s = a * a + b * b + c * c + d * d;
+    const T dm1 = D - 1.0_r;
+    return (s * s) / (4.0_r * D * D) - 1.0_r + dm1 * dm1;
+}
+
+inline real mu_ss_value(const VecT& t) { return mu_shape_size2d(t[0], t[1], t[2], t[3]); }
+
+/// Closed-form shape+size gradient (matches _shape_size_value_grad):
+/// d(shape)/dT = (s/D²)·T − (s²/(2D³))·C, d(size)/dT = 2(D−1)·C.
+inline Grad mu_ss_grad_closedform(const VecT& t)
+{
+    const real a = t[0], b = t[1], c = t[2], d = t[3];
+    const real D = (a * d) - (b * c);
+    const real s = (a * a) + (b * b) + (c * c) + (d * d);
+    const real coef_s = s / (D * D);
+    const real coef_c = ((s * s) / (2.0_r * D * D * D)) - (2.0_r * (D - 1.0_r));
+    return Grad {(coef_s * a) - (coef_c * d),
+                 (coef_s * b) + (coef_c * c),
+                 (coef_s * c) + (coef_c * b),
+                 (coef_s * d) - (coef_c * a)};
+}
+
+/// Closed-form shape+size Hessian (matches _shape_size_hess_T):
+/// H = 2 g_c g_cᵀ + 2(s/2D) H₂ + 2 C Cᵀ + 2(D−1) P, with g_c/H₂ the shape_2d
+/// closed forms (s/2D differs from μ₂ by a constant, so its derivatives are
+/// mu_grad_closedform / mu_hess_closedform).
+inline Hess mu_ss_hess_closedform(const VecT& t)
+{
+    const real a = t[0], b = t[1], c = t[2], d = t[3];
+    const real D = (a * d) - (b * c);
+    const real s = (a * a) + (b * b) + (c * c) + (d * d);
+    const Grad g = mu_grad_closedform(t);
+    const Hess H2 = mu_hess_closedform(t);
+    const std::array<real, kVecT> cof {d, -c, -b, a};
+    const real cond = s / (2.0_r * D);
+    const real dm1 = 2.0_r * (D - 1.0_r);
+    Hess H {};
+    for (int i = 0; i < kVecT; ++i) {
+        for (int j = 0; j < kVecT; ++j) {
+            H[(i * kVecT) + j] = (2.0_r * g[i] * g[j]) + (2.0_r * cond * H2[(i * kVecT) + j]) +
+                                 (2.0_r * cof[i] * cof[j]) + (dm1 * kHessP[(i * kVecT) + j]);
+        }
+    }
+    return H;
+}
+
 // 3D condition-number barrier (generic over real / Dual<9> / Dual2<9>):
 // μ_cond = |T|²·|T⁻¹|²/d² − 1 = (Σ tᵢ²)(Σ cofᵢ²)/(9 det²) − 1. Rational in T
 // (no fractional powers), so closed form and dual-AD are device-friendly.
@@ -176,6 +231,15 @@ template <typename T> constexpr T mu_cond3(const std::array<T, 9>& t)
         q = q + (cof[i] * cof[i]);
     }
     return (s * q) / (9.0_r * D * D) - 1.0_r;
+}
+
+/// 3D shape+size: mu_cond3 + (det T − 1)², generic over real / Dual<9> /
+/// Dual2<9> (grad/Hess come from AD like the 3D untangle surrogate — no
+/// closed-form/jhj fast path yet).
+template <typename T> constexpr T mu_cond3_size(const std::array<T, 9>& t)
+{
+    const T dm1 = det3(t) - T(1.0_r);
+    return mu_cond3(t) + dm1 * dm1;
 }
 
 /// 3D untangle surrogate: det → Dh = ½(det + √(det² + 4δ²)), mirroring the 2D
@@ -805,6 +869,55 @@ template <int D> struct ShapeObjectiveT {
     [[nodiscard]] bool accept_mindet(real mindet) const { return mindet > 0.0_r; }
 };
 
+/// Barrier shape+size objective: the shape barrier plus (det T − 1)², so cells
+/// are also pushed toward the target size det W (size-aware — the target must
+/// carry physical scale). D=2: closed forms mirroring the NumPy oracle's
+/// "shape_size"; D=3: mu_cond3_size via dual AD (no fused jhj path — patch.hpp
+/// takes its generic branch).
+template <int D> struct ShapeSizeObjectiveT {
+    static_assert(D == 2 || D == 3, "ShapeSizeObjectiveT: unsupported dimension");
+    static constexpr int kN = dim::vecT(D);
+
+    [[nodiscard]] real value(const VecTN<D>& t) const
+    {
+        if constexpr (D == 2) {
+            return mu_ss_value(t);
+        } else {
+            return mu_cond3_size(t);
+        }
+    }
+    [[nodiscard]] GradN<D> grad(const VecTN<D>& t) const
+    {
+        if constexpr (D == 2) {
+            return mu_ss_grad_closedform(t);
+        } else {
+            std::array<Dual<kN>, kN> td;
+            for (int i = 0; i < kN; ++i) { td[i] = seed_dual<kN>(t[i], i); }
+            const Dual<kN> r = mu_cond3_size(td);
+            GradN<D> g;
+            for (int i = 0; i < kN; ++i) { g[i] = r.g[i]; }
+            return g;
+        }
+    }
+    [[nodiscard]] HessN<D> hess(const VecTN<D>& t) const
+    {
+        if constexpr (D == 2) {
+            return mu_ss_hess_closedform(t);
+        } else {
+            std::array<Dual2<kN>, kN> td;
+            for (int i = 0; i < kN; ++i) { td[i] = seed_dual2<kN>(t[i], i); }
+            const Dual2<kN> r = mu_cond3_size(td);
+            HessN<D> H {};
+            for (int i = 0; i < kN; ++i) {
+                for (int j = 0; j < kN; ++j) { H[(i * kN) + j] = r.h[i][j]; }
+            }
+            return H;
+        }
+    }
+    /// Barrier: a step is only valid if every cell stays positively oriented.
+    [[nodiscard]] bool accept_mindet(real mindet) const { return mindet > 0.0_r; }
+};
+
 /// δ-continuation untangle objective: surrogate value + dual-AD grad/Hess and
 /// the relaxed accept rule (the surrogate is finite on folded cells, so
 /// min det A may be ≤ 0 during continuation).
@@ -869,18 +982,23 @@ template <int D> struct UntangleObjectiveT {
 };
 
 /// Closed set of objective kinds for std::visit dispatch.
-template <int D> using ObjectiveKindT = std::variant<ShapeObjectiveT<D>, UntangleObjectiveT<D>>;
+template <int D>
+using ObjectiveKindT =
+  std::variant<ShapeObjectiveT<D>, UntangleObjectiveT<D>, ShapeSizeObjectiveT<D>>;
 
-/// Objective for a run: "untangle" -> δ-surrogate, else the shape barrier.
+/// Objective for a run: "untangle" -> δ-surrogate, "shape_size" -> shape+size,
+/// else the shape barrier.
 template <int D = kDefaultDim>
 inline ObjectiveKindT<D> make_objective(std::string_view phase, real delta)
 {
     if (phase == "untangle") { return UntangleObjectiveT<D> {delta}; }
+    if (phase == "shape_size") { return ShapeSizeObjectiveT<D> {}; }
     return ShapeObjectiveT<D> {};
 }
 
 // D=2 legacy aliases for the oracle surface and existing call sites.
 using ShapeObjective = ShapeObjectiveT<2>;
+using ShapeSizeObjective = ShapeSizeObjectiveT<2>;
 using UntangleObjective = UntangleObjectiveT<2>;
 using ObjectiveKind = ObjectiveKindT<2>;
 
@@ -888,6 +1006,7 @@ template <class M>
 concept Objective = ObjectiveD<M, 2>;
 
 static_assert(Objective<ShapeObjective>);
+static_assert(Objective<ShapeSizeObjective>);
 static_assert(Objective<UntangleObjective>);
 
 }  // namespace egg

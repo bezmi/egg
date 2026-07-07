@@ -24,7 +24,8 @@ __all__ = [
     "AnisotropicTarget",
     "BoundaryLayerTarget",
     "MultiBlockTarget",
-    "build_boundary_layer_target",
+    "build_topology_target",
+    "mean_size_target",
 ]
 
 
@@ -104,7 +105,7 @@ class BoundaryLayerTarget:
         (length rescaled so the perpendicular layer height stays exact), so
         the metric prefers uniformly sheared parallelograms that follow the
         boundary instead of trading layer heights for orthogonality to it.
-        Usually set via ``build_boundary_layer_target(relax_orthogonality=…)``.
+        Usually set via ``build_topology_target(relax_orthogonality=…)``.
     """
 
     def __init__(
@@ -143,6 +144,14 @@ class BoundaryLayerTarget:
         self.max_height = None if max_height is None else float(max_height)
         self.k_offset = int(k_offset)
         self.boundary_shear = dict(boundary_shear or {})
+        # anchor position -> (q, n_hat, t_hat). Every layer and corner of a
+        # wall column shares one anchor, and each frame costs three projected
+        # inversions of ``entity`` (Newton per composite segment) — without
+        # the memo a context build over the ring blocks spends ~30 s
+        # re-projecting ~80 distinct anchors 5000+ times. Keyed by position,
+        # so anchors that slid along the wall between context builds miss
+        # naturally; the entity itself never moves during smoothing.
+        self._frame_cache: dict[bytes, tuple] = {}
         # Layer index where the geometric growth reaches the isotropic
         # interior spacing — the extent of the anisotropic band. Boundary
         # shear fades above it (see __call__).
@@ -187,6 +196,17 @@ class BoundaryLayerTarget:
             idx[a] = min(max(idx[a], 0), block.logical_shape[a] - 1)
         return np.asarray(block.nodes[tuple(idx)], dtype=float)
 
+    def _wall_frame(self, anchor: np.ndarray) -> tuple:
+        """Memoized (foot point, normal, tangent) of the wall at ``anchor``."""
+        key = anchor.tobytes()
+        hit = self._frame_cache.get(key)
+        if hit is None:
+            q = np.asarray(self.entity.project(anchor), dtype=float)
+            n_hat = np.asarray(self.entity.normal(q), dtype=float)
+            t_hat = np.asarray(self.entity.tangent_space(q), dtype=float)[:, 0]
+            hit = self._frame_cache[key] = (q, n_hat, t_hat)
+        return hit
+
     def __call__(self, bi, block, cell_base, corner_offset) -> np.ndarray:
         """Target matrix W for one (cell, corner) sample. Shape (d, d)."""
         k = self._layer_index(block, cell_base)
@@ -194,9 +214,7 @@ class BoundaryLayerTarget:
         s_t = self.tangential_spacing
 
         anchor = self._wall_anchor(block, cell_base)
-        q = np.asarray(self.entity.project(anchor), dtype=float)
-        n_hat = np.asarray(self.entity.normal(q), dtype=float)
-        t_hat = np.asarray(self.entity.tangent_space(q), dtype=float)[:, 0]
+        q, n_hat, t_hat = self._wall_frame(anchor)
 
         d = n_hat.shape[0]
         # FIXME(3D): only ONE tangential column is filled below, so in 3D the
@@ -317,27 +335,40 @@ def _boundary_direction(
     return t / norm if norm > 0 else None
 
 
-def build_boundary_layer_target(
+def build_topology_target(
     topology,
     grid=None,
     default=None,
+    metric: str = "shape",
     interior_spacing: float | None = None,
     blend_neighbours: bool = True,
     relax_orthogonality=(),
 ):
-    """Build a :class:`MultiBlockTarget` from a topology's boundary-layer specs.
+    """Build the whole-domain TMOP target :class:`MultiBlockTarget` for a topology.
 
-    Every block whose face association carries a spec recorded via
-    ``builder.set_boundary_layer`` gets a :class:`BoundaryLayerTarget`
-    oriented on that entity with the recorded ``first_height``/``growth``.
+    Covers *every* block: those whose face association carries a spec
+    recorded via ``builder.set_boundary_layer`` get a
+    :class:`BoundaryLayerTarget` oriented on that entity with the recorded
+    ``first_height``/``growth``; every other block gets ``default`` (chosen
+    from ``metric`` when omitted). With no specs at all the result is just
+    ``default``, so callers can use this unconditionally.
 
     Parameters
     ----------
     topology : BlockTopology
     grid : MultiBlockGrid, optional
     default : callable, optional
-        Target for blocks without a spec; defaults to
-        :func:`IdentityTarget` of the topology's dimension.
+        Target for blocks without a spec. If omitted it is chosen from
+        ``metric``: :func:`IdentityTarget` for the plain shape metric, or
+        :func:`mean_size_target` of ``grid`` for ``"shape_size"`` (see
+        ``metric``). An explicit ``default`` always wins.
+    metric : str, optional
+        The TMOP metric the target will be smoothed under (``"shape"`` or
+        ``"shape_size"``). Only consulted when ``default`` is omitted: under
+        ``"shape_size"`` the far-field default must carry physical scale
+        (:func:`mean_size_target`), because ``IdentityTarget``'s ``det W = 1``
+        would push every non-wall cell toward area 1.0 rather than the grid's
+        actual mean size. Pass ``grid`` so the size can be measured.
     interior_spacing : float, optional
         Cap on the wall-normal growth (isotropic far field).
     blend_neighbours : bool, optional
@@ -374,7 +405,16 @@ def build_boundary_layer_target(
     """
     d = topology.d
     if default is None:
-        default = IdentityTarget(d)
+        if metric == "shape_size":
+            if grid is None:
+                raise ValueError(
+                    "build_topology_target(metric='shape_size') needs "
+                    "`grid` to size the far-field default (mean_size_target); "
+                    "pass the grid from topology.initialize_grid()."
+                )
+            default = mean_size_target(grid)
+        else:
+            default = IdentityTarget(d)
     specs = getattr(topology, "boundary_layer_specs", {})
     if not specs:
         return default
@@ -467,6 +507,32 @@ def build_boundary_layer_target(
                     blt.boundary_shear[side] = (b_hat, max(3, blt.n_layers))
 
     return MultiBlockTarget(default, per_block)
+
+
+def mean_size_target(grid) -> Callable[..., np.ndarray]:
+    """Isotropic target sized to the grid's mean cell volume: W = h̄·I.
+
+    ``h̄`` is chosen so ``det W`` equals the mean of ``det A`` over every
+    corner sample of the current grid (exactly the mean cell area in 2D).
+    Under a size-aware metric ("shape_size") every cell is then pushed
+    toward the grid-average size — global size uniformity; scale-invariant
+    shape metrics see this target as :func:`IdentityTarget`.
+
+    Evaluate on the grid whose size distribution should define the scale
+    (typically after untangling); the total volume is conserved by node
+    movement, so the mean is stable across smoothing.
+    """
+    from egg.smoothing.flat_context import cell_stencil
+
+    d = grid.topology.d
+    st = cell_stencil([np.asarray(dm) for dm in grid.block_dof_maps], d)
+    X = grid.global_nodes
+    Xc = X[st["gc"]]
+    A = np.stack(
+        [st["s"][k][:, None] * (X[st["gn"][k]] - Xc) for k in range(d)], axis=2
+    )
+    vol = abs(float(np.linalg.det(A).mean()))
+    return AnisotropicTarget((vol ** (1.0 / d),) * d)
 
 
 def AnisotropicTarget(spacings: tuple[float, ...]) -> Callable[..., np.ndarray]:

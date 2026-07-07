@@ -64,6 +64,31 @@ def _newton_foot(
     return t
 
 
+def _newton_foot_many(
+    curve, Q: np.ndarray, t_lo: float, t_hi: float, n_seed: int = 16, iters: int = 8
+) -> np.ndarray:
+    """:func:`_newton_foot` over the rows of ``Q`` at once — same seeds and
+    iteration count run lane-wise (a lane whose ``fp`` degenerates freezes,
+    like the scalar early break)."""
+    ts = t_lo + (t_hi - t_lo) * np.arange(n_seed + 1) / n_seed
+    pts = curve.eval_many(ts)  # (n_seed + 1, 2)
+    d2 = ((pts[None, :, :] - Q[:, None, :]) ** 2).sum(axis=2)
+    t = ts[np.argmin(d2, axis=1)]
+    live = np.ones(t.shape, dtype=bool)
+    for _ in range(iters):
+        d = curve.eval_many(t) - Q
+        d1 = curve.deriv_many(t)
+        f = (d * d1).sum(axis=1)
+        fp = (d1 * d1).sum(axis=1) + (d * curve.deriv2_many(t)).sum(axis=1)
+        live &= np.abs(fp) >= 1e-30
+        if not live.any():
+            break
+        step = np.zeros_like(t)
+        np.divide(f, fp, out=step, where=live)
+        t = t - step
+    return t
+
+
 class _TrimmedCurve(GeometryEntity):
     """Shared invert → clamp → eval pipeline for interval-trimmed curves.
 
@@ -95,6 +120,44 @@ class _TrimmedCurve(GeometryEntity):
     def project(self, p: np.ndarray) -> np.ndarray:
         """Closest point on the trimmed curve to p (invert -> clamp -> eval)."""
         return self.eval(self._clamp(self.invert(np.asarray(p, dtype=float))))
+
+    # Vector counterparts of eval/deriv/deriv2/invert/project over an array
+    # of parameters (or query rows). The defaults fall back to scalar loops
+    # so every subclass is covered; subclasses whose expressions broadcast
+    # override them, which turns projection of N points into O(1) array ops
+    # instead of N seeded-Newton runs.
+
+    def eval_many(self, ts: np.ndarray) -> np.ndarray:
+        """Points at each parameter in ``ts``. Shape (n, 2)."""
+        return np.stack([self.eval(float(t)) for t in ts])
+
+    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
+        """d/dt of :meth:`eval` at each parameter in ``ts``. Shape (n, 2)."""
+        return np.stack([self.deriv(float(t)) for t in ts])
+
+    def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
+        """d2/dt2 of :meth:`eval` at each parameter in ``ts``. Shape (n, 2)."""
+        return np.stack([self.deriv2(float(t)) for t in ts])
+
+    def invert_many(self, Q: np.ndarray) -> np.ndarray:
+        """Unclamped nearest-foot parameter of each row of ``Q``."""
+        lo, hi = sorted((self.t0, self.t1))
+        return _newton_foot_many(self, np.asarray(Q, dtype=float), lo, hi)
+
+    def _clamp_many(self, ts: np.ndarray) -> np.ndarray:
+        lo, hi = sorted((self.t0, self.t1))
+        if self.closed:
+            L = hi - lo
+            if L <= 0.0:
+                return ts
+            t = np.fmod(ts - lo, L)
+            return lo + np.where(t < 0.0, t + L, t)
+        return np.clip(ts, lo, hi)
+
+    def project_many(self, pts: np.ndarray) -> np.ndarray:
+        """Closest point on the trimmed curve to each row of ``pts``."""
+        pts = np.asarray(pts, dtype=float)
+        return self.eval_many(self._clamp_many(self.invert_many(pts)))
 
     def tangent_space(self, q: np.ndarray) -> np.ndarray:
         """Normalized C'(t) at the clamped inverse of q. Shape (2, 1)."""
@@ -139,6 +202,18 @@ class CircleArc(_TrimmedCurve):
         """d/dt of :meth:`eval`."""
         return self.radius * np.array([-np.sin(t), np.cos(t)])
 
+    def invert_many(self, Q: np.ndarray) -> np.ndarray:
+        d = np.asarray(Q, dtype=float) - self.center
+        return np.arctan2(d[:, 1], d[:, 0])
+
+    def eval_many(self, ts: np.ndarray) -> np.ndarray:
+        ts = np.asarray(ts, dtype=float)
+        return self.center + self.radius * np.stack([np.cos(ts), np.sin(ts)], -1)
+
+    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
+        ts = np.asarray(ts, dtype=float)
+        return self.radius * np.stack([-np.sin(ts), np.cos(ts)], -1)
+
 
 class EllipseArc(_TrimmedCurve):
     """A rotated elliptical arc ``C + R_phi (a cos t, b sin t)``."""
@@ -177,6 +252,25 @@ class EllipseArc(_TrimmedCurve):
         """Nearest-foot parameter over the full period (seeded Newton)."""
         return _newton_foot(self, np.asarray(q, dtype=float), 0.0, 2.0 * np.pi)
 
+    def invert_many(self, Q: np.ndarray) -> np.ndarray:
+        return _newton_foot_many(self, np.asarray(Q, dtype=float), 0.0, 2.0 * np.pi)
+
+    def _rot_many(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        cp, sp = np.cos(self.phi), np.sin(self.phi)
+        return np.stack([cp * x - sp * y, sp * x + cp * y], -1)
+
+    def eval_many(self, ts: np.ndarray) -> np.ndarray:
+        ts = np.asarray(ts, dtype=float)
+        return self.center + self._rot_many(self.a * np.cos(ts), self.b * np.sin(ts))
+
+    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
+        ts = np.asarray(ts, dtype=float)
+        return self._rot_many(-self.a * np.sin(ts), self.b * np.cos(ts))
+
+    def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
+        ts = np.asarray(ts, dtype=float)
+        return self._rot_many(-self.a * np.cos(ts), -self.b * np.sin(ts))
+
 
 class QuadBezier(_TrimmedCurve):
     """A quadratic Bézier over control points P0, P1, P2."""
@@ -197,6 +291,15 @@ class QuadBezier(_TrimmedCurve):
     def deriv2(self, t: float) -> np.ndarray:
         """d2/dt2 of :meth:`eval` (constant)."""
         return 2 * (self.p[2] - 2 * self.p[1] + self.p[0])
+
+    def eval_many(self, ts: np.ndarray) -> np.ndarray:
+        return self.eval(np.asarray(ts, dtype=float)[:, None])
+
+    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
+        return self.deriv(np.asarray(ts, dtype=float)[:, None])
+
+    def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
+        return np.broadcast_to(self.deriv2(0.0), (len(ts), 2))
 
 
 class CubicBezier(_TrimmedCurve):
@@ -231,6 +334,17 @@ class CubicBezier(_TrimmedCurve):
         return 6 * u * (self.p[2] - 2 * self.p[1] + self.p[0]) + 6 * t * (
             self.p[3] - 2 * self.p[2] + self.p[1]
         )
+
+    # The polynomial expressions above broadcast over a column of
+    # parameters: (n, 1) * (2,) -> (n, 2).
+    def eval_many(self, ts: np.ndarray) -> np.ndarray:
+        return self.eval(np.asarray(ts, dtype=float)[:, None])
+
+    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
+        return self.deriv(np.asarray(ts, dtype=float)[:, None])
+
+    def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
+        return self.deriv2(np.asarray(ts, dtype=float)[:, None])
 
 
 class BSplineCurve(_TrimmedCurve):
@@ -296,6 +410,34 @@ class BSplineCurve(_TrimmedCurve):
         w = float(self._w(t))
         C, C1 = self.eval(t), self.deriv(t)
         return (A2 - 2.0 * float(self._w1(t)) * C1 - float(self._w2(t)) * C) / w
+
+    # scipy's BSpline evaluates arrays natively; the rational form applies
+    # the same quotient rule with the weight splines as columns.
+    def eval_many(self, ts: np.ndarray) -> np.ndarray:
+        ts = np.asarray(ts, dtype=float)
+        A = np.asarray(self._spl(ts), dtype=float)
+        if self.weights is None:
+            return A
+        return A / np.asarray(self._w(ts), dtype=float)[:, None]
+
+    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
+        ts = np.asarray(ts, dtype=float)
+        A1 = np.asarray(self._d1(ts), dtype=float)
+        if self.weights is None:
+            return A1
+        w = np.asarray(self._w(ts), dtype=float)[:, None]
+        w1 = np.asarray(self._w1(ts), dtype=float)[:, None]
+        return (A1 - w1 * self.eval_many(ts)) / w
+
+    def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
+        ts = np.asarray(ts, dtype=float)
+        A2 = np.asarray(self._d2(ts), dtype=float)
+        if self.weights is None:
+            return A2
+        w = np.asarray(self._w(ts), dtype=float)[:, None]
+        w1 = np.asarray(self._w1(ts), dtype=float)[:, None]
+        w2 = np.asarray(self._w2(ts), dtype=float)[:, None]
+        return (A2 - 2.0 * w1 * self.deriv_many(ts) - w2 * self.eval_many(ts)) / w
 
 
 class CompositePath(GeometryEntity):
@@ -381,6 +523,16 @@ class CompositePath(GeometryEntity):
     def project(self, p: np.ndarray) -> np.ndarray:
         """Closest point over all segments."""
         return self._nearest(p).project(p)
+
+    def project_many(self, pts: np.ndarray) -> np.ndarray:
+        """Closest point over all segments for each row of ``pts``: every
+        segment projects the whole batch (vectorized where the segment
+        supports it), then the nearest foot wins per row — the same
+        contest :meth:`_nearest` runs per point."""
+        pts = np.asarray(pts, dtype=float)
+        feet = np.stack([seg.project_many(pts) for seg in self.segments])
+        d2 = ((feet - pts[None, :, :]) ** 2).sum(axis=2)
+        return feet[np.argmin(d2, axis=0), np.arange(pts.shape[0])]
 
     def tangent_space(self, q: np.ndarray) -> np.ndarray:
         """Tangent space of the segment nearest to q."""

@@ -22,40 +22,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from driver import finish, parse_twin_args
-from egg.pipeline import PipelineConfig, generate_steps
-from egg.smoothing import build_boundary_layer_target
-from topologies import build_twin_circle
+from egg.pipeline import generate_steps
+from topologies import setup_twin
 
 
 def main():
     a = parse_twin_args("side-by-side: good twin-circle TMOP smooth + per-wall BL")
-
-    # Geometry + topology; each circle carries its own boundary-layer spec.
-    bl = {
-        "circle": dict(
-            first_height=a.bl_first_height, growth=a.bl_growth, n_fixed=a.pin_layers
-        ),
-        "circle2": dict(
-            first_height=a.bl_first_height2, growth=a.bl_growth2, n_fixed=a.pin_layers
-        ),
-    }
-    topo, ents = build_twin_circle(rough=False, bl=bl, R=a.resolution)
-
-    # Quality target (aspect-ratio clustering per wall), grid, and the
-    # step-wise pipeline: TFI init -> boundary snap -> untangle -> TMOP
-    # (-> pinned layers with --pin-layers).
-    target = build_boundary_layer_target(topo)
-    grid = topo.initialize_grid()
-    cfg = PipelineConfig(
-        sweeps_per_delta=a.sweeps_per_delta,
-        tmop_sweeps=a.tmop_sweeps,
-        tmop_chunk=a.chunk,
-        tmop_smoother=a.smoother,
-        omega=a.omega,
-        device=a.device,
-        pin_sweeps=a.pin_sweeps if a.pin_layers > 0 else 0,
-    )
-    steps = generate_steps(grid, target, cfg, untangle_direct=not a.plot_live)
+    topo, ents, grid, cfg = setup_twin(vars(a))
+    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
 
     finish(
         grid,
@@ -67,6 +41,28 @@ def main():
         mindet_title="min det A (TMOP only)",
     )
 
+
+if __name__ == "__egg_webui__":  # running inside the egg web UI
+    import egg_webui
+
+    # CLI defaults, mirroring driver.py — edit freely
+    a = egg_webui.params(
+        bl_first_height=0.05,
+        bl_growth=1.5,
+        bl_first_height2=0.08,
+        bl_growth2=1.3,
+        resolution=2,
+        pin_layers=0,
+        pin_sweeps=5000,
+        sweeps_per_delta=200,
+        tmop_sweeps=5000,
+        chunk=500,
+        smoother="jacobi",
+        omega=0.8,
+        device="cpu",
+    )
+    topo, ents, grid, cfg = setup_twin(a)
+    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
 
 if __name__ == "__main__":
     main()

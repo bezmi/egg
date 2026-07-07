@@ -67,7 +67,7 @@ def _add_common_args(p, *, tmop_sweeps, sweeps_per_delta, chunk, pin_sweeps):
     )
 
 
-def parse_single_args(description):
+def parse_single_args(description, argv=None):
     """Flags for the single-circle demos (good-topo.py / untangle.py)."""
     p = argparse.ArgumentParser(description=description)
     _add_common_args(
@@ -88,7 +88,7 @@ def parse_single_args(description):
         default=1.3,
         help="near-wall geometric growth ratio",
     )
-    a = p.parse_args()
+    a = p.parse_args(argv)
     print("=" * 56)
     print(description)
     print("=" * 56)
@@ -98,7 +98,7 @@ def parse_single_args(description):
     return a
 
 
-def parse_twin_args(description):
+def parse_twin_args(description, argv=None):
     """Flags for the twin-circle demos (*_side-by-side.py)."""
     p = argparse.ArgumentParser(description=description)
     _add_common_args(
@@ -125,7 +125,7 @@ def parse_twin_args(description):
     p.add_argument(
         "--resolution", type=int, default=2, help="Resolution scaling factor"
     )
-    a = p.parse_args()
+    a = p.parse_args(argv)
     print("=" * 56)
     print(description)
     print("=" * 56)

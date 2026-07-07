@@ -36,8 +36,8 @@ __all__ = [
 ]
 
 
-def assemble_energy_vec(X, gc, gn0, gn1, s0, s1, W_inv) -> float:
-    """Vectorized ``shape_2d`` global energy over precomputed stencil arrays.
+def assemble_energy_vec(X, gc, gn0, gn1, s0, s1, W_inv, metric="shape_2d") -> float:
+    """Vectorized global energy over precomputed stencil arrays.
 
     One NumPy pass over every (cell, corner) sample of the grid, reading
     positions straight from the flat ``global_nodes`` array ``X`` through
@@ -45,17 +45,17 @@ def assemble_energy_vec(X, gc, gn0, gn1, s0, s1, W_inv) -> float:
     :mod:`egg.smoothing.batch` uses, precomputed once in
     :func:`egg.smoothing.solver.build_sweep_context`).
 
-    Numerically identical to :func:`assemble_energy` with ``metric="shape_2d"``.
+    Numerically identical to :func:`assemble_energy` with the same ``metric``
+    ("shape_2d" default, or "shape_size").
     """
+    from egg.smoothing.batch import _mu_batch
+
     Xc = X[gc]
     A = np.empty((gc.shape[0], 2, 2))
     A[:, :, 0] = s0[:, None] * (X[gn0] - Xc)
     A[:, :, 1] = s1[:, None] * (X[gn1] - Xc)
     T = np.einsum("pij,pjk->pik", A, W_inv)
-    a, b, c, d = T[:, 0, 0], T[:, 0, 1], T[:, 1, 0], T[:, 1, 1]
-    D = a * d - b * c
-    s = a * a + b * b + c * c + d * d
-    return float((s / (2.0 * D) - 1.0).sum())
+    return float(_mu_batch(T, metric).sum())
 
 
 def assemble_energy(

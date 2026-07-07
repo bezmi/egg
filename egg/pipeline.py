@@ -45,7 +45,9 @@ class PipelineConfig:
     Attributes
     ----------
     target_fn : callable, optional
-        TMOP target; defaults to ``IdentityTarget(d)``.
+        Explicit TMOP target. When ``None`` (default) the pipeline builds
+        one automatically from the topology (see ``cluster_boundary_layers``);
+        an explicit target always wins and suppresses the auto-build.
     margin : float
         Validity gate: the grid counts as untangled when
         ``min det A > margin``.
@@ -72,6 +74,33 @@ class PipelineConfig:
         relaxes plain block-Jacobi; FAS is barrier-phase-only by design).
         Blocks whose node counts admit no coarse level fall back to plain
         Jacobi with the equivalent fine-sweep budget automatically.
+    tmop_metric : str
+        ``"shape"`` (default) or ``"shape_size"`` — the TMOP objective.
+        The shape metric is scale-invariant (angles/aspect only); shape+size
+        adds ``(det T - 1)^2``, pushing every cell toward the target volume
+        ``det W`` as well. Size-aware, so the target must carry physical
+        scale: when no ``target`` is given the auto-build sizes the
+        non-clustered far field to the grid's mean cell volume
+        (:func:`egg.smoothing.targets.mean_size_target`) — global size
+        uniformity. The untangle phase is metric-independent.
+    cluster_boundary_layers : bool
+        When ``True`` (default) and no explicit ``target`` is passed, the
+        pipeline auto-builds the whole-domain TMOP target from the topology's
+        ``set_boundary_layer`` specs
+        (:func:`egg.smoothing.targets.build_topology_target`), passing
+        ``metric=tmop_metric`` so the far field stays scale-consistent with
+        the objective. With no specs this reduces to the metric's plain
+        default (mean-size under ``shape_size``, identity under ``shape``).
+        Set ``False`` to suppress clustering even when specs exist. Ignored
+        when an explicit ``target`` is given.
+    bl_blend_neighbours : bool
+        Forwarded to :func:`~egg.smoothing.targets.build_topology_target` by
+        the auto-build: continue a wall block's clustering profile into the
+        block behind it. Default on.
+    bl_interior_spacing : float, optional
+        Forwarded to the auto-build: cap on the wall-normal growth
+        (isotropic far field). ``None`` uses each block's natural face
+        spacing.
     fas_nu_pre, fas_nu_post : int
         Pre-/post-smooth sweeps per level per FAS V-cycle.
     fas_nu_coarse : int
@@ -114,12 +143,18 @@ class PipelineConfig:
     tmop_sweeps: int = 40
     tmop_chunk: int = 10
     tmop_smoother: Literal["jacobi", "fas"] = "jacobi"
+    tmop_metric: Literal["shape", "shape_size"] = "shape"
     fas_nu_pre: int = 2
     fas_nu_post: int = 2
     fas_nu_coarse: int = 32
     fas_max_levels: int = 32
     omega: float = 0.8
     report_every: int = 0
+
+    # Boundary-layer clustering target (see generate_steps / cluster_* below).
+    cluster_boundary_layers: bool = True
+    bl_blend_neighbours: bool = True
+    bl_interior_spacing: float | None = None
 
     # Optional boundary-layer phases (see generate_steps).
     pin_sweeps: int = 0
@@ -135,6 +170,11 @@ class PipelineConfig:
             raise ValueError(
                 f"PipelineConfig.tmop_smoother must be 'jacobi' or 'fas', got "
                 f"{self.tmop_smoother!r}"
+            )
+        if self.tmop_metric not in ("shape", "shape_size"):
+            raise ValueError(
+                f"PipelineConfig.tmop_metric must be 'shape' or 'shape_size', "
+                f"got {self.tmop_metric!r}"
             )
         if self.device not in ("cpu", "gpu", "auto"):
             raise ValueError(
@@ -165,7 +205,7 @@ def _min_det(grid, energy_stencil) -> float:
     return grid_min_det(grid.global_nodes, energy_stencil)
 
 
-def _energy(grid, energy_stencil) -> float:
+def _energy(grid, energy_stencil, metric: str = "shape_2d") -> float:
     from .smoothing.objective import assemble_energy_vec
 
     es = energy_stencil
@@ -177,6 +217,7 @@ def _energy(grid, energy_stencil) -> float:
         es["s0"],
         es["s1"],
         es["W_inv"],
+        metric=metric,
     )
 
 
@@ -197,10 +238,25 @@ def generate_steps(
     grid : MultiBlockGrid
         Initialised grid (``topology.initialize_grid()``); mutated in place.
     target : callable, optional
-        TMOP target function. None uses an isotropic quality target.
-        Untangling always runs on the isotropic context: geometric validity
-        is target-independent, and a strongly anisotropic target can stall
-        the continuation.
+        Explicit TMOP target function. ``None`` (default) auto-builds one
+        from the topology via
+        :func:`egg.smoothing.targets.build_topology_target` when
+        ``config.cluster_boundary_layers`` is set (else an isotropic quality
+        target). Passing a target suppresses the auto-build.
+
+        .. important::
+           If you build the target yourself and pass it here, you MUST
+           construct it with ``metric=config.tmop_metric``. That coupling is
+           what keeps the non-clustered far-field ``det W`` consistent with
+           the objective — under ``tmop_metric="shape_size"`` an
+           ``IdentityTarget`` far field (``det W = 1``) would drive every
+           non-wall cell toward area 1.0 instead of the grid's mean size. The
+           auto-build handles this for you; the manual path cannot, so it is
+           on the caller.
+
+        Untangling always runs on the isotropic context regardless: geometric
+        validity is target-independent, and a strongly anisotropic target can
+        stall the continuation.
     config : PipelineConfig, optional
         Defaults are used when omitted. Keyword ``overrides`` update a copy
         of it, so one config can be reused across call sites; unknown
@@ -347,6 +403,31 @@ def generate_steps(
         project_nodes(grid, grid.dof_constraints)
 
     # --- Phase 2: TMOP quality optimisation (resident session, per-chunk loop) ---
+    # Auto-build the whole-domain target when the caller passed none. With
+    # boundary-layer specs (and clustering on) this is the clustering target;
+    # otherwise it is the metric's plain default — mean-size W under shape_size
+    # (the size term needs physical scale, sized to the now-untangled grid's
+    # mean cell volume), or the isotropic ctx_iso under shape. `metric` MUST
+    # track cfg.tmop_metric so the non-wall far field stays scale-consistent
+    # with the objective (see build_topology_target / the `target` docstring).
+    tmop_phase = "shape_size" if cfg.tmop_metric == "shape_size" else "barrier"
+    if target is None:
+        specs = getattr(grid.topology, "boundary_layer_specs", {})
+        if cfg.cluster_boundary_layers and specs:
+            from .smoothing.targets import build_topology_target
+
+            target = build_topology_target(
+                grid.topology,
+                grid,
+                metric=cfg.tmop_metric,
+                blend_neighbours=cfg.bl_blend_neighbours,
+                interior_spacing=cfg.bl_interior_spacing,
+            )
+        elif cfg.tmop_metric == "shape_size":
+            from .smoothing.targets import mean_size_target
+
+            target = mean_size_target(grid)
+        # else (shape metric, no clustering) — stay None and reuse ctx_iso.
     tmop_ctx = ctx_iso if target is None else build_sweep_context(grid, target)
     tmop_sweeps = max((cfg.tmop_sweeps // tmop_chunk) * tmop_chunk, tmop_chunk)
     # Block-Jacobi over the halo-padded structured store, built from the grid's
@@ -358,7 +439,7 @@ def generate_steps(
 
     bsc = build_block_structured_context(grid)
     session = CppStructuredSweepSession(tmop_ctx, bsc, grid.global_nodes, device=device)
-    run_kwargs = {"omega": omega}
+    run_kwargs = {"omega": omega, "phase": tmop_phase}
 
     def run_tmop(sess, k):
         if cfg.tmop_smoother == "fas":
@@ -440,13 +521,14 @@ def generate_steps(
 
     # Terminal summary AFTER the closing boundary snap, so the reported/plotted
     # final numbers reflect the snapped mesh. Energy is scored on the SAME
-    # context TMOP optimised — for a BL/anisotropic target the isotropic
-    # stencil reports a different (higher) objective on the same mesh.
+    # context and metric TMOP optimised — for a BL/anisotropic target the
+    # isotropic stencil reports a different (higher) objective on the same mesh.
+    score_metric = "shape_size" if cfg.tmop_metric == "shape_size" else "shape_2d"
     yield (
         "final",
         {
             "min_det": grid_min_det(grid.global_nodes, es),
-            "energy": _energy(grid, score_es),
+            "energy": _energy(grid, score_es, metric=score_metric),
         },
     )
 

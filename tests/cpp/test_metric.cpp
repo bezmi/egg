@@ -32,7 +32,13 @@ namespace
 constexpr double kTol = 1e-10;  // value / 1st-order
 constexpr double kTol2 = 1e-9;  // 2nd-order AD (looser; near-singular case)
 
-VecT to_vecT(const std::array<double, 4>& a) { return VecT {static_cast<egg::real>(a[0]), static_cast<egg::real>(a[1]), static_cast<egg::real>(a[2]), static_cast<egg::real>(a[3])}; }
+VecT to_vecT(const std::array<double, 4>& a)
+{
+    return VecT {static_cast<egg::real>(a[0]),
+                 static_cast<egg::real>(a[1]),
+                 static_cast<egg::real>(a[2]),
+                 static_cast<egg::real>(a[3])};
+}
 
 // Absolute-or-relative closeness, robust to the larger Hessian magnitudes in
 // the near-singular sample.
@@ -110,6 +116,44 @@ static const suite<"metric"> metric_suite = [] {
                   << std::format("sample {} hess[{}]: AD {} vs closed {}", k, i, Hd[i], Hc[i]);
                 expect(close(Hd[i], s.hess[i], kTol2))
                   << std::format("sample {} hess[{}]: AD {} vs oracle {}", k, i, Hd[i], s.hess[i]);
+            }
+        }
+    };
+
+    // shape+size: the closed forms against dual-AD over the same generic
+    // scalar mu_shape_size2d (cross-language parity vs the NumPy oracle is
+    // covered by tests/smoothing/test_shape_size.py via cpp_core.metric_eval).
+    "shape_size closed-form grad/hess match dual-AD"_test = [n] {
+        boost::ut::log << std::format("  shape_size closed forms vs Dual/Dual2 AD\n");
+        for (std::size_t k = 0; k < n; ++k) {
+            const VecT t = to_vecT(golden::kSamples[k].t);
+            const Dual<kVecT> rg = mu_shape_size2d(seed_dual<kVecT>(t[0], 0),
+                                                   seed_dual<kVecT>(t[1], 1),
+                                                   seed_dual<kVecT>(t[2], 2),
+                                                   seed_dual<kVecT>(t[3], 3));
+            expect(close(mu_ss_value(t), rg.v, kTol))
+              << std::format("sample {} value: closed {} vs AD {}", k, mu_ss_value(t), rg.v);
+            const Grad g = mu_ss_grad_closedform(t);
+            for (int i = 0; i < 4; ++i)
+                expect(close(g[i], rg.g[i], kTol))
+                  << std::format("sample {} grad[{}]: closed {} vs AD {}", k, i, g[i], rg.g[i]);
+            const Dual2<kVecT> rh = mu_shape_size2d(seed_dual2<kVecT>(t[0], 0),
+                                                    seed_dual2<kVecT>(t[1], 1),
+                                                    seed_dual2<kVecT>(t[2], 2),
+                                                    seed_dual2<kVecT>(t[3], 3));
+            const Hess H = mu_ss_hess_closedform(t);
+            for (int i = 0; i < 4; ++i) {
+                for (int j = 0; j < 4; ++j) {
+                    expect(close(H[(i * 4) + j], rh.h[i][j], kTol2))
+                      << std::format("sample {} hess[{}][{}]: closed {} vs AD {}",
+                                     k,
+                                     i,
+                                     j,
+                                     H[(i * 4) + j],
+                                     rh.h[i][j]);
+                    expect(close(H[(i * 4) + j], H[(j * 4) + i], kTol2))
+                      << std::format("sample {} asym H[{}][{}]", k, i, j);
+                }
             }
         }
     };

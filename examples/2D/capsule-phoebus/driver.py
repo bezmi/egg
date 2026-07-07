@@ -11,7 +11,7 @@
 import argparse
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Phoebus capsule grid")
     p.add_argument(
         "--plot-grid", action="store_true", help="matplotlib final wireframe grid"
@@ -37,6 +37,14 @@ def parse_args():
         "geometric multigrid) V-cycles; with fas, --tmop-sweeps/--chunk count "
         "V-cycles (4 fine sweeps each plus coarse-grid work)",
     )
+    p.add_argument(
+        "--metric",
+        choices=["shape", "shape_size"],
+        default="shape_size",
+        help="TMOP objective: shape+size (default; adds (det T - 1)^2 "
+        "against a mean-cell-size target — pushes cell areas toward "
+        "uniform) or the classic scale-invariant shape metric",
+    )
     p.add_argument("--chunk", type=int, default=1000)
     p.add_argument(
         "--omega",
@@ -59,7 +67,7 @@ def parse_args():
         default=5000,
         help="TMOP sweeps for the pinned re-run",
     )
-    a = p.parse_args()
+    a = p.parse_args(argv)
     print("=" * 56)
     print("Phoebus capsule → TMOP smooth")
     print("=" * 56)

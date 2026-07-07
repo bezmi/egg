@@ -290,6 +290,7 @@ def _patch_grad_hess(
     grid: MultiBlockGrid,
     dof_idx: int,
     ctx: SweepContext,
+    metric: str = "shape_2d",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Local gradient (d,) and Hessian (d, d) for a single global DOF.
 
@@ -308,6 +309,7 @@ def _patch_grad_hess(
         patch["W_inv"],
         patch["role"],
         patch["J"],
+        metric=metric,
     )
 
 
@@ -315,6 +317,7 @@ def _patch_energy_and_mindet(
     grid: MultiBlockGrid,
     dof_idx: int,
     ctx: SweepContext,
+    metric: str = "shape_2d",
 ) -> tuple[float, float]:
     """Sum of mu and min det(A) over all corner samples of all incident cells.
 
@@ -330,4 +333,5 @@ def _patch_energy_and_mindet(
         patch["s0"],
         patch["s1"],
         patch["W_inv"],
+        metric=metric,
     )

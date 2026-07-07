@@ -95,5 +95,5 @@ html_sidebars = {
     ],
 }
 html_static_path = ["_static"]
-html_css_files = ["dark.css"]
+html_css_files = ["theme.css"]
 html_js_files = ["theme-toggle.js"]

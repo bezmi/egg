@@ -1,0 +1,451 @@
+/* Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+ *
+ * PolyForm Noncommercial License 2.0.0-pre.2
+ * https://github.com/bezmi/egg/blob/main/LICENSE.md
+ * Free to use and redistribute for personal and noncommercial purposes.
+ * See the license for details.
+ * For commercial licensing, contact s.imran@tuta.io
+ */
+
+
+/* Theme: catppuccin. The raw palette lives in --ctp-* (latte on :root;
+   the darker flavors override via [data-theme], picked in the view menu);
+   every color/linetype in the chrome AND both scene views routes through
+   the --ctp-* / semantic --egg-* custom properties, so a small override
+   restyles everything — exports included. */
+:root {
+  font-family: system-ui, sans-serif;
+  color-scheme: light;
+  accent-color: var(--ctp-blue);
+  --ctp-rosewater: #dc8a78; --ctp-flamingo: #dd7878; --ctp-pink: #ea76cb;
+  --ctp-mauve: #8839ef; --ctp-red: #d20f39; --ctp-maroon: #e64553;
+  --ctp-peach: #fe640b; --ctp-yellow: #df8e1d; --ctp-green: #40a02b;
+  --ctp-teal: #179299; --ctp-sky: #04a5e5; --ctp-sapphire: #209fb5;
+  --ctp-blue: #1e66f5; --ctp-lavender: #7287fd;
+  --ctp-text: #4c4f69; --ctp-subtext1: #5c5f77; --ctp-subtext0: #6c6f85;
+  --ctp-overlay2: #7c7f93; --ctp-overlay1: #8c8fa1; --ctp-overlay0: #9ca0b0;
+  --ctp-surface2: #acb0be; --ctp-surface1: #bcc0cc; --ctp-surface0: #ccd0da;
+  --ctp-base: #eff1f5; --ctp-mantle: #e6e9ef; --ctp-crust: #dce0e8;
+}
+:root[data-theme="frappe"] {
+  color-scheme: dark;
+  --egg-block-alpha: 0.4;
+  --ctp-rosewater: #f2d5cf; --ctp-flamingo: #eebebe; --ctp-pink: #f4b8e4;
+  --ctp-mauve: #ca9ee6; --ctp-red: #e78284; --ctp-maroon: #ea999c;
+  --ctp-peach: #ef9f76; --ctp-yellow: #e5c890; --ctp-green: #a6d189;
+  --ctp-teal: #81c8be; --ctp-sky: #99d1db; --ctp-sapphire: #85c1dc;
+  --ctp-blue: #8caaee; --ctp-lavender: #babbf1;
+  --ctp-text: #c6d0f5; --ctp-subtext1: #b5bfe2; --ctp-subtext0: #a5adce;
+  --ctp-overlay2: #949cbb; --ctp-overlay1: #838ba7; --ctp-overlay0: #737994;
+  --ctp-surface2: #626880; --ctp-surface1: #51576d; --ctp-surface0: #414559;
+  --ctp-base: #303446; --ctp-mantle: #292c3c; --ctp-crust: #232634;
+}
+:root[data-theme="macchiato"] {
+  color-scheme: dark;
+  --egg-block-alpha: 0.4;
+  --ctp-rosewater: #f4dbd6; --ctp-flamingo: #f0c6c6; --ctp-pink: #f5bde6;
+  --ctp-mauve: #c6a0f6; --ctp-red: #ed8796; --ctp-maroon: #ee99a0;
+  --ctp-peach: #f5a97f; --ctp-yellow: #eed49f; --ctp-green: #a6da95;
+  --ctp-teal: #8bd5ca; --ctp-sky: #91d7e3; --ctp-sapphire: #7dc4e4;
+  --ctp-blue: #8aadf4; --ctp-lavender: #b7bdf8;
+  --ctp-text: #cad3f5; --ctp-subtext1: #b8c0e0; --ctp-subtext0: #a5adcb;
+  --ctp-overlay2: #939ab7; --ctp-overlay1: #8087a2; --ctp-overlay0: #6e738d;
+  --ctp-surface2: #5b6078; --ctp-surface1: #494d64; --ctp-surface0: #363a4f;
+  --ctp-base: #24273a; --ctp-mantle: #1e2030; --ctp-crust: #181926;
+}
+:root[data-theme="mocha"] {
+  color-scheme: dark;
+  --egg-block-alpha: 0.4;
+  --ctp-rosewater: #f5e0dc; --ctp-flamingo: #f2cdcd; --ctp-pink: #f5c2e7;
+  --ctp-mauve: #cba6f7; --ctp-red: #f38ba8; --ctp-maroon: #eba0ac;
+  --ctp-peach: #fab387; --ctp-yellow: #f9e2af; --ctp-green: #a6e3a1;
+  --ctp-teal: #94e2d5; --ctp-sky: #89dceb; --ctp-sapphire: #74c7ec;
+  --ctp-blue: #89b4fa; --ctp-lavender: #b4befe;
+  --ctp-text: #cdd6f4; --ctp-subtext1: #bac2de; --ctp-subtext0: #a6adc8;
+  --ctp-overlay2: #9399b2; --ctp-overlay1: #7f849c; --ctp-overlay0: #6c7086;
+  --ctp-surface2: #585b70; --ctp-surface1: #45475a; --ctp-surface0: #313244;
+  --ctp-base: #1e1e2e; --ctp-mantle: #181825; --ctp-crust: #11111b;
+}
+:root {
+  /* semantic scene theme, in terms of the flavor palette; every
+     derived color (line shades, hovers, fills) mixes toward another
+     palette entry, so all four flavors stay pure catppuccin */
+  --egg-shade: var(--ctp-text);
+  --egg-block-alpha: 0.25;
+  --egg-grid-line: var(--ctp-text);
+  --egg-grid-outline: var(--ctp-text);
+  --egg-block0: var(--ctp-blue);
+  --egg-block1: var(--ctp-green);
+  --egg-block2: var(--ctp-peach);
+  --egg-block3: var(--ctp-mauve);
+  --egg-block4: var(--ctp-red);
+  --egg-block5: var(--ctp-yellow);
+  --egg-tangled: var(--ctp-red);
+  --egg-topo-line: var(--ctp-text);
+  --egg-corner-fixed: var(--ctp-blue);
+  --egg-corner-free: var(--ctp-green);
+  --egg-singular: var(--ctp-red);
+  --egg-hl: var(--ctp-peach);
+  --egg-curve0: var(--ctp-red);
+  --egg-curve1: var(--ctp-teal);
+  --egg-curve2: var(--ctp-mauve);
+  --egg-curve3: var(--ctp-peach);
+  --egg-curve4: var(--ctp-blue);
+  --egg-pt: var(--ctp-text);
+  --egg-pt-fixed: var(--ctp-red);
+  --egg-pt-node: var(--ctp-peach);
+  --egg-ctrl: var(--ctp-overlay1);
+  --egg-geom-dim: var(--ctp-surface2);
+  --egg-spark-energy: var(--ctp-blue);
+  --egg-spark-mindet: var(--ctp-red);
+}
+/* standalone SVG exports: the svg element is :root there and carries the
+   flavor via data-theme; inline in the page this never matches */
+svg:root { background: var(--ctp-base); }
+/* 100dvh: mobile browsers exclude their dynamic toolbars (100vh does not,
+   which buries the bottom of the layout behind them); vh is the fallback
+   for older engines. Safe-area inset covers gesture bars / notches. */
+body { margin: 0; height: 100vh; height: 100dvh;
+       background: var(--ctp-base); color: var(--ctp-text);
+       padding-bottom: env(safe-area-inset-bottom);
+       box-sizing: border-box;
+       display: flex; flex-direction: column; overflow: hidden; }
+header { padding: 6px 12px; background: var(--ctp-crust); color: var(--ctp-text);
+         font-size: 14px; display: flex; gap: 8px 14px; align-items: center;
+         flex-wrap: wrap; }
+header .hint { color: var(--ctp-overlay1); font-size: 12px; margin-left: auto; }
+header label { font-size: 12px; display: flex; gap: 3px; align-items: center; }
+/* header dropdown menus (file / view) */
+header .menu { position: relative; }
+header .menu-btn { background: none; border: 1px solid var(--ctp-surface1); color: var(--ctp-text);
+  border-radius: 5px; padding: 3px 10px; font: inherit; font-size: 13px;
+  cursor: pointer; }
+header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surface0); }
+.menu-items { display: none; position: absolute; top: calc(100% + 4px); left: 0;
+  z-index: 40; background: var(--ctp-base); color: var(--ctp-text); border: 1px solid var(--ctp-surface1);
+  border-radius: 6px; box-shadow: 0 6px 18px rgba(20,26,34,0.25); padding: 4px;
+  min-width: 150px; flex-direction: column; }
+.menu.open .menu-items { display: flex; }
+.menu-items button { text-align: left; background: none; border: 0;
+  padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer;
+  border-radius: 4px; white-space: nowrap; color: var(--ctp-text); }
+.menu-items button:hover { background: var(--ctp-surface0); }
+.menu-items a { display: block; padding: 7px 12px; font-size: 13px;
+  color: var(--ctp-text); text-decoration: none; border-radius: 4px;
+  white-space: nowrap; }
+.menu-items a:hover { background: var(--ctp-surface0); }
+.menu-note { display: block; padding: 7px 12px; font-size: 12px;
+  color: var(--ctp-overlay1); max-width: 230px; }
+.menu-items label { padding: 6px 12px; }
+.menu-sep { border-top: 1px solid var(--ctp-surface0); margin: 3px 2px; }
+#filechip { font-size: 12px; font-family: ui-monospace, monospace;
+  color: var(--ctp-subtext1); }
+#filechip:empty { display: none; }
+/* open / save-as file browser modal (+ the watch + save-edits popups) */
+#fsmodal, #sugmodal, #savemodal, #resmodal { display: none; position: fixed; inset: 0;
+  z-index: 60;
+  background: rgba(20,26,34,0.45); align-items: center; justify-content: center; }
+#resmodal .fs-box { width: min(320px, 92vw); }
+.res-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.res-row input { width: 96px; padding: 6px 8px; border: 1px solid var(--ctp-surface1);
+  border-radius: 5px; font: inherit; background: var(--ctp-mantle); color: inherit; }
+.res-row input:focus { outline: none; border-color: var(--ctp-mauve); }
+.res-row input.invalid { border-color: var(--ctp-red); }
+#sug-text, #save-text { overflow: auto; background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: 6px; padding: 8px; font-size: 12px; margin: 0; }
+#save-remember { margin-right: 5px; }
+#save-remember-row { display: flex; align-items: center; cursor: pointer; }
+.fs-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.fs-box { background: var(--ctp-base); border-radius: 8px; width: min(460px, 92vw);
+  max-height: min(540px, 80dvh); display: flex; flex-direction: column;
+  padding: 10px; gap: 8px; font-size: 13px; }
+.fs-head { display: flex; justify-content: space-between; align-items: center;
+  font-weight: 600; }
+.fs-path { font-family: ui-monospace, monospace; font-size: 11px;
+  color: var(--ctp-subtext0); word-break: break-all; }
+#fs-list { overflow-y: auto; border: 1px solid var(--ctp-surface1); border-radius: 6px;
+  min-height: 140px; }
+.fs-entry { display: block; width: 100%; text-align: left; padding: 8px 12px;
+  border: 0; background: none; font: inherit; font-size: 13px; cursor: pointer; }
+.fs-entry:hover { background: var(--ctp-surface0); }
+.fs-dirent { font-weight: 600; }
+.fs-saverow { display: none; gap: 6px; }
+.fs-saverow input { flex: 1; padding: 6px 8px; border: 1px solid var(--ctp-surface1);
+  border-radius: 5px; font: inherit; }
+.panes { flex: 1; display: flex; min-height: 0; }
+/* Static 42/58 fallback; Split.js (when loaded) takes over the sizing. */
+.editor { width: 42%; display: flex; min-width: 0; }
+/* pan-x pan-y: keep one-finger scrolling native but claim two-finger
+   pinch (font zoom) for our pointer handlers */
+.editor, .editor textarea, .editor .cm-scroller, .editor .cm-content {
+  touch-action: pan-x pan-y; }
+.editor textarea, .editor .cm-scroller {
+  font-size: var(--egg-edfont, 13px) !important; }
+.panes.split-active .editor, .panes.split-active .viewer { flex: none; }
+/* Split.js gutter (created at runtime); ::after widens the touch target,
+   ::before is the visible grip handle. */
+.gutter { flex: none; cursor: col-resize; touch-action: none; position: relative;
+          background: var(--ctp-surface1); transition: background 0.15s; z-index: 5; }
+.gutter:hover { background: var(--ctp-overlay0); }
+.gutter::after { content: ''; position: absolute; top: 0; bottom: 0;
+                 left: -10px; right: -10px; }
+.gutter::before { content: ''; position: absolute; top: 50%; left: 50%;
+                  transform: translate(-50%, -50%); width: 4px; height: 48px;
+                  border-radius: 2px; background: var(--ctp-overlay1);
+                  box-shadow: -3px 0 0 -1px var(--ctp-overlay1), 3px 0 0 -1px var(--ctp-overlay1); }
+.gutter:hover::before { background: var(--ctp-surface0);
+                        box-shadow: -3px 0 0 -1px var(--ctp-base), 3px 0 0 -1px var(--ctp-base); }
+/* stacked (vertical) mode: the gutter is a horizontal strip */
+.gutter.gutter-vertical { cursor: row-resize; }
+.gutter.gutter-vertical::after { left: 0; right: 0; top: -10px; bottom: -10px; }
+.gutter.gutter-vertical::before { width: 48px; height: 4px;
+  box-shadow: 0 -3px 0 -1px var(--ctp-overlay1), 0 3px 0 -1px var(--ctp-overlay1); }
+.gutter.gutter-vertical:hover::before {
+  box-shadow: 0 -3px 0 -1px var(--ctp-base), 0 3px 0 -1px var(--ctp-base); }
+/* narrow windows stack the panes vertically (editor above viewer) */
+.panes.stacked { flex-direction: column; }
+.panes.stacked .editor { width: auto; }
+/* watch mode: the file on disk is the source of truth — no editor pane */
+.panes.watching .editor, .panes.watching .gutter { display: none !important; }
+.panes.watching .viewer { flex: 1 !important; width: auto !important; }
+@media (max-width: 900px) {
+  header .hint { display: none; }
+  /* static no-JS fallback for the stacked layout */
+  .panes { flex-direction: column; }
+  .editor { width: auto; height: 42%; }
+}
+.editor textarea { flex: 1; border: 0; outline: none; resize: none;
+                   padding: 10px; font: 13px/1.45 ui-monospace, monospace;
+                   background: var(--ctp-base); color: var(--ctp-text); tab-size: 4; }
+.editor.cm-active textarea { display: none; }
+.editor .cm-editor { flex: 1; min-width: 0; background: var(--ctp-base); }
+.editor .cm-editor.cm-focused { outline: none; }
+.editor .cm-scroller { font: 13px/1.45 ui-monospace, monospace; }
+.viewer { flex: 1; display: flex; flex-direction: column; min-width: 0;
+          position: relative; }
+#coords { position: absolute; right: 8px; bottom: 8px; z-index: 4;
+          background: color-mix(in srgb, var(--ctp-mantle) 88%, transparent);
+          color: var(--ctp-text);
+          border: 1px solid var(--ctp-surface1);
+          font: 11px ui-monospace, monospace; padding: 2px 7px;
+          border-radius: 3px; pointer-events: none; display: none; }
+#axes { position: absolute; left: 8px; bottom: 8px; z-index: 4;
+        pointer-events: none; opacity: 0.85; }
+#axes text { font: 11px ui-monospace, monospace; }
+/* editing-tools toolbar: its own floating group on the left edge, clear of the
+   top view bar and the bottom axis/coord readouts */
+#ed-tools { position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+            z-index: 5; display: none; flex-direction: column; gap: 4px; }
+body.editing #ed-tools { display: flex; }
+#ed-tools button { background: color-mix(in srgb, var(--ctp-mantle) 92%, transparent);
+            border: 1px solid var(--ctp-surface1); color: var(--ctp-text);
+            font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer; }
+#ed-tools button:hover:not(:disabled) { background: var(--ctp-surface0); }
+#ed-tools button:disabled { opacity: 0.4; cursor: default; }
+#selinfo { position: absolute; left: 50%; transform: translateX(-50%);
+           bottom: 8px; z-index: 4; background: color-mix(in srgb, var(--ctp-mantle) 88%, transparent);
+           color: var(--ctp-text);
+           border: 1px solid var(--ctp-surface1); font: 11px ui-monospace, monospace;
+           padding: 2px 7px; border-radius: 3px; pointer-events: none;
+           display: none; max-width: 55%; overflow: hidden;
+           text-overflow: ellipsis; white-space: nowrap; }
+#view svg .curve, #view svg .pt { cursor: pointer; }
+.layer-points .hl { fill: var(--egg-hl) !important; stroke: none; }
+#view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.canvas { flex: 1; min-height: 0; cursor: grab; touch-action: none;
+          -webkit-tap-highlight-color: transparent; }
+.gutter, #view svg * { -webkit-tap-highlight-color: transparent; }
+.canvas svg { width: 100%; height: 100%; display: block; background: var(--ctp-base); }
+/* Hide the server-rendered default grid until the localStorage-restored
+   script re-renders, so a page reload never flashes the wrong grid. Set on
+   <html> by the head script before first paint, cleared once the restore
+   render swaps in (or a fallback timeout). */
+html.restoring .canvas svg { visibility: hidden; }
+.canvas svg polyline, .canvas svg polygon,
+.canvas svg circle, .canvas svg rect { vector-effect: non-scaling-stroke; }
+/* --- scene styling (all semantic classes; colors from --egg-* vars) --- */
+.grid-lines { fill: none; stroke: var(--egg-grid-line); stroke-width: 0.6; }
+.grid-outline { fill: none; stroke: var(--egg-grid-outline); stroke-width: 1.1; }
+.block-fill { stroke: none; fill-opacity: var(--egg-block-alpha); }
+/* per-block hue: soft fill, lines in a darker shade of the same color */
+.block-fill.b0 { fill: var(--egg-block0); }
+.block-fill.b1 { fill: var(--egg-block1); }
+.block-fill.b2 { fill: var(--egg-block2); }
+.block-fill.b3 { fill: var(--egg-block3); }
+.block-fill.b4 { fill: var(--egg-block4); }
+.block-fill.b5 { fill: var(--egg-block5); }
+.grid-lines.b0, .grid-outline.b0 { stroke: color-mix(in srgb, var(--egg-block0) 55%, var(--egg-shade)); }
+.grid-lines.b1, .grid-outline.b1 { stroke: color-mix(in srgb, var(--egg-block1) 55%, var(--egg-shade)); }
+.grid-lines.b2, .grid-outline.b2 { stroke: color-mix(in srgb, var(--egg-block2) 55%, var(--egg-shade)); }
+.grid-lines.b3, .grid-outline.b3 { stroke: color-mix(in srgb, var(--egg-block3) 55%, var(--egg-shade)); }
+.grid-lines.b4, .grid-outline.b4 { stroke: color-mix(in srgb, var(--egg-block4) 55%, var(--egg-shade)); }
+.grid-lines.b5, .grid-outline.b5 { stroke: color-mix(in srgb, var(--egg-block5) 55%, var(--egg-shade)); }
+.layer-tangled { fill: var(--egg-tangled); fill-opacity: 0.35; }
+.topo-block { fill: var(--egg-topo-line); fill-opacity: 0.02;
+              stroke: var(--egg-topo-line); stroke-width: 1.6; }
+.topo-conn { fill: none; stroke: var(--egg-topo-line); stroke-width: 3.5;
+             stroke-linecap: round; }
+.topo-assoc { fill: none; stroke: var(--egg-topo-line); stroke-opacity: 0;
+              stroke-width: 10; }
+.layer-curves polyline { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.curve.c0 { stroke: var(--egg-curve0); }
+.curve.c1 { stroke: var(--egg-curve1); }
+.curve.c2 { stroke: var(--egg-curve2); }
+.curve.c3 { stroke: var(--egg-curve3); }
+.curve.c4 { stroke: var(--egg-curve4); }
+.layer-points .pt { fill: var(--egg-pt); }
+.layer-points .pt-fixed { fill: var(--egg-pt-fixed); }
+.layer-points .pt-node { fill: var(--ctp-base); stroke: var(--egg-pt-node); stroke-width: 2; }
+/* parameter panel: a slim strip over the guard dict, collapsed by default */
+#params { border-bottom: 1px solid var(--ctp-surface1); background: var(--ctp-mantle);
+          font-size: 12px; }
+#params:empty { display: none; }
+#params summary { padding: 3px 10px; cursor: pointer; color: var(--ctp-subtext0);
+                  user-select: none; }
+#params .param-grid { display: flex; flex-wrap: wrap; gap: 6px 14px;
+                      padding: 4px 10px 8px; }
+#params label { display: flex; gap: 5px; align-items: center;
+                color: var(--ctp-text); white-space: nowrap; }
+#params input[type=text], #params select {
+  font: inherit; font-size: 12px; width: 6.5em; padding: 1px 4px;
+  border: 1px solid var(--ctp-surface1); border-radius: 4px; background: var(--ctp-base); }
+#params select { width: auto; }
+#params .param-bad { border-color: var(--ctp-red); background: color-mix(in srgb, var(--ctp-red) 10%, var(--ctp-base)); }
+/* grid quality strip: one line of summary chips */
+#quality { border-bottom: 1px solid var(--ctp-surface1); background: var(--ctp-mantle);
+           font-size: 12px; color: var(--ctp-subtext0); padding: 3px 10px;
+           display: flex; gap: 12px; flex-wrap: wrap; }
+#quality:empty { display: none; padding: 0; }
+#quality .q-tag { font-weight: 600; color: var(--ctp-text); }
+/* selected grid block */
+.grid-block.hl .block-fill { fill-opacity: 0.45; }
+.grid-block.hl .grid-outline { stroke: var(--egg-hl); stroke-width: 2.5; }
+/* construction points: CAD-style control cage, dashed tangent lines */
+.ctrl-cage { fill: none; stroke: var(--egg-ctrl); stroke-width: 1.2;
+             stroke-dasharray: 5 4; }
+.ctrl-pt { fill: var(--ctp-base); stroke: var(--egg-ctrl); stroke-width: 1.5; }
+.ctrl-pt.fixed { fill: var(--egg-pt-fixed); stroke: none; }
+.ctrl-pt.node { stroke: var(--egg-pt-node); stroke-width: 2; }
+#view svg .ctrl-pt { cursor: pointer; }
+.layer-ctrl .ctrl-pt.hl { fill: var(--egg-hl) !important; }
+.corner { stroke: var(--ctp-base); stroke-width: 1.2; }
+.corner.fixed { fill: var(--egg-corner-fixed); }
+.corner.free { fill: var(--egg-corner-free); }
+.singular-box { fill: none; stroke: var(--egg-singular); stroke-width: 2; }
+.empty-note { fill: var(--ctp-overlay1); font-size: 24px; }
+#chart .spark { fill: none; stroke-width: 1.5; }
+#chart .spark-prev { stroke-width: 1; opacity: 0.3; }
+#chart .spark-zero { fill: none; stroke-width: 0.6; stroke-dasharray: 4 3; }
+#chart .spark-energy { stroke: var(--egg-spark-energy); }
+#chart .spark-mindet { stroke: var(--egg-spark-mindet); }
+#chart text { font-size: 10px; fill: var(--ctp-subtext0); }
+#chart .spark-lab.spark-energy { fill: var(--egg-spark-energy); stroke: none; }
+#chart .spark-lab.spark-mindet { fill: var(--egg-spark-mindet); stroke: none; }
+#chart .spark-tick { stroke: var(--ctp-overlay0); stroke-width: 1; }
+/* topology view: geometry curves dim to dashed grey until selected
+   (plain Vector3 points stay in their normal colors) */
+.mode-topo .layer-curves polyline,
+.mode-edit .layer-curves polyline { stroke: var(--egg-geom-dim);
+                                    stroke-dasharray: 6 5; }
+#view svg .topo-sel { cursor: pointer; }
+#view svg .hl { stroke: var(--egg-hl) !important; }
+.mode-topo .layer-curves polyline.hl,
+.mode-edit .layer-curves polyline.hl { stroke-dasharray: none; stroke-width: 3; }
+/* edit view: the live wireframe overlay, drawn client-side over the render */
+.edit-overlay { pointer-events: none; }
+.edit-overlay line { vector-effect: non-scaling-stroke; }
+.ed-edge { stroke: var(--egg-topo-line); stroke-width: 2.5; stroke-linecap: round; }
+.ed-rubber { stroke: var(--egg-hl); stroke-width: 1.5; stroke-dasharray: 6 4; }
+.ed-node { fill: var(--ctp-base); stroke: var(--egg-topo-line); stroke-width: 2; }
+.ed-node.ed-basecorner { fill: var(--egg-corner-free); }
+.ed-node.ed-fixed { fill: var(--egg-corner-fixed); }
+.ed-node.ed-active { fill: var(--egg-hl); }
+.ed-node.ed-sel { fill: var(--egg-hl); stroke: var(--egg-hl); }
+.ed-edge.ed-sel { stroke: var(--egg-hl); stroke-width: 3.5; }
+.ed-band { fill: var(--egg-hl); fill-opacity: 0.12; stroke: var(--egg-hl);
+           stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+/* modeless: always a crosshair, even over nodes/curves (a hover highlight,
+   not the cursor, signals what a click will snap to) */
+/* always a crosshair while editing — !important beats the #view-scoped pointer
+   cursor on .curve/.pt (a hover highlight, not the cursor, signals a snap) */
+body.editing .canvas, body.editing #view svg, body.editing #view svg * {
+  cursor: crosshair !important; }
+/* a snap target under the cursor lights up to show a click will grab it */
+.ed-node.ed-hover { stroke: var(--egg-hl); stroke-width: 3.5; }
+.ed-edge.ed-hover { stroke: var(--egg-hl); stroke-width: 4; opacity: 0.85; }
+/* while editing, the overlay is the live wireframe; dim the server's
+   last-committed topology so a moved corner has no stale ghost underneath */
+body.editing .layer-blocks, body.editing .layer-corners { opacity: 0.18; }
+#ed-validity { font-weight: 600; }
+.layer-blocks polygon.hl { fill: var(--egg-hl); fill-opacity: 0.07;
+                           stroke-width: 2.5; }
+.layer-blocks polyline.hl { stroke-opacity: 0.8 !important; stroke-width: 5; }
+.layer-corners circle.hl { fill: var(--egg-hl) !important; }
+#chart { border-top: 1px solid var(--ctp-surface1); background: var(--ctp-mantle); }
+#chart:empty { display: none; }
+#chart svg.sparkchart { width: 100%; height: 118px; display: block; }
+.bar { padding: 4px 10px; font-size: 12px; color: var(--ctp-subtext0);
+       background: var(--ctp-crust); display: flex; gap: 10px; align-items: center;
+       flex-wrap: wrap; }
+.bar .warn { color: var(--ctp-yellow); }
+.bar .bad { color: var(--ctp-red); font-weight: 600; }
+.bar .errline { cursor: pointer; }
+/* edit view with nothing editable: a banner under the view bar */
+.editnote { padding: 6px 10px; font-size: 12px; display: flex; gap: 8px;
+            align-items: baseline; color: var(--ctp-subtext1);
+            background: color-mix(in srgb, var(--ctp-yellow) 12%, var(--ctp-mantle));
+            border-bottom: 1px solid var(--ctp-surface1); }
+.editnote .ed-off-tag { font-weight: 600; color: var(--ctp-yellow);
+            text-transform: uppercase; font-size: 11px; letter-spacing: 0.03em;
+            flex: none; }
+.bar .phase { color: var(--ctp-text); font-weight: 600; }
+.bar .btns { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+/* shared button chrome: viewbar buttons + modal buttons (not the file list) */
+.bar .btns button, .fs-box button:not(.fs-entry) {
+  font: inherit; font-size: 12px; padding: 3px 12px;
+  border: 1px solid var(--ctp-surface1); border-radius: 5px;
+  background: var(--ctp-base); color: var(--ctp-text); cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.bar .btns button:hover:not(:disabled),
+.fs-box button:not(.fs-entry):hover { background: var(--ctp-surface0);
+                                      border-color: var(--ctp-overlay0); }
+.bar .btns button:disabled { opacity: 0.45; cursor: default; }
+.bar .btns button.icon { padding: 0 10px; display: inline-flex; align-items: center;
+  justify-content: center; align-self: stretch; }
+.bar .btns button.icon svg { display: block; }
+button.primary:not(:disabled) { background: var(--egg-spark-energy);
+  border-color: var(--egg-spark-energy); color: var(--ctp-base); }
+.bar .btns button.primary:hover:not(:disabled),
+.fs-box button.primary:hover { background: color-mix(in srgb, var(--ctp-blue) 85%, var(--egg-shade)); border-color: color-mix(in srgb, var(--ctp-blue) 85%, var(--egg-shade)); }
+.bar .btns button.danger:not(:disabled) { color: var(--ctp-red);
+                                          border-color: color-mix(in srgb, var(--ctp-red) 35%, var(--ctp-base)); }
+.bar .btns button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--ctp-red) 10%, var(--ctp-base));
+                                                border-color: var(--ctp-red); }
+.bar .btns select { font: inherit; font-size: 12px; padding: 3px 26px 3px 10px;
+  border: 1px solid var(--ctp-surface1); border-radius: 5px; color: var(--ctp-text);
+  cursor: pointer; -webkit-appearance: none; appearance: none;
+  background: var(--ctp-base) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5'><path d='M0 0l4 5 4-5z' fill='%234a5568'/></svg>")
+    no-repeat right 9px center;
+  transition: background-color 0.1s, border-color 0.1s; }
+.bar .btns select:hover { background-color: var(--ctp-surface0); border-color: var(--ctp-overlay0); }
+[data-theme="frappe"] .bar .btns select, [data-theme="macchiato"] .bar .btns select,
+[data-theme="mocha"] .bar .btns select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5'><path d='M0 0l4 5 4-5z' fill='%23a5adce'/></svg>"); }
+/* finger-sized targets on touch devices */
+@media (pointer: coarse) {
+  .bar .btns button, .fs-box button:not(.fs-entry), .bar .btns select {
+    padding: 8px 14px; font-size: 13px; }
+}
+pre.err { margin: 0; padding: 8px 10px; max-height: 12em; overflow: auto;
+          background: color-mix(in srgb, var(--ctp-red) 10%, var(--ctp-base)); color: var(--ctp-red); border-top: 2px solid var(--ctp-red);
+          font-size: 12px; white-space: pre-wrap; }
+details.out { border-top: 1px solid var(--ctp-surface1); font-size: 12px; }
+details.out pre { margin: 0; padding: 6px 10px; max-height: 8em; overflow: auto; }
+/* live run log: script egg.webui_print output, streamed during a run */
+#runlog { border-top: 1px solid var(--ctp-surface1); background: var(--ctp-mantle); }
+#runlog:empty { display: none; }
+#runlog pre { margin: 0; padding: 6px 10px; max-height: 8em; overflow: auto;
+              font: 11px/1.5 ui-monospace, monospace; color: var(--ctp-subtext1);
+              white-space: pre-wrap; }

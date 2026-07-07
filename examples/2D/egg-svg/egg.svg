@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+
+  PolyForm Noncommercial License 2.0.0-pre.2
+  https://github.com/bezmi/egg/blob/main/LICENSE.md
+  Free to use and redistribute for personal and noncommercial purposes.
+  See the license for details.
+  For commercial licensing, contact s.imran@tuta.io
+
+  The egg-in-rectangle domain, drawn for import by egg_svg.py (svg_import).
+  Each boundary is a separate object whose Inkscape label names it: inflow
+  (left wall), outflow (right wall), wall_top / wall_bottom, and the closed
+  egg curve. The paths are authored in the direction the topology expects
+  (bottom west->east, right south->north, top east->west, left south->north
+  in model space); editing the shapes in Inkscape is fine as long as the
+  labels and directions survive.
+-->
+<svg
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.0.dtd"
+   width="120mm"
+   height="120mm"
+   viewBox="0 0 4 4"
+   version="1.1"
+   id="svg1"
+   sodipodi:docname="egg.svg"
+   inkscape:version="1.3">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1.0"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm" />
+  <defs
+     id="defs1" />
+  <g
+     inkscape:label="domain"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <path
+       id="inflow"
+       inkscape:label="inflow"
+       d="M 0,4 L 0,0"
+       style="fill:none;stroke:#1c71d8;stroke-width:0.03" />
+    <path
+       id="outflow"
+       inkscape:label="outflow"
+       d="M 4,4 L 4,0"
+       style="fill:none;stroke:#c01c28;stroke-width:0.03" />
+    <path
+       id="wall_bottom"
+       inkscape:label="wall_bottom"
+       d="M 0,4 L 4,4"
+       style="fill:none;stroke:#5e5c64;stroke-width:0.03" />
+    <path
+       id="wall_top"
+       inkscape:label="wall_top"
+       d="M 4,0 L 0,0"
+       style="fill:none;stroke:#5e5c64;stroke-width:0.03" />
+    <path
+       id="egg"
+       inkscape:label="egg"
+       d="M 2.66,2
+         C 2.63048939857,1.88875023273 2.60097879713,1.77750046546 2.55672748287,1.67471908249
+         C 2.51247616861,1.57193769951 2.45348414152,1.47762470083 2.39169047558,1.39895923599
+         C 2.32989680965,1.32029377115 2.26530150488,1.25727584015 2.19953805677,1.21470239737
+         C 2.13377460867,1.17212895458 2.06684301723,1.15 2,1.15
+         C 1.93315698277,1.15 1.86640253974,1.17212895458 1.80046194323,1.21470239737
+         C 1.73452134672,1.25727584015 1.66939459672,1.32029377115 1.60830952442,1.39895923599
+         C 1.54722445211,1.47762470083 1.4901810575,1.57193769951 1.44327251713,1.67471908249
+         C 1.39636397676,1.77750046546 1.35959029062,1.88875023273 1.34,2
+         C 1.32040970938,2.11124976727 1.31800281427,2.22249953454 1.33720649995,2.32528091751
+         C 1.35641018564,2.42806230049 1.39722445211,2.52237529917 1.45830952442,2.60104076401
+         C 1.51939459672,2.67970622885 1.60075047485,2.74272415985 1.69439592605,2.78529760263
+         C 1.78804137725,2.82787104542 1.89397640152,2.85 2,2.85
+         C 2.10602359848,2.85 2.21213577116,2.82787104542 2.30560407395,2.78529760263
+         C 2.39907237674,2.74272415985 2.47989680965,2.67970622885 2.54169047558,2.60104076401
+         C 2.60348414152,2.52237529917 2.64624704047,2.42806230049 2.66279350005,2.32528091751
+         C 2.67933995962,2.22249953454 2.66966997981,2.11124976727 2.66,2
+         Z"
+       style="fill:#f9f06b;fill-opacity:0.5;stroke:#e5a50a;stroke-width:0.03" />
+  </g>
+  <g
+     inkscape:label="topology"
+     inkscape:groupmode="layer"
+     id="topology"
+     style="display:inline">
+    <path inkscape:label="msw-mse" d="M 1.0000,3.0000 L 3.0000,3.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="mse-mne" d="M 3.0000,3.0000 L 3.0000,1.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="mne-mnw" d="M 3.0000,1.0000 L 1.0000,1.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="mnw-msw" d="M 1.0000,1.0000 L 1.0000,3.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="isw-ise" d="M 1.4583,2.6010 L 2.5417,2.6010" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="ise-ine" d="M 2.5417,2.6010 L 2.3917,1.3990" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="ine-inw" d="M 2.3917,1.3990 L 1.6083,1.3990" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="inw-isw" d="M 1.6083,1.3990 L 1.4583,2.6010" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="msw-isw" d="M 1.0000,3.0000 L 1.4583,2.6010" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="mse-ise" d="M 3.0000,3.0000 L 2.5417,2.6010" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="mne-ine" d="M 3.0000,1.0000 L 2.3917,1.3990" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="mnw-inw" d="M 1.0000,1.0000 L 1.6083,1.3990" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="bsw-bse" d="M 1.0000,4.0000 L 3.0000,4.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="bse-mse" d="M 3.0000,4.0000 L 3.0000,3.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="msw-bsw" d="M 1.0000,3.0000 L 1.0000,4.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="rse-rne" d="M 4.0000,3.0000 L 4.0000,1.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="rne-mne" d="M 4.0000,1.0000 L 3.0000,1.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="mse-rse" d="M 3.0000,3.0000 L 4.0000,3.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="tne-tnw" d="M 3.0000,0.0000 L 1.0000,0.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="tnw-mnw" d="M 1.0000,0.0000 L 1.0000,1.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="mne-tne" d="M 3.0000,1.0000 L 3.0000,0.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="lnw-lsw" d="M 0.0000,1.0000 L 0.0000,3.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="lsw-msw" d="M 0.0000,3.0000 L 1.0000,3.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="mnw-lnw" d="M 1.0000,1.0000 L 0.0000,1.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="A_sw-bsw" d="M 0.0000,4.0000 L 1.0000,4.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="lsw-A_sw" d="M 0.0000,3.0000 L 0.0000,4.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="A_se-rse" d="M 4.0000,4.0000 L 4.0000,3.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="bse-A_se" d="M 3.0000,4.0000 L 4.0000,4.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="A_ne-tne" d="M 4.0000,0.0000 L 3.0000,0.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="rne-A_ne" d="M 4.0000,1.0000 L 4.0000,0.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="A_nw-lnw" d="M 0.0000,0.0000 L 0.0000,1.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+    <path inkscape:label="tnw-A_nw" d="M 1.0000,0.0000 L 0.0000,0.0000" style="fill:none;stroke:#9141ac;stroke-width:0.02;stroke-dasharray:0.06,0.04" />
+  </g>
+</svg>

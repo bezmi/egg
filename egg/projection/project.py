@@ -51,7 +51,13 @@ def project_nodes(grid, dof_constraints: dict | None = None) -> None:
     # a JAX array after a fused sweep); ensure it is writable before snapping.
     if not grid.global_nodes.flags.writeable:
         grid.global_nodes = np.array(grid.global_nodes)
+    # Group by entity so each one projects its DOFs in a single batch (the
+    # seeded-Newton curves vectorize project_many; DOFs are independent).
+    groups: dict[int, tuple] = {}
     for gidx, entity in dof_constraints.items():
-        grid.global_nodes[gidx] = entity.project(grid.global_nodes[gidx])
+        groups.setdefault(id(entity), (entity, []))[1].append(gidx)
+    for entity, idxs in groups.values():
+        idx = np.asarray(idxs, dtype=np.intp)
+        grid.global_nodes[idx] = entity.project_many(grid.global_nodes[idx])
     for bi, block in enumerate(grid.blocks):
         block.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]

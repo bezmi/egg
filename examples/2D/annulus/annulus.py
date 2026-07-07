@@ -1,0 +1,92 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
+"""Quarter annulus — the smallest complete egg example.
+
+One block, two arc associations, named boundary markers (``inner`` /
+``outer``), and a web-UI guard. A good first file to open in the web UI
+and edit.
+
+The command-line surface lives in ``driver.py``; run
+``uv run annulus.py --help`` for options.
+"""
+
+from egg.pipeline import PipelineConfig, generate_steps
+
+from egg.geometry import Arc, Vector3
+from egg.topology.builder import TopologyBuilder
+
+
+def build_annulus():
+    """Quarter-annulus topology; markers: inner / outer."""
+    centre = Vector3(0, 0)
+    i0, i1 = Vector3(1, 0), Vector3(0, 1)
+    o0 = Vector3(3, 0, fixed=True)
+    o1 = Vector3(0, 3, fixed=True)
+
+    # Naming each arc auto-derives its 'inner'/'outer' marker on the associated
+    # face and exposes it as an entity (topo.entities).
+    inner = Arc(i0, i1, centre).named("inner")
+    outer = Arc(o0, o1, centre).named("outer")
+
+    b = TopologyBuilder(d=2)
+    b.add_block("ring", sw=i0, se=o0, nw=i1, ne=o1, res=(10, 24))
+    b.associate("ring", 0, 0, inner)
+    b.associate("ring", 0, 1, outer)
+
+    topology = b.build()
+    return topology, topology.entities
+
+
+def setup(a):
+    """Topology, grid, and config from parsed args — shared by the
+    CLI ``main()`` and the web UI (which passes the parser defaults)."""
+    topo, ents = build_annulus()
+    grid = topo.initialize_grid()
+    cfg = PipelineConfig(
+        sweeps_per_delta=a["sweeps_per_delta"],
+        tmop_sweeps=a["tmop_sweeps"],
+        tmop_chunk=a["chunk"],
+        tmop_smoother=a["smoother"],
+        omega=a["omega"],
+        device=a["device"],
+    )
+    return topo, ents, grid, cfg
+
+
+def main():
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from driver import finish, parse_args
+
+    a = parse_args()
+    topo, ents, grid, cfg = setup(vars(a))
+    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
+
+    finish(grid, topo, ents, steps, a, title="quarter annulus")
+
+
+if __name__ == "__egg_webui__":  # running inside the egg web UI
+    import egg_webui
+
+    # CLI defaults, mirroring driver.py — edit freely
+    a = egg_webui.params(
+        sweeps_per_delta=20,
+        tmop_sweeps=40,
+        chunk=10,
+        smoother="jacobi",
+        omega=0.8,
+        device="cpu",
+    )
+    topo, ents, grid, cfg = setup(a)
+    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
+
+if __name__ == "__main__":
+    main()

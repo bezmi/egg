@@ -39,15 +39,17 @@ def build_blob_in_rectangle():
         Vector3(2.0 + ri * np.cos(th), 2.0 + ri * np.sin(th))
         for th, ri in zip(theta, r)
     ]
-    blob = Spline(ring, closed=True)
+    blob = Spline(ring, closed=True).named("blob")
 
-    # Outer walls, wrapped as parametric grid edges.
+    # Outer walls, wrapped as parametric grid edges. Naming each curve is the
+    # single source of truth: build() auto-tags every associated face with the
+    # name (an SU2 marker), and the topology exposes them as topo.entities.
     sw, se = Vector3(x=0, y=0, fixed=True), Vector3(x=4, y=0, fixed=True)
     ne, nw = Vector3(x=4, y=4, fixed=True), Vector3(x=0, y=4, fixed=True)
-    bottom = Edge(Line(p0=sw, p1=se))
-    right = Edge(Line(p0=se, p1=ne))
-    top = Edge(Line(p0=ne, p1=nw))
-    left = Edge(Line(p0=sw, p1=nw))
+    bottom = Edge(Line(p0=sw, p1=se), name="bottom")
+    right = Edge(Line(p0=se, p1=ne), name="right")
+    top = Edge(Line(p0=ne, p1=nw), name="top")
+    left = Edge(Line(p0=sw, p1=nw), name="left")
 
     # O-ring corners: mid square and inner square around the blob.
     msw, mse, mne, mnw = (Vector3(*p) for p in [(1, 1), (3, 1), (3, 3), (1, 3)])
@@ -85,20 +87,10 @@ def build_blob_in_rectangle():
 
     # Connectivity and wall associations are inferred; the O-ring faces on
     # the blob (rough corners) and the corner-block faces (corners shared by
-    # two walls) stay explicit.
+    # two walls) stay explicit. Every associated face inherits its entity's
+    # name as its boundary marker — no separate tag_boundary calls.
     for blk in ("o_s", "o_e", "o_n", "o_w"):
         b.associate(blk, 1, 1, blob)
-        b.tag_boundary("blob", blk, 1, 1)
-    # Wall associations of the e_* blocks are inferred (place_node corners);
-    # markers for SU2 export stay explicit.
-    wall_names = {
-        id(bottom): "bottom",
-        id(right): "right",
-        id(top): "top",
-        id(left): "left",
-    }
-    for blk, ent in [("e_s", bottom), ("e_e", right), ("e_n", top), ("e_w", left)]:
-        b.tag_boundary(wall_names[id(ent)], blk, 1, 0)
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_se", bottom, right),
@@ -107,18 +99,25 @@ def build_blob_in_rectangle():
     ]:
         b.associate(blk, 0, 0, a0)
         b.associate(blk, 1, 0, a1)
-        b.tag_boundary(wall_names[id(a0)], blk, 0, 0)
-        b.tag_boundary(wall_names[id(a1)], blk, 1, 0)
 
     topology = b.build()
-    entities = {
-        "blob": blob,
-        "bottom": bottom.entity,
-        "right": right.entity,
-        "top": top.entity,
-        "left": left.entity,
-    }
-    return topology, entities
+    return topology, topology.entities
+
+
+def setup(a):
+    """Topology, grid, and config from parsed args — shared by the
+    CLI ``main()`` and the web UI (which passes the parser defaults)."""
+    topo, ents = build_blob_in_rectangle()
+    grid = topo.initialize_grid()
+    cfg = PipelineConfig(
+        sweeps_per_delta=a["sweeps_per_delta"],
+        tmop_sweeps=a["tmop_sweeps"],
+        tmop_chunk=a["chunk"],
+        tmop_smoother=a["smoother"],
+        omega=a["omega"],
+        device=a["device"],
+    )
+    return topo, ents, grid, cfg
 
 
 def main():
@@ -129,19 +128,8 @@ def main():
     from driver import finish, parse_args
 
     a = parse_args()
-
-    topo, ents = build_blob_in_rectangle()
-
-    grid = topo.initialize_grid()
-    cfg = PipelineConfig(
-        sweeps_per_delta=a.sweeps_per_delta,
-        tmop_sweeps=a.tmop_sweeps,
-        tmop_chunk=a.chunk,
-        tmop_smoother=a.smoother,
-        omega=a.omega,
-        device=a.device,
-    )
-    steps = generate_steps(grid, None, cfg, untangle_direct=not a.plot_live)
+    topo, ents, grid, cfg = setup(vars(a))
+    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
 
     finish(
         grid,
@@ -153,6 +141,21 @@ def main():
         mindet_title="min det A (TMOP only)",
     )
 
+
+if __name__ == "__egg_webui__":  # running inside the egg web UI
+    import egg_webui
+
+    # CLI defaults, mirroring driver.py — edit freely
+    a = egg_webui.params(
+        sweeps_per_delta=20,
+        tmop_sweeps=40,
+        chunk=10,
+        smoother="jacobi",
+        omega=0.8,
+        device="cpu",
+    )
+    topo, ents, grid, cfg = setup(a)
+    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
 
 if __name__ == "__main__":
     main()
