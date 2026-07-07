@@ -50,6 +50,7 @@ def main():
         sweeps_per_delta=a.sweeps_per_delta,
         tmop_sweeps=a.tmop_sweeps,
         tmop_chunk=a.chunk,
+        tmop_smoother=a.smoother,
         omega=a.omega,
         device=a.device,
         pin_sweeps=a.pin_sweeps if a.pin_layers > 0 else 0,

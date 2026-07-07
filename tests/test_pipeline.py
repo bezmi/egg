@@ -165,6 +165,28 @@ def test_circle_in_rectangle_valid_and_conformant():
     assert _max_boundary_dist(grid) < 1e-8
 
 
+def test_tmop_smoother_fas():
+    """The FAS TMOP smoother produces a valid, boundary-conformant grid and
+    lands at (or below) the Jacobi result's energy with far fewer fine sweeps
+    (tmop_sweeps counts V-cycles in this mode)."""
+    topo, _ = _build_circle_in_rectangle(rough=False)
+    grid = generate(
+        topo, PipelineConfig(tmop_sweeps=12, tmop_chunk=6, tmop_smoother="fas")
+    )
+    rep = grid.pipeline_report
+    assert rep.final_min_det > 0
+    assert _max_boundary_dist(grid) < 1e-8
+
+    jac = generate(topo, PipelineConfig(tmop_sweeps=40))
+    assert rep.final_energy <= jac.pipeline_report.final_energy * 1.01
+
+
+def test_tmop_smoother_rejects_unknown():
+    topo, _ = _build_circle_in_rectangle(rough=False)
+    with pytest.raises(ValueError, match="tmop_smoother"):
+        generate(topo, PipelineConfig(tmop_sweeps=10, tmop_smoother="sor"))
+
+
 def test_idempotent_on_rerun():
     topo, _ = _build_circle_in_rectangle(rough=False)
     grid = generate(topo, PipelineConfig(tmop_sweeps=40))

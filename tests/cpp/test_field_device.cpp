@@ -129,7 +129,7 @@ int main()
 
             // Mark which buffer slots the interior view legitimately wrote to, so
             // we can assert every *other* slot (ghost layer) was left untouched.
-            std::vector<char> is_interior(layout.total_doubles(), 0);
+            std::vector<char> is_interior(layout.total_reals(), 0);
 
             std::size_t pos = 0;
             for (std::size_t b = 0; b < layout.num_blocks(); ++b) {
@@ -156,7 +156,7 @@ int main()
             }
 
             // Ghost slots (everything not flagged interior) keep their seed value.
-            for (std::size_t off = 0; off < layout.total_doubles(); ++off) {
+            for (std::size_t off = 0; off < layout.total_reals(); ++off) {
                 if (!is_interior[off]) {
                     expect(buf_after[off] == static_cast<egg::real>(off))
                       << std::format("ghost slot {} was modified: {}", off, buf_after[off]);
