@@ -10,3 +10,8 @@ Data model
 ----------
 
 .. automodule:: egg.topology.block_topology
+
+Explicit topology
+-----------------
+
+.. automodule:: egg.topology.explicit

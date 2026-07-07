@@ -1,0 +1,429 @@
+/* Catppuccin skin for the Pallets "flask" theme, applied when
+   theme-toggle.js sets html[data-theme="<flavor>"] (mocha / macchiato /
+   frappé dark, latte light — same palette and localStorage key as the
+   egg web UI, so docs opened from it follow the flavor picked there).
+   Without JS no data-theme is set and the stock flask look survives.
+   Selector inventory mirrors pocoo.css + the flask.css accent overlay. */
+
+/* -- the four flavor palettes (keep in lockstep with webui/app.py) --- */
+
+html[data-theme="latte"] {
+  color-scheme: light;
+  --ctp-rosewater: #dc8a78; --ctp-flamingo: #dd7878; --ctp-pink: #ea76cb;
+  --ctp-mauve: #8839ef; --ctp-red: #d20f39; --ctp-maroon: #e64553;
+  --ctp-peach: #fe640b; --ctp-yellow: #df8e1d; --ctp-green: #40a02b;
+  --ctp-teal: #179299; --ctp-sky: #04a5e5; --ctp-sapphire: #209fb5;
+  --ctp-blue: #1e66f5; --ctp-lavender: #7287fd;
+  --ctp-text: #4c4f69; --ctp-subtext1: #5c5f77; --ctp-subtext0: #6c6f85;
+  --ctp-overlay2: #7c7f93; --ctp-overlay1: #8c8fa1; --ctp-overlay0: #9ca0b0;
+  --ctp-surface2: #acb0be; --ctp-surface1: #bcc0cc; --ctp-surface0: #ccd0da;
+  --ctp-base: #eff1f5; --ctp-mantle: #e6e9ef; --ctp-crust: #dce0e8;
+}
+html[data-theme="frappe"] {
+  color-scheme: dark;
+  --ctp-rosewater: #f2d5cf; --ctp-flamingo: #eebebe; --ctp-pink: #f4b8e4;
+  --ctp-mauve: #ca9ee6; --ctp-red: #e78284; --ctp-maroon: #ea999c;
+  --ctp-peach: #ef9f76; --ctp-yellow: #e5c890; --ctp-green: #a6d189;
+  --ctp-teal: #81c8be; --ctp-sky: #99d1db; --ctp-sapphire: #85c1dc;
+  --ctp-blue: #8caaee; --ctp-lavender: #babbf1;
+  --ctp-text: #c6d0f5; --ctp-subtext1: #b5bfe2; --ctp-subtext0: #a5adce;
+  --ctp-overlay2: #949cbb; --ctp-overlay1: #838ba7; --ctp-overlay0: #737994;
+  --ctp-surface2: #626880; --ctp-surface1: #51576d; --ctp-surface0: #414559;
+  --ctp-base: #303446; --ctp-mantle: #292c3c; --ctp-crust: #232634;
+}
+html[data-theme="macchiato"] {
+  color-scheme: dark;
+  --ctp-rosewater: #f4dbd6; --ctp-flamingo: #f0c6c6; --ctp-pink: #f5bde6;
+  --ctp-mauve: #c6a0f6; --ctp-red: #ed8796; --ctp-maroon: #ee99a0;
+  --ctp-peach: #f5a97f; --ctp-yellow: #eed49f; --ctp-green: #a6da95;
+  --ctp-teal: #8bd5ca; --ctp-sky: #91d7e3; --ctp-sapphire: #7dc4e4;
+  --ctp-blue: #8aadf4; --ctp-lavender: #b7bdf8;
+  --ctp-text: #cad3f5; --ctp-subtext1: #b8c0e0; --ctp-subtext0: #a5adcb;
+  --ctp-overlay2: #939ab7; --ctp-overlay1: #8087a2; --ctp-overlay0: #6e738d;
+  --ctp-surface2: #5b6078; --ctp-surface1: #494d64; --ctp-surface0: #363a4f;
+  --ctp-base: #24273a; --ctp-mantle: #1e2030; --ctp-crust: #181926;
+}
+html[data-theme="mocha"] {
+  color-scheme: dark;
+  --ctp-rosewater: #f5e0dc; --ctp-flamingo: #f2cdcd; --ctp-pink: #f5c2e7;
+  --ctp-mauve: #cba6f7; --ctp-red: #f38ba8; --ctp-maroon: #eba0ac;
+  --ctp-peach: #fab387; --ctp-yellow: #f9e2af; --ctp-green: #a6e3a1;
+  --ctp-teal: #94e2d5; --ctp-sky: #89dceb; --ctp-sapphire: #74c7ec;
+  --ctp-blue: #89b4fa; --ctp-lavender: #b4befe;
+  --ctp-text: #cdd6f4; --ctp-subtext1: #bac2de; --ctp-subtext0: #a6adc8;
+  --ctp-overlay2: #9399b2; --ctp-overlay1: #7f849c; --ctp-overlay0: #6c7086;
+  --ctp-surface2: #585b70; --ctp-surface1: #45475a; --ctp-surface0: #313244;
+  --ctp-base: #1e1e2e; --ctp-mantle: #181825; --ctp-crust: #11111b;
+}
+
+/* -- flavor selector (inserted into the sidebar by theme-toggle.js);
+   same control chrome as the web UI's view-bar selects ---------------- */
+
+html[data-theme] #theme-select {
+  float: right;
+  margin: 12px 0 10px;
+  padding: 3px 24px 3px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ctp-text);
+  background-color: var(--ctp-base);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5'><path d='M0 0l4 5 4-5z' fill='%234a5568'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  border: 1px solid var(--ctp-surface1);
+  border-radius: 5px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: background-color 0.1s, border-color 0.1s;
+}
+
+html[data-theme] #theme-select:hover {
+  background-color: var(--ctp-surface0);
+  border-color: var(--ctp-overlay0);
+}
+
+/* data-URIs cannot var(): dark flavors get a light dropdown arrow */
+html[data-theme="frappe"] #theme-select,
+html[data-theme="macchiato"] #theme-select,
+html[data-theme="mocha"] #theme-select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5'><path d='M0 0l4 5 4-5z' fill='%23a5adce'/></svg>");
+}
+
+/* -- page layout ---------------------------------------------------- */
+
+html[data-theme] body,
+html[data-theme] div.document,
+html[data-theme] div.body {
+  background-color: var(--ctp-base);
+  color: var(--ctp-text);
+}
+
+html[data-theme] div.sphinxsidebar,
+html[data-theme] div.sphinxsidebar a,
+html[data-theme] div.sphinxsidebar a code {
+  color: var(--ctp-subtext0);
+  border-color: var(--ctp-subtext0);
+}
+
+html[data-theme] div.sphinxsidebar a:hover {
+  background-color: var(--ctp-surface0);
+}
+
+/* long generated names (the C++ API pages) wrap instead of truncating
+   to an ellipsis: pocoo hides overflow on the li, and sphinx marks each
+   name an unbreakable span.pre. Wrapped lines hang-indent so multi-line
+   entries stay scannable. */
+html[data-theme] div.sphinxsidebar li {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding-left: 12px;
+  text-indent: -12px;
+}
+
+html[data-theme] div.sphinxsidebar .pre {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* deep C++ API trees: basic.css indents 20px per level, which starves
+   deep entries of width — tighten the steps */
+html[data-theme] div.sphinxsidebar ul ul {
+  margin-left: 12px;
+}
+
+/* desktop: the sidebar as a mantle card, matching the portrait strip
+   (the floated column only spans its content, so full-bleed would stop
+   mid-page — a rounded panel reads better) */
+@media screen and (min-width: 768px) {
+  html[data-theme] div.sphinxsidebar {
+    background-color: var(--ctp-mantle);
+    border: 1px solid var(--ctp-surface0);
+    border-radius: 8px;
+    width: 260px; /* pocoo's 220px starves the wrapped C++ API names */
+  }
+  html[data-theme] div.sphinxsidebarwrapper {
+    padding: 10px 16px 14px;
+  }
+  html[data-theme] div.bodywrapper {
+    margin-left: 260px;
+  }
+}
+
+html[data-theme] div.sphinxsidebar h3,
+html[data-theme] div.sphinxsidebar h4 {
+  color: var(--ctp-text);
+}
+
+/* quick search: the web UI's text-input + primary-button chrome */
+html[data-theme] div.sphinxsidebar input {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--ctp-text);
+  background-color: var(--ctp-base);
+  border: 1px solid var(--ctp-surface1);
+}
+
+html[data-theme] div.sphinxsidebar #searchbox input[type="text"] {
+  padding: 4px 8px;
+  border-radius: 5px 0 0 5px;
+}
+
+html[data-theme] div.sphinxsidebar #searchbox input[type="submit"] {
+  padding: 4px 12px;
+  border-left-width: 0;
+  border-radius: 0 5px 5px 0;
+  background: var(--ctp-blue);
+  border-color: var(--ctp-blue);
+  color: var(--ctp-base);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+html[data-theme] div.sphinxsidebar #searchbox input[type="submit"]:hover {
+  background: color-mix(in srgb, var(--ctp-blue) 85%, var(--ctp-text));
+}
+
+/* portrait/narrow: pocoo moves the sidebar below the content and paints
+   it (and the footer) grey #333 — re-skin that strip in the flavor */
+@media screen and (max-width: 767px) {
+  html[data-theme] div.sphinxsidebar,
+  html[data-theme] div.footer {
+    background-color: var(--ctp-mantle);
+    color: var(--ctp-subtext0);
+  }
+}
+
+html[data-theme] div.footer,
+html[data-theme] div.footer a {
+  color: var(--ctp-overlay1);
+  border-color: var(--ctp-overlay1);
+}
+
+/* -- body styles ----------------------------------------------------- */
+
+html[data-theme] a,
+html[data-theme] a.reference,
+html[data-theme] a.footnote-reference {
+  color: var(--ctp-blue);
+  text-decoration-color: var(--ctp-blue);
+}
+
+html[data-theme] a:hover {
+  color: var(--ctp-peach);
+  text-decoration-color: var(--ctp-peach);
+}
+
+html[data-theme] h1,
+html[data-theme] h2,
+html[data-theme] h3,
+html[data-theme] h4,
+html[data-theme] h5,
+html[data-theme] h6 {
+  color: var(--ctp-text);
+}
+
+/* inline code: a mantle chip in every flavor */
+html[data-theme] code {
+  color: var(--ctp-text);
+  background: var(--ctp-mantle);
+}
+
+html[data-theme] a:has(> code) {
+  color: var(--ctp-blue);
+  text-decoration-color: var(--ctp-blue);
+}
+
+html[data-theme] a.headerlink {
+  color: var(--ctp-surface2);
+}
+
+html[data-theme] a.headerlink:hover {
+  color: var(--ctp-text);
+}
+
+html[data-theme] img.screenshot {
+  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.35);
+}
+
+html[data-theme] hr {
+  border-color: var(--ctp-surface1);
+}
+
+/* -- admonitions ------------------------------------------------------ */
+
+html[data-theme] div.admonition,
+html[data-theme] div.topic {
+  background-color: var(--ctp-mantle);
+  border-top-color: var(--ctp-surface1);
+  border-bottom-color: var(--ctp-surface1);
+}
+
+html[data-theme] div.danger,
+html[data-theme] div.error {
+  background-color: color-mix(in srgb, var(--ctp-red) 12%, var(--ctp-base));
+  border-color: color-mix(in srgb, var(--ctp-red) 40%, var(--ctp-base));
+}
+
+html[data-theme] div.seealso {
+  background-color: color-mix(in srgb, var(--ctp-yellow) 15%, var(--ctp-base));
+  border-color: color-mix(in srgb, var(--ctp-yellow) 45%, var(--ctp-base));
+}
+
+/* -- search highlight -------------------------------------------------- */
+
+html[data-theme] dt:target,
+html[data-theme] .footnote:target,
+html[data-theme] span.highlighted {
+  background-color: color-mix(in srgb, var(--ctp-yellow) 30%, var(--ctp-base));
+}
+
+html[data-theme] rect.highlighted {
+  fill: color-mix(in srgb, var(--ctp-yellow) 30%, var(--ctp-base));
+}
+
+html[data-theme] div.viewcode-block:target {
+  background-color: color-mix(in srgb, var(--ctp-yellow) 15%, var(--ctp-base));
+  border-color: color-mix(in srgb, var(--ctp-yellow) 45%, var(--ctp-base));
+}
+
+/* -- version warning ---------------------------------------------------- */
+
+html[data-theme] p.version-warning {
+  background-color: color-mix(in srgb, var(--ctp-sapphire) 25%, var(--ctp-base));
+}
+
+/* -- tables ------------------------------------------------------------- */
+
+html[data-theme] table.docutils {
+  border-color: var(--ctp-surface1);
+  box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.35);
+}
+
+html[data-theme] table.docutils td,
+html[data-theme] table.docutils th {
+  border-color: var(--ctp-surface1);
+}
+
+html[data-theme] table.field-list {
+  box-shadow: none;
+}
+
+html[data-theme] table.footnote {
+  border-color: var(--ctp-surface1);
+  background-color: var(--ctp-mantle);
+}
+
+/* -- C/C++ API signature tokens ----------------------------------------- */
+/* Sphinx's basic.css hardcodes light-theme colors for pygments token
+   classes inside .sig declarations (outside .highlight blocks). */
+html[data-theme] .sig.c   .k, html[data-theme] .sig.c   .kt,
+html[data-theme] .sig.cpp .k, html[data-theme] .sig.cpp .kt {
+  color: var(--ctp-mauve);
+}
+html[data-theme] .sig.c   .m,
+html[data-theme] .sig.cpp .m {
+  color: var(--ctp-peach);
+}
+html[data-theme] .sig.c   .s, html[data-theme] .sig.c   .sc,
+html[data-theme] .sig.cpp .s, html[data-theme] .sig.cpp .sc {
+  color: var(--ctp-green);
+}
+
+/* -- pygments, flavor-driven (mirrors the web UI editor's mapping) ------ */
+/* The blanket span rule out-specifies pygments.css's per-class colors;
+   the class rules below then win over the blanket one. */
+
+html[data-theme] .highlight {
+  background: var(--ctp-mantle);
+  color: var(--ctp-text);
+}
+html[data-theme] .highlight span { color: var(--ctp-text); }
+html[data-theme] .highlight .hll { background-color: var(--ctp-surface1); }
+html[data-theme] .highlight .hll span { background-color: transparent; }
+
+html[data-theme] .highlight .k,  html[data-theme] .highlight .kc,
+html[data-theme] .highlight .kd, html[data-theme] .highlight .kn,
+html[data-theme] .highlight .kp, html[data-theme] .highlight .kr,
+html[data-theme] .highlight .kt, html[data-theme] .highlight .ow,
+html[data-theme] .highlight .nt { color: var(--ctp-mauve); }
+
+html[data-theme] .highlight .s,  html[data-theme] .highlight .sa,
+html[data-theme] .highlight .sb, html[data-theme] .highlight .sc,
+html[data-theme] .highlight .dl, html[data-theme] .highlight .sd,
+html[data-theme] .highlight .s2, html[data-theme] .highlight .se,
+html[data-theme] .highlight .sh, html[data-theme] .highlight .si,
+html[data-theme] .highlight .sx, html[data-theme] .highlight .sr,
+html[data-theme] .highlight .s1, html[data-theme] .highlight .ss {
+  color: var(--ctp-green);
+}
+
+html[data-theme] .highlight .m,  html[data-theme] .highlight .mb,
+html[data-theme] .highlight .mf, html[data-theme] .highlight .mh,
+html[data-theme] .highlight .mi, html[data-theme] .highlight .mo,
+html[data-theme] .highlight .il { color: var(--ctp-peach); }
+
+html[data-theme] .highlight .nf, html[data-theme] .highlight .fm {
+  color: var(--ctp-blue);
+}
+
+html[data-theme] .highlight .nc, html[data-theme] .highlight .nn {
+  color: var(--ctp-yellow);
+  text-decoration: none;
+}
+
+html[data-theme] .highlight .o { color: var(--ctp-sky); }
+
+html[data-theme] .highlight .c,   html[data-theme] .highlight .ch,
+html[data-theme] .highlight .cm,  html[data-theme] .highlight .cpf,
+html[data-theme] .highlight .c1,  html[data-theme] .highlight .cs,
+html[data-theme] .highlight .cp {
+  color: var(--ctp-overlay0);
+  font-style: italic;
+}
+
+html[data-theme] .highlight .nb, html[data-theme] .highlight .bp {
+  color: var(--ctp-red);
+}
+
+html[data-theme] .highlight .nd { color: var(--ctp-peach); }
+
+html[data-theme] .highlight .err {
+  color: var(--ctp-red);
+  background-color: transparent;
+  border: none;
+}
+html[data-theme] .highlight .gr, html[data-theme] .highlight .gt,
+html[data-theme] .highlight .gd { color: var(--ctp-red); }
+html[data-theme] .highlight .gi { color: var(--ctp-green); }
+html[data-theme] .highlight .gh, html[data-theme] .highlight .gu {
+  color: var(--ctp-text);
+  font-weight: bold;
+  text-decoration: none;
+}
+html[data-theme] .highlight .go { color: var(--ctp-subtext0); }
+html[data-theme] .highlight .gp { color: var(--ctp-overlay1); }
+
+html[data-theme] td.linenos .normal,
+html[data-theme] span.linenos {
+  color: var(--ctp-overlay0);
+  background-color: transparent;
+}
+
+/* -- example screenshots: match the shot to the active flavor ---------
+   Each web-UI screenshot ships as a light (latte) and a dark (mocha)
+   figure, tagged .only-light / .only-dark. Show the one matching the
+   docs flavor; the three dark flavors share the mocha shot. Default
+   (no data-theme, e.g. JS off) shows the light shot. The `figure`
+   qualifier is load-bearing: it lifts the base hide to specificity
+   (0,1,1) so it beats pocoo.css's figure rule — a bare `.only-dark`
+   (0,1,0) loses to it and both shots render. */
+figure.only-dark { display: none; }
+html[data-theme="mocha"] figure.only-light,
+html[data-theme="macchiato"] figure.only-light,
+html[data-theme="frappe"] figure.only-light { display: none; }
+html[data-theme="mocha"] figure.only-dark,
+html[data-theme="macchiato"] figure.only-dark,
+html[data-theme="frappe"] figure.only-dark { display: block; }

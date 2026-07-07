@@ -18,6 +18,44 @@ pipeline orchestration) stays in Python.
 
 For now, see [`DEVELOPING.md`](DEVELOPING.md) to get started.
 
+## Web UI
+
+A browser front-end ("code as CAD"): a Python geometry script on the left,
+a live SVG render of its topology/grid on the right, with the real
+untangle + TMOP pipeline streaming into the view.
+
+```bash
+uv sync --group webui          # once (add --group docs for the help menu)
+uv run --no-sync egg-webui     # → http://127.0.0.1:5001
+```
+
+`egg-webui my_geometry.py` opens a script; `--host 0.0.0.0` exposes it on
+the network; `--reload` restarts on source edits; `--no-docs` skips the
+Sphinx docs refresh (help → documentation serves them at `/docs/`).
+
+The basics:
+
+- **file → examples…** opens any script under `examples/2D/`; every
+  example draws its topology and registers a run with the CLI-default
+  settings. **file → open/save/save as** is a normal file workflow
+  (Ctrl+S saves), and **file → watch file** — the expected day-to-day
+  workflow — hides the built-in editor and follows the opened file on
+  disk: edit in your own editor, the view updates on save, run/exports
+  keep working.
+- **run** executes the pipeline a script registered via
+  `egg_webui.run(grid, steps)` in its `if __name__ == "__egg_webui__":`
+  block (the mirror image of the `__main__` guard — see any example) and
+  animates the relaxing mesh with live energy / min-det charts; **stop**
+  halts at the next chunk boundary. No registration, no run: the UI never
+  invents a pipeline. In the examples, the block's `a = dict(...)` is the
+  knob panel (sweeps, smoother, device, …).
+- The view switches between the smoothed **grid** and the block
+  **topology** (tap elements for names + constraining geometry);
+  **file → export su2 / svg** downloads the mesh (with `tag_boundary`
+  markers) or the picture.
+
+Details, theming, and the full script contract: [`webui/README.md`](webui/README.md).
+
 ## Running the demos
 
 The circle demos accept `--device {auto,cpu,gpu}` to select the SYCL device:

@@ -6,6 +6,11 @@ Construction front-end (2D)
 
 .. automodule:: egg.geometry.frontend2d
 
+SVG import (2D)
+---------------
+
+.. automodule:: egg.geometry.svg2d
+
 Analytic primitives (2D)
 ------------------------
 

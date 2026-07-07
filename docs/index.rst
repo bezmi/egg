@@ -10,6 +10,21 @@ set-ups.
 
 .. toctree::
    :maxdepth: 2
+   :caption: User guide
+
+   webui
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Worked examples
+
+   examples/egg
+   examples/egg-svg
+   examples/capsule-fire-ii
+   examples/capsule-phoebus
+
+.. toctree::
+   :maxdepth: 2
    :caption: API reference
 
    api/geometry
