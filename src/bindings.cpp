@@ -512,6 +512,7 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     std::vector<int> owner_block(M, -1);
     std::vector<int> owner_slot(M, -1);
     std::vector<std::size_t> share_src_off, share_dst_off;
+    // Pass 1: interior map, lowest-index owner, and the initial-position scatter.
     for (std::size_t b = 0; b < num_blocks; ++b) {
         const std::size_t n = bgd[b].size();
         for (std::size_t f = 0; f < n; ++f) {
@@ -522,13 +523,6 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
             if (owner_block[static_cast<std::size_t>(gid)] < 0) {
                 owner_block[static_cast<std::size_t>(gid)] = static_cast<int>(b);
                 owner_slot[static_cast<std::size_t>(gid)] = sidx;
-            } else {
-                // A non-owner copy: broadcast the owner interior -> this interior
-                // (element offsets; the copy order is immaterial, see
-                // fused_halo_broadcast).
-                share_src_off.push_back(
-                  static_cast<std::size_t>(owner_slot[static_cast<std::size_t>(gid)]) * D);
-                share_dst_off.push_back(static_cast<std::size_t>(sidx) * D);
             }
             // Scatter the initial position into every block's copy (owner +
             // non-owner) of the node; the broadcast keeps them in sync thereafter.
@@ -536,6 +530,40 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
                 Xp[(static_cast<std::size_t>(sidx) * D) + k] =
                   Xg[(static_cast<std::size_t>(gid) * D) + k];
             }
+        }
+    }
+
+    // A singular node is a shared corner of every block in its fan and may be
+    // relaxed in any of them. Python (build_block_structured_context) picks a fan
+    // block with spare ghost-ring slots as its host (sing_block/sing_logical), so
+    // its fan mirror has room even when the lowest-index block is a full interior
+    // one. Override the owner with that choice before the broadcasts are built.
+    {
+        const std::vector<int> sblk = extract_int(structured, "sing_block");
+        const auto slog = extract_index_rows<D>(structured, "sing_logical");
+        for (std::size_t s = 0; s < sblk.size(); ++s) {
+            const auto ob = static_cast<std::size_t>(sblk[s]);
+            std::array<std::size_t, D> lg {};
+            for (int k = 0; k < D; ++k) { lg[static_cast<std::size_t>(k)] = slog[s][k]; }
+            const int gid = bgd[ob][ravel(lg, shapes[ob])];
+            owner_block[static_cast<std::size_t>(gid)] = static_cast<int>(ob);
+            owner_slot[static_cast<std::size_t>(gid)] = interior_node_index<D>(layout, ob, lg);
+        }
+    }
+
+    // Pass 2: owner -> non-owner-copy broadcasts, built after the owner overrides
+    // so each copy sources from the final owner (copy order is immaterial, see
+    // fused_halo_broadcast).
+    for (std::size_t b = 0; b < num_blocks; ++b) {
+        const std::size_t n = bgd[b].size();
+        for (std::size_t f = 0; f < n; ++f) {
+            const int gid = bgd[b][f];
+            if (owner_block[static_cast<std::size_t>(gid)] == static_cast<int>(b)) { continue; }
+            const std::array<std::size_t, D> logical = unravel(f, shapes[b]);
+            share_src_off.push_back(
+              static_cast<std::size_t>(owner_slot[static_cast<std::size_t>(gid)]) * D);
+            share_dst_off.push_back(
+              static_cast<std::size_t>(interior_node_index<D>(layout, b, logical)) * D);
         }
     }
 
@@ -1076,21 +1104,31 @@ PYBIND11_MODULE(cpp_core, m)
 
     m.def(
       "metric_eval",
-      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& t_arr)
-        -> std::tuple<double, py::array_t<double>, py::array_t<double>> {
+      [](
+        const py::array_t<double, py::array::c_style | py::array::forcecast>& t_arr,
+        const std::string& metric) -> std::tuple<double, py::array_t<double>, py::array_t<double>> {
           const auto* t = t_arr.data();
           egg::VecT vt {static_cast<egg::real>(t[0]),
                         static_cast<egg::real>(t[1]),
                         static_cast<egg::real>(t[2]),
                         static_cast<egg::real>(t[3])};
-          egg::ShapeObjective objective;
-          const auto mu = static_cast<double>(objective.value(vt));
-          auto g = objective.grad(vt);
-          auto h = objective.hess(vt);
-          return std::make_tuple(mu, to_f64(g.data(), 4), to_f64(h.data(), 16));
+          if (metric != "shape_2d" && metric != "shape_size") {
+              throw py::value_error("metric_eval: unknown metric '" + metric + "'");
+          }
+          const egg::ObjectiveKind objective = egg::make_objective<2>(metric, 0.0);
+          return std::visit(
+            [&](const auto& obj) {
+                const auto mu = static_cast<double>(obj.value(vt));
+                auto g = obj.grad(vt);
+                auto h = obj.hess(vt);
+                return std::make_tuple(mu, to_f64(g.data(), 4), to_f64(h.data(), 16));
+            },
+            objective);
       },
       py::arg("t"),
-      "Evaluate shape_2d metric. Returns (mu, grad(4,), hess(16,)).");
+      py::arg("metric") = "shape_2d",
+      "Evaluate a named 2D metric (\"shape_2d\" or \"shape_size\"). "
+      "Returns (mu, grad(4,), hess(16,)).");
 
     m.def(
       "metric_eval_3d",

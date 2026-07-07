@@ -99,9 +99,8 @@ def _respace_line(
     if entity is not None:
         # Perpendicular wall distance at each original node, regularised to
         # something strictly increasing so it is invertible against cum.
-        dist = np.array(
-            [np.linalg.norm(p - np.asarray(entity.project(p))) for p in points]
-        )
+        feet = np.asarray(entity.project_many(points), dtype=float)
+        dist = np.linalg.norm(points - feet, axis=1)
         dist[0] = 0.0
         dist = np.maximum.accumulate(dist)
         dist += np.arange(len(dist)) * 1e-15
@@ -218,6 +217,10 @@ def _orthogonalise_columns(
         n_hat = np.asarray(entity.normal(np.asarray(entity.project(foot))), dtype=float)
         if np.dot(n_hat, pts[1] - foot) < 0:
             n_hat = -n_hat
+        rows = pts[1 : k_max + 1]
+        heights = np.linalg.norm(
+            rows - np.asarray(entity.project_many(rows), dtype=float), axis=1
+        )
         d_hat = n_hat
         if shear[col] is not None:
             lam, b_hat = shear[col]
@@ -229,7 +232,7 @@ def _orthogonalise_columns(
             dof = int(dofs[k])
             if dof in fixed_dofs:
                 continue
-            height = np.linalg.norm(pts[k] - np.asarray(entity.project(pts[k])))
+            height = float(heights[k - 1])
             w = (
                 1.0
                 if k <= n_layers
@@ -307,11 +310,9 @@ def first_layer_heights(grid, topology=None, relative: bool = False) -> np.ndarr
     heights = []
     for assoc, spec, flat in _wall_columns(grid, topology):
         scale = float(spec["first_height"]) if relative else 1.0
-        for dof in flat[1]:
-            p = grid.global_nodes[int(dof)]
-            heights.append(
-                float(np.linalg.norm(p - np.asarray(assoc.entity.project(p)))) / scale
-            )
+        pts = grid.global_nodes[np.asarray(flat[1], dtype=np.intp)]
+        feet = np.asarray(assoc.entity.project_many(pts), dtype=float)
+        heights.extend(np.linalg.norm(pts - feet, axis=1) / scale)
     return np.asarray(heights)
 
 
@@ -344,6 +345,55 @@ def _place_on_column(
         arc_prev, d_prev = arc, d_cur
         arc += step
         new = _point_at(arc)
+    return new
+
+
+def _place_on_columns(
+    pts: np.ndarray, cum: np.ndarray, dist: np.ndarray, entity, heights: np.ndarray
+) -> np.ndarray:
+    """:func:`_place_on_column` for a batch of independent placements.
+
+    ``pts (m, rows, d)`` / ``cum (m, rows)`` / ``dist (m, rows)`` describe
+    one column polyline per job, ``heights (m,)`` the wall distance each
+    job places at. The interp guess and secant iterations mirror the
+    scalar function lane-wise (a converged lane freezes, like the scalar
+    break); the wall projections — the expensive part — run through one
+    ``entity.project_many`` per iteration instead of one ``project`` per
+    job per iteration. Returns the placed points, shape (m, d)."""
+    m, _, d = pts.shape
+    smax = cum[:, -1]
+
+    def _points_at(arc: np.ndarray) -> np.ndarray:
+        s = np.clip(arc, 0.0, smax)
+        out = np.empty((m, d))
+        for j in range(m):
+            for c in range(d):
+                out[j, c] = np.interp(s[j], cum[j], pts[j, :, c])
+        return out
+
+    arc = np.array(
+        [float(np.interp(h, dv, cv)) for h, dv, cv in zip(heights, dist, cum)]
+    )
+    new = _points_at(arc)
+    arc_prev = np.zeros(m)
+    d_prev = np.zeros(m)
+    have_prev = np.zeros(m, dtype=bool)
+    live = np.ones(m, dtype=bool)
+    for _ in range(12):
+        feet = np.asarray(entity.project_many(new), dtype=float)
+        d_cur = np.linalg.norm(new - feet, axis=1)
+        err = heights - d_cur
+        live &= np.abs(err) > 1e-13 * np.maximum(heights, 1.0)
+        if not live.any():
+            break
+        denom = d_cur - d_prev
+        sec = have_prev & (np.abs(denom) > 0.0)
+        step = np.where(sec, err * (arc - arc_prev) / np.where(sec, denom, 1.0), err)
+        arc_prev = np.where(live, arc, arc_prev)
+        d_prev = np.where(live, d_cur, d_prev)
+        have_prev |= live
+        arc = np.where(live, arc + step, arc)
+        new = np.where(live[:, None], _points_at(arc), new)
     return new
 
 
@@ -410,6 +460,17 @@ def respace_first_layers(
         if max_h is not None:
             spacings = np.minimum(spacings, float(max_h))
         cum_h = np.cumsum(spacings)
+
+        # One batched wall projection for the whole face: the perpendicular
+        # distance of every node of every column at once (columns of one
+        # face are disjoint DOF sets, so their placements are independent
+        # and can all work from this snapshot).
+        P = grid.global_nodes[flat]  # (rows, cols, d)
+        flatP = P.reshape(-1, P.shape[-1])
+        feet = np.asarray(assoc.entity.project_many(flatP), dtype=float)
+        dist_face = np.linalg.norm(flatP - feet, axis=1).reshape(flat.shape)
+
+        jobs = []  # (dofs, pts, cum, dist) per surviving column
         for col in range(flat.shape[1]):
             dofs = flat[:, col]
             if int(dofs[1]) in moved:
@@ -420,14 +481,12 @@ def respace_first_layers(
                     f"{n_pin} layers in a column of {len(dofs) - 1} cells "
                     "(at least one free row must remain)"
                 )
-            pts = grid.global_nodes[dofs]
+            pts = P[:, col]
             seg = np.linalg.norm(np.diff(pts, axis=0), axis=1)
             cum = np.concatenate([[0.0], np.cumsum(seg)])
             # Perpendicular wall distance along the column, regularised to
             # strictly increasing so it is invertible (cf. _respace_line).
-            dist = np.array(
-                [np.linalg.norm(p - np.asarray(assoc.entity.project(p))) for p in pts]
-            )
+            dist = dist_face[:, col].copy()
             dist[0] = 0.0
             dist = np.maximum.accumulate(dist)
             dist += np.arange(len(dist)) * 1e-15
@@ -437,27 +496,43 @@ def respace_first_layers(
                     f"{cum_h[-1]:.3e} does not fit in a column of height "
                     f"{dist[-1]:.3e}"
                 )
-            for k in range(1, n_pin + 1):
-                dof_k = int(dofs[k])
-                if not grid.free_mask[dof_k]:
-                    continue
-                new = _place_on_column(
-                    pts, cum, dist, assoc.entity, float(cum_h[k - 1])
-                )
+            jobs.append((dofs, pts, cum, dist))
+
+        # Place every free pinned row of every column in one batched
+        # secant refinement (see _place_on_columns).
+        pairs = [
+            (j, k)
+            for j, (dofs, _, _, _) in enumerate(jobs)
+            for k in range(1, n_pin + 1)
+            if grid.free_mask[int(dofs[k])]
+        ]
+        if pairs:
+            pj = np.array([j for j, _ in pairs])
+            pk = np.array([k for _, k in pairs])
+            placed = _place_on_columns(
+                np.stack([jobs[j][1] for j in pj]),
+                np.stack([jobs[j][2] for j in pj]),
+                np.stack([jobs[j][3] for j in pj]),
+                assoc.entity,
+                cum_h[pk - 1],
+            )
+            for (j, k), new in zip(pairs, placed):
+                dof_k = int(jobs[j][0][k])
                 ent = grid.dof_constraints.get(dof_k)
                 if ent is not None and ent is not assoc.entity:
                     new = np.asarray(ent.project(new), dtype=float)
                 grid.global_nodes[dof_k] = new
                 moved.add(dof_k)
 
-            # When the requested band is taller than what the smoother
-            # delivered, pinning slides the band rows outward PAST free rows
-            # sitting below the band top, inverting the cells between them.
-            # Re-place those overtaken rows between the band top and the
-            # first row already beyond it (same along-column slide); they
-            # stay free, so the follow-up TMOP pass re-equilibrates them
-            # from a valid start.
-            band_top = float(cum_h[-1])
+        # When the requested band is taller than what the smoother
+        # delivered, pinning slides the band rows outward PAST free rows
+        # sitting below the band top, inverting the cells between them.
+        # Re-place those overtaken rows between the band top and the
+        # first row already beyond it (same along-column slide); they
+        # stay free, so the follow-up TMOP pass re-equilibrates them
+        # from a valid start.
+        band_top = float(cum_h[-1])
+        for dofs, pts, cum, dist in jobs:
             j = n_pin + 1
             while j < len(dofs) - 1 and float(dist[j]) <= band_top:
                 j += 1

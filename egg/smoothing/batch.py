@@ -6,7 +6,7 @@
 # See the license for details.
 # For commercial licensing, contact s.imran@tuta.io
 
-"""Vectorized closed-form ``shape_2d`` patch evaluation.
+"""Vectorized closed-form patch evaluation (``shape_2d`` / ``shape_size``).
 
 The patch relaxation re-evaluates a node's *patch* — every corner sample
 of every cell incident to that node — many times per sweep (once for the
@@ -15,6 +15,9 @@ loop over corners, each building tiny 2x2 arrays via tuple indexing, is the hot
 spot. These functions evaluate **all P corner samples of a patch at once** with
 batched NumPy, reading positions straight from the flat ``global_nodes`` array
 through precomputed integer index stencils.
+
+Every evaluator takes ``metric`` ("shape_2d" default, or the size-aware
+"shape_size"), matching :mod:`egg.smoothing.metrics` per sample.
 
 A corner sample is ``A[:, k] = s_k * (nbr_k - corner)`` with ``T = A @ W_inv``
 (see :func:`egg.smoothing.jacobian.corner_sample`). ``vec(T) = [T00, T01,
@@ -56,35 +59,54 @@ def _detA(A):
     return A[:, 0, 0] * A[:, 1, 1] - A[:, 0, 1] * A[:, 1, 0]
 
 
-def energy_and_mindet(X, gc, gn0, gn1, s0, s1, W_inv):
-    """Sum of mu and min det(A) over a patch's P corner samples."""
-    A = assemble_A(X, gc, gn0, gn1, s0, s1)
-    det_A = _detA(A)
-    T = np.einsum("pij,pjk->pik", A, W_inv)
+def _mu_batch(T, metric):
+    """Batched metric values, shape (P,)."""
     a, b = T[:, 0, 0], T[:, 0, 1]
     c, d = T[:, 1, 0], T[:, 1, 1]
     D = a * d - b * c
     s = a * a + b * b + c * c + d * d
-    mu = s / (2.0 * D) - 1.0
-    return float(mu.sum()), float(det_A.min())
+    cond = s / (2.0 * D)
+    if metric == "shape_2d":
+        return cond - 1.0
+    if metric == "shape_size":
+        return cond * cond - 1.0 + (D - 1.0) ** 2
+    raise ValueError(f"Unknown metric: {metric}")
 
 
-def _grad_T(T):
+def energy_and_mindet(X, gc, gn0, gn1, s0, s1, W_inv, metric="shape_2d"):
+    """Sum of mu and min det(A) over a patch's P corner samples."""
+    A = assemble_A(X, gc, gn0, gn1, s0, s1)
+    det_A = _detA(A)
+    T = np.einsum("pij,pjk->pik", A, W_inv)
+    return float(_mu_batch(T, metric).sum()), float(det_A.min())
+
+
+def _grad_T(T, metric="shape_2d"):
     """dmu/dT for a batch, shape (P, 2, 2)."""
     a, b = T[:, 0, 0], T[:, 0, 1]
     c, d = T[:, 1, 0], T[:, 1, 1]
     D = a * d - b * c
     s = a * a + b * b + c * c + d * d
-    coef = s / (2.0 * D * D)
     g = np.empty_like(T)
-    g[:, 0, 0] = a / D - coef * d
-    g[:, 0, 1] = b / D + coef * c
-    g[:, 1, 0] = c / D + coef * b
-    g[:, 1, 1] = d / D - coef * a
+    if metric == "shape_2d":
+        coef = s / (2.0 * D * D)
+        g[:, 0, 0] = a / D - coef * d
+        g[:, 0, 1] = b / D + coef * c
+        g[:, 1, 0] = c / D + coef * b
+        g[:, 1, 1] = d / D - coef * a
+    elif metric == "shape_size":
+        coef_s = s / (D * D)
+        coef_c = s * s / (2.0 * D**3) - 2.0 * (D - 1.0)
+        g[:, 0, 0] = coef_s * a - coef_c * d
+        g[:, 0, 1] = coef_s * b + coef_c * c
+        g[:, 1, 0] = coef_s * c + coef_c * b
+        g[:, 1, 1] = coef_s * d - coef_c * a
+    else:
+        raise ValueError(f"Unknown metric: {metric}")
     return g
 
 
-def _hess_T(T):
+def _hess_T(T, metric="shape_2d"):
     """d^2 mu / d vec(T)^2 for a batch, shape (P, 4, 4)."""
     a, b = T[:, 0, 0], T[:, 0, 1]
     c, d = T[:, 1, 0], T[:, 1, 1]
@@ -98,12 +120,23 @@ def _hess_T(T):
     inv_D2 = (1.0 / (D * D))[:, None, None]
     s_D3 = (s / (D**3))[:, None, None]
     s_2D2 = (s / (2.0 * D * D))[:, None, None]
-    return (
+    H2 = (
         inv_D * _I4[None]
         - inv_D2 * (tc + tc.transpose(0, 2, 1))
         + s_D3 * cc
         - s_2D2 * _HESS_P[None]
     )
+    if metric == "shape_2d":
+        return H2
+    if metric == "shape_size":
+        # H = 2 g_c g_c^T + 2 (s/2D) H2 + 2 cof cof^T + 2(D-1) P, with g_c/H2
+        # the shape_2d closed forms (mirrors metrics._shape_size_hess_T).
+        g_c = _grad_T(T, "shape_2d").reshape(-1, 4)
+        gg = g_c[:, :, None] * g_c[:, None, :]
+        cond = (s / (2.0 * D))[:, None, None]
+        dm1 = (2.0 * (D - 1.0))[:, None, None]
+        return 2.0 * gg + 2.0 * cond * H2 + 2.0 * cc + dm1 * _HESS_P[None]
+    raise ValueError(f"Unknown metric: {metric}")
 
 
 def make_chain_J_nd(S, W_inv):
@@ -151,7 +184,7 @@ def make_chain_J(s0, s1, W_inv):
     return np.einsum("pij,pjk->pik", M, dA)
 
 
-def dof_grad_hess(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None):
+def dof_grad_hess(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d"):
     """Gradient (2,) and Hessian (2, 2) of patch energy w.r.t. one moving DOF.
 
     Each sample contributes only through the column(s) the DOF participates in,
@@ -163,7 +196,7 @@ def dof_grad_hess(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None):
     A = assemble_A(X, gc, gn0, gn1, s0, s1)
     T = np.einsum("pij,pjk->pik", A, W_inv)
 
-    dmu_dT = _grad_T(T)
+    dmu_dT = _grad_T(T, metric)
     # dmu/dA = dmu/dT @ W_inv^T  -> columns col_k = dmu_dA[:, :, k]
     dmu_dA = np.einsum("pij,pkj->pik", dmu_dT, W_inv)
     col0, col1 = dmu_dA[:, :, 0], dmu_dA[:, :, 1]
@@ -175,7 +208,7 @@ def dof_grad_hess(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None):
     contrib[is_1] = s1[is_1, None] * col1[is_1]
     grad = contrib.sum(0)
 
-    H_T = _hess_T(T)
+    H_T = _hess_T(T, metric)
     if J is None:
         J = make_chain_J(s0, s1, W_inv)
     valid = role >= 0
@@ -188,7 +221,7 @@ def dof_grad_hess(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None):
     return grad, H
 
 
-def patch_eval(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None):
+def patch_eval(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d"):
     """Combined patch evaluation: (grad, hess, energy, mindet) in one pass.
 
     Computes ``A`` and ``T = A @ W_inv`` once, then derives the gradient,
@@ -204,15 +237,11 @@ def patch_eval(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None):
     T = np.einsum("pij,pjk->pik", A, W_inv)
 
     # --- energy & mindet ---
-    a, b = T[:, 0, 0], T[:, 0, 1]
-    c, d = T[:, 1, 0], T[:, 1, 1]
-    D = a * d - b * c
-    s_val = a * a + b * b + c * c + d * d
-    energy = float((s_val / (2.0 * D) - 1.0).sum())
+    energy = float(_mu_batch(T, metric).sum())
     mindet = float(det_A.min())
 
     # --- gradient ---
-    dmu_dT = _grad_T(T)
+    dmu_dT = _grad_T(T, metric)
     dmu_dA = np.einsum("pij,pkj->pik", dmu_dT, W_inv)
     col0, col1 = dmu_dA[:, :, 0], dmu_dA[:, :, 1]
 
@@ -224,7 +253,7 @@ def patch_eval(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None):
     grad = contrib.sum(0)
 
     # --- hessian ---
-    H_T = _hess_T(T)
+    H_T = _hess_T(T, metric)
     if J is None:
         J = make_chain_J(s0, s1, W_inv)
     valid = role >= 0

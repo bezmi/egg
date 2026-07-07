@@ -13,10 +13,10 @@ from egg.smoothing.respace import (
     first_layer_heights,
     respace_first_layers,
 )
-from egg.smoothing.targets import build_boundary_layer_target
+from egg.smoothing.targets import build_topology_target
 
 __all__ = [
-    "build_boundary_layer_target",
+    "build_topology_target",
     "enforce_boundary_layer_spacing",
     "first_layer_heights",
     "respace_first_layers",

@@ -249,6 +249,71 @@ def build_structured_context_from_block_maps(
     )
 
 
+def _capacity_aware_sing_hosts(
+    topo, name_to_idx, interior_shapes, block_global_dof, dst_block, dst_padded, d
+) -> list[tuple[int, tuple[int, ...]]]:
+    """Choose, for each singular node, a host block that has spare ghost-ring
+    slots for its fan mirror — instead of whatever block the topology's
+    singularity detector emitted.
+
+    A singular node is a shared corner of every block in its fan, so it may be
+    relaxed in any of them; the C++ core mirrors its cross-interface fan
+    neighbours into spare *ring* slots of the host block. A fully-interior block
+    has only its 4 corners free (regardless of resolution), so an arbitrary host
+    can run out even when a sibling fan block (one with a domain-boundary face)
+    has ample room. This picks the highest-capacity fan block per node, which
+    makes the structured backend robust to block ordering / drawn topologies.
+
+    Returns ``[(block_idx, logical_idx), ...]`` in ``topo.singularities`` order.
+    """
+    sings = topo.singularities
+    if not sings:
+        return []
+
+    n_blk = len(interior_shapes)
+    # Free ghost-ring slots per block: ring size minus the distinct face-ghost
+    # destinations (mirrors the C++ ``free_ghosts`` pool exactly).
+    free = []
+    for shp in interior_shapes:
+        interior = int(np.prod(shp))
+        padded = int(np.prod([s + 2 for s in shp]))
+        free.append(padded - interior)  # ring count; face-ghosts subtracted below
+    used: list[set] = [set() for _ in range(n_blk)]
+    for e in range(len(dst_block)):
+        used[int(dst_block[e])].add(tuple(int(x) for x in dst_padded[e]))
+    free = [free[b] - len(used[b]) for b in range(n_blk)]
+
+    # Fan membership: global-DOF of every block corner -> [(block, logical), ...].
+    # Singular nodes are block corners, so this captures each node's full fan.
+    fan: dict[int, list[tuple[int, tuple[int, ...]]]] = {}
+    for b in range(n_blk):
+        shp = interior_shapes[b]
+        dofmap = block_global_dof[b].reshape(shp)
+        for corner in product(*[(0, s - 1) for s in shp]):
+            fan.setdefault(int(dofmap[corner]), []).append((b, corner))
+
+    result: list = [None] * len(sings)
+    # Minimal perturbation: keep each node's natural (lowest-index) host — which is
+    # what the C++ core picks by default — unless it lacks the room its fan needs,
+    # only then moving to the highest-capacity fan block. Leaving already-fine hosts
+    # untouched keeps the common O-grid case bit-identical to before. Hardest
+    # (highest-valence) nodes first; reserve only on a block we newly load.
+    for i in sorted(range(len(sings)), key=lambda k: -sings[k].valence):
+        s = sings[i]
+        host0 = name_to_idx[s.block_name]
+        logical0 = tuple(int(x) for x in s.logical_idx)
+        gid = int(block_global_dof[host0].reshape(interior_shapes[host0])[logical0])
+        cands = fan.get(gid, [(host0, logical0)])
+        default = min(cands, key=lambda bl: bl[0])  # lowest-index = the C++ default
+        if free[default[0]] >= s.valence:  # valence upper-bounds the foreign nodes
+            result[i] = default  # ample room — do not perturb
+        else:
+            best = max(cands, key=lambda bl: free[bl[0]])
+            result[i] = best
+            free[best[0]] -= s.valence  # reserve on the roomier host we moved onto
+    return result
+
+
 def build_block_structured_context(grid: MultiBlockGrid) -> BlockStructuredContext:
     """Build the halo-padded structured tables from a multiblock grid.
 
@@ -367,12 +432,11 @@ def build_block_structured_context(grid: MultiBlockGrid) -> BlockStructuredConte
             dst_block.append(bi)
             dst_padded.append(ghost_padded(logical_b, fb.axis, fb.side, shape_b))
 
-    sing_block = np.array(
-        [name_to_idx[s.block_name] for s in topo.singularities], dtype=np.int32
+    hosts = _capacity_aware_sing_hosts(
+        topo, name_to_idx, interior_shapes, block_global_dof, dst_block, dst_padded, d
     )
-    sing_logical = np.array(
-        [s.logical_idx for s in topo.singularities], dtype=np.int32
-    ).reshape(-1, d)
+    sing_block = np.array([h[0] for h in hosts], dtype=np.int32)
+    sing_logical = np.array([h[1] for h in hosts], dtype=np.int32).reshape(-1, d)
 
     e = len(src_block)
     return BlockStructuredContext(
@@ -442,6 +506,11 @@ class CppStructuredSweepSession:
 
         Parameters
         ----------
+        phase : str, optional
+            Objective selector: ``"barrier"`` (default, the shape metric),
+            ``"shape_size"`` (shape + ``(det T - 1)^2`` — size-aware, the
+            context's targets must carry physical scale), or ``"untangle"``
+            (the δ-surrogate; give ``delta``).
         omega : float, optional
             Block-Jacobi SOR/damping weight (``1.0`` = undamped).
         report_every : int, optional
@@ -482,8 +551,9 @@ class CppStructuredSweepSession:
         sweeps scaled to its interior diameter (capped by ``nu_coarse``), a
         safeguarded coarse-grid correction
         (backtracking line search on the global energy, so energy decrease and
-        ``det > 0`` are preserved), and ``nu_post`` sweeps. Shape phase only:
-        ``phase="untangle"`` raises ``ValueError``. Blocks whose node counts
+        ``det > 0`` are preserved), and ``nu_post`` sweeps. Barrier phases
+        only (``"barrier"``/``"shape_size"``): ``phase="untangle"`` raises
+        ``ValueError``. Blocks whose node counts
         admit no coarse level (or ``max_levels < 2``) fall back to plain
         block-Jacobi with the equivalent fine-sweep budget.
         """
@@ -558,6 +628,10 @@ def cpp_structured_sweep(
         Number of sweeps to run.
     device : str, optional
         ``"auto"`` (default), ``"cpu"``, or ``"gpu"``.
+    phase : str, optional
+        Objective selector: ``"barrier"`` (default, shape), ``"shape_size"``
+        (size-aware shape+size), or ``"untangle"`` (δ-surrogate, give
+        ``delta``).
     omega : float, optional
         Block-Jacobi SOR/damping weight (``1.0`` = undamped).
     report_every : int, optional
