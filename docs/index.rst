@@ -13,6 +13,7 @@ set-ups.
    :caption: User guide
 
    webui
+   cad
 
 .. toctree::
    :maxdepth: 2

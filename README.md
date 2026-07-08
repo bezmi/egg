@@ -59,6 +59,27 @@ Details, theming, and the full script contract: [`webui/README.md`](webui/README
 ### Documentation
 Start the webui after running `uv sync group pwebui --group docs`. Then, the full egg documentation is accessible through **help → documentation**.
 
+## CAD import (3D)
+
+STEP/BREP import and the other OCCT-backed 3D operations (`egg.io.cad`:
+imported solid faces into trimmed egg surfaces, boolean-carved flow domains)
+need [build123d](https://build123d.readthedocs.io), which is **not** a core
+dependency. Install the optional `cad` group:
+
+```bash
+uv sync --group cad
+```
+
+Only the CAD import path needs it: 3D work from analytic primitives (`Sphere`,
+`Plane`, `Line3`) or hand-authored NURBS surfaces has no OCCT dependency, and
+the solver never sees OCCT regardless.
+
+A `--force-reinstall` C++ rebuild drops the optional groups, and re-adding one
+with `uv sync --group cad` reverts the core to its default precision. To hold a
+precision (e.g. fp32, recommended on the GPU) and the groups together, set
+`SKBUILD_CMAKE_DEFINE` once; see
+[DEVELOPING.md](DEVELOPING.md#precision-fp32-vs-fp64).
+
 ## Running the demos
 
 The circle demos accept `--device {auto,cpu,gpu}` to select the SYCL device:
