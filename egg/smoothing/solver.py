@@ -255,7 +255,12 @@ def build_sweep_context(
     dof_constraint_params = np.zeros((M, PARAM_PAD_SIZE), dtype=np.float64)
     arena: list[float] = []
     for dof_idx, entity in grid.dof_constraints.items():
-        tag, params = encode_entity(entity, d=d, arena=arena)
+        try:
+            tag, params = encode_entity(entity, d=d, arena=arena)
+        except NotImplementedError:
+            # dof_constraint_tags is a 2D diagnostic field; the C++ wire encodes
+            # every entity (2D and 3D) via build_flat_context below.
+            continue
         dof_constraint_tags[dof_idx] = tag
         dof_constraint_params[dof_idx] = params
 

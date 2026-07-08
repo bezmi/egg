@@ -221,6 +221,25 @@ def _energy(grid, energy_stencil, metric: str = "shape_2d") -> float:
     )
 
 
+def _cpp_reduce(grid, ctx, device: str, phase: str = "barrier") -> tuple[float, float]:
+    """``(energy, min_det)`` from the C++ structured session without moving nodes.
+
+    A single ``omega=0`` sweep runs the device reduction on the resident X, so
+    this is dimension-general; the NumPy :func:`_min_det` / :func:`_energy` stay
+    the 2D parity reference.
+    """
+    from .smoothing.cpp_backend import (
+        CppStructuredSweepSession,
+        build_block_structured_context,
+    )
+
+    session = CppStructuredSweepSession(
+        ctx, build_block_structured_context(grid), grid.global_nodes, device=device
+    )
+    energies, mds = session.run(1, phase=phase, omega=0.0, report_every=0)
+    return float(np.asarray(energies)[-1]), float(np.asarray(mds)[-1])
+
+
 def _sync(grid, X) -> None:
     """Write a flat global-node array back into the grid + its per-block views."""
     grid.global_nodes = np.asarray(X)
@@ -316,12 +335,27 @@ def generate_steps(
     d = grid.topology.d
     iso = IdentityTarget(d)
 
-    # Snap boundary DOFs, then build the isotropic (untangle) context.
-    project_nodes(grid, grid.dof_constraints)
+    # initialize_grid step 3 already orthogonally projected every associated
+    # boundary DOF onto its entity with the same entity.project this would call,
+    # so the incoming grid needs no boundary snap here. project_nodes only
+    # returns below after a phase that moves constrained DOFs (untangle, TMOP).
     ctx_iso = build_sweep_context(grid, iso)
     es = ctx_iso.energy_stencil
 
-    md = grid_min_det(grid.global_nodes, es)
+    # Min-det/energy monitoring: NumPy (the 2D parity reference) in 2D; the
+    # d-general C++ device reduction in 3D, where the NumPy metric is 2D-only.
+    def md_now() -> float:
+        if d == 2:
+            return grid_min_det(grid.global_nodes, es)
+        return _cpp_reduce(grid, ctx_iso, device, phase="barrier")[1]
+
+    def energy_now(score_ctx, metric: str) -> float:
+        if d == 2:
+            return _energy(grid, score_ctx.energy_stencil, metric=metric)
+        phase = "shape_size" if metric == "shape_size" else "barrier"
+        return _cpp_reduce(grid, score_ctx, device, phase=phase)[0]
+
+    md = md_now()
     yield ("init", {"min_det": md})
 
     # --- Phase 1: δ-continuation untangle (only if folded) ---
@@ -470,7 +504,7 @@ def generate_steps(
             },
         )
     project_nodes(grid, grid.dof_constraints)
-    score_es = tmop_ctx.energy_stencil
+    score_ctx = tmop_ctx
 
     # --- Phase 3 (optional): pin the first n_fixed boundary layers exactly ---
     if cfg.pin_sweeps > 0:
@@ -481,7 +515,7 @@ def generate_steps(
             "pin",
             {
                 "n_dofs": int(pinned.size),
-                "min_det": grid_min_det(grid.global_nodes, es),
+                "min_det": md_now(),
             },
         )
         if pinned.size:
@@ -510,14 +544,14 @@ def generate_steps(
                     },
                 )
             project_nodes(grid, grid.dof_constraints)
-            score_es = pin_ctx.energy_stencil
+            score_ctx = pin_ctx
 
     # --- Optional exact wall-respacing post-pass ---
     if cfg.respace:
         from .smoothing.respace import enforce_boundary_layer_spacing
 
         enforce_boundary_layer_spacing(grid, grid.topology, straighten_columns=False)
-        yield ("respace", {"min_det": grid_min_det(grid.global_nodes, es)})
+        yield ("respace", {"min_det": md_now()})
 
     # Terminal summary AFTER the closing boundary snap, so the reported/plotted
     # final numbers reflect the snapped mesh. Energy is scored on the SAME
@@ -527,8 +561,8 @@ def generate_steps(
     yield (
         "final",
         {
-            "min_det": grid_min_det(grid.global_nodes, es),
-            "energy": _energy(grid, score_es, metric=score_metric),
+            "min_det": md_now(),
+            "energy": energy_now(score_ctx, score_metric),
         },
     )
 
