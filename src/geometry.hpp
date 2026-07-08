@@ -140,17 +140,19 @@ template <> struct Trim<1> {
 /// Surface trim: a UV polygon (outer loop minus holes), arena-backed. Empty
 /// spans mean untrimmed (the surface's full natural range).
 template <> struct Trim<2> {
-    std::span<const PtN<2>> verts;  ///< All loop vertices, concatenated.
-    std::span<const int> loops;     ///< Offset table: [outer | hole0 | ... | end].
+    std::span<const real> verts;  ///< Loop vertices flattened [u0,v0,u1,v1,...].
+    std::span<const real> loops;  ///< Vertex-count offsets [0, n0, n0+n1, ..., total].
+    /// Loop vertex i as a UV point.
+    [[nodiscard]] PtN<2> vert(int i) const { return {verts[2 * i], verts[(2 * i) + 1]}; }
     /// Even–odd inside test over all loops; untrimmed always contains.
     [[nodiscard]] bool contains(Param<2> uv) const
     {
         if (loops.size() < 2) { return true; }
         bool inside = false;
         for (std::size_t l = 0; l + 1 < loops.size(); ++l) {
-            const int lo = loops[l], hi = loops[l + 1];
+            const int lo = static_cast<int>(loops[l]), hi = static_cast<int>(loops[l + 1]);
             for (int i = lo, j = hi - 1; i < hi; j = i++) {
-                const PtN<2>&a = verts[i], &b = verts[j];
+                const PtN<2> a = vert(i), b = vert(j);
                 // Even–odd ray cast in +u from uv.
                 if ((a[1] > uv[1]) != (b[1] > uv[1]) &&
                     uv[0] < ((b[0] - a[0]) * (uv[1] - a[1]) / (b[1] - a[1])) + a[0]) {
@@ -166,9 +168,9 @@ template <> struct Trim<2> {
         Param<2> best = uv;
         real best_d = std::numeric_limits<real>::infinity();
         for (std::size_t l = 0; l + 1 < loops.size(); ++l) {
-            const int lo = loops[l], hi = loops[l + 1];
+            const int lo = static_cast<int>(loops[l]), hi = static_cast<int>(loops[l + 1]);
             for (int i = lo, j = hi - 1; i < hi; j = i++) {
-                const PtN<2>&a = verts[j], &b = verts[i];
+                const PtN<2> a = vert(j), b = vert(i);
                 const VecN<2> ab = b - a;
                 const real ab_sq = dot(ab, ab);
                 real t = ab_sq > tol::tiny ? dot(PtN<2> {uv[0], uv[1]} - a, ab) / ab_sq : 0.0_r;
@@ -2134,10 +2136,11 @@ template <> struct EntitySoA<TrimmedEntity<Line3Param>> {
 template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
     static constexpr EntityTag tag = EntityTag::BSplineSurface;
     static constexpr int kFields = 9;
-    static constexpr int kSeg = 4;  ///< knots_u (0), knots_v (1), ctrl (2), weights (3, optional).
+    static constexpr int kSeg = 6;  ///< knots_u, knots_v, ctrl, weights, trim_verts, trim_loops.
     static constexpr int PU = 0, PV = 1, NU = 2, NV = 3, KU_OFF = 4, KV_OFF = 5, CTRL_OFF = 6,
                          W_OFF = 7, HAS_W = 8;
-    static constexpr int KNOTS_U = 0, KNOTS_V = 1, CTRL = 2, WEIGHTS = 3;
+    static constexpr int KNOTS_U = 0, KNOTS_V = 1, CTRL = 2, WEIGHTS = 3, TRIM_VERTS = 4,
+                         TRIM_LOOPS = 5;
 
     struct Host {
         std::vector<real> records;
@@ -2166,7 +2169,7 @@ template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
                     .knots_v = v.seg[KNOTS_V][i],
                     .ctrl = v.seg[CTRL][i],
                     .weights = has_w ? v.seg[WEIGHTS][i] : std::span<const real> {}},
-          .trim = {}};
+          .trim = {.verts = v.seg[TRIM_VERTS][i], .loops = v.seg[TRIM_LOOPS][i]}};
     }
 
     static void load_into(Host& h, std::size_t i, const TrimmedEntity<BSplineSurfaceParam>& e)
@@ -2191,6 +2194,8 @@ template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
         h.seg[KNOTS_V].push_back(e.param.knots_v);
         h.seg[CTRL].push_back(e.param.ctrl);
         h.seg[WEIGHTS].push_back(has_w ? e.param.weights : std::span<const real> {});
+        h.seg[TRIM_VERTS].push_back(e.trim.verts);
+        h.seg[TRIM_LOOPS].push_back(e.trim.loops);
     }
 
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>* seg)
@@ -2201,6 +2206,8 @@ template <> struct EntitySoA<TrimmedEntity<BSplineSurfaceParam>> {
             v.seg[KNOTS_V] = seg[KNOTS_V];
             v.seg[CTRL] = seg[CTRL];
             v.seg[WEIGHTS] = seg[WEIGHTS];
+            v.seg[TRIM_VERTS] = seg[TRIM_VERTS];
+            v.seg[TRIM_LOOPS] = seg[TRIM_LOOPS];
         }
         return v;
     }
