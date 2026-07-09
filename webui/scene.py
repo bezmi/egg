@@ -1311,6 +1311,7 @@ def render_svg(
         # Grid layer per block: a soft per-block color fill under the
         # lines, then one polyline per structured line, outline on top.
         out.append('<g class="layer-grid">')
+        seen_edges: set[frozenset] = set()
         for bi, nodes in enumerate(scene.grid_blocks):
             ring = np.concatenate(
                 [
@@ -1332,9 +1333,20 @@ def render_svg(
             out.append(f'<g class="grid-block" data-label="{_esc(label)}">')
             out.append(f'<polygon points="{poly(ring)}" class="block-fill {b}"/>')
             out.append(f'<g class="grid-lines {b}">')
-            for i in _line_indices(nodes.shape[0]):
+            n0, n1 = nodes.shape[0], nodes.shape[1]
+            for i in _line_indices(n0):
+                if i in (0, n0 - 1):
+                    key = frozenset((tuple(nodes[i, 0, :2]), tuple(nodes[i, -1, :2])))
+                    if key in seen_edges:
+                        continue
+                    seen_edges.add(key)
                 out.append(f'<polyline points="{poly(nodes[i, :, :2])}"/>')
-            for j in _line_indices(nodes.shape[1]):
+            for j in _line_indices(n1):
+                if j in (0, n1 - 1):
+                    key = frozenset((tuple(nodes[0, j, :2]), tuple(nodes[-1, j, :2])))
+                    if key in seen_edges:
+                        continue
+                    seen_edges.add(key)
                 out.append(f'<polyline points="{poly(nodes[:, j, :2])}"/>')
             out.append("</g>")
             out.append(f'<polyline points="{poly(ring)}" class="grid-outline {b}"/>')
