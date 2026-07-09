@@ -160,6 +160,13 @@ class PipelineConfig:
     pin_sweeps: int = 0
     respace: bool = False
 
+    # Optional composed block-interface term (2D). When set, the TMOP phase adds
+    # weighted orthogonality/continuity shape samples at interface-adjacent cells
+    # (see egg.smoothing.interface_ortho): a dict of kwargs forwarded to
+    # interface_ortho_samples, e.g. {"mode": "normal", "weight": 0.3}. None (the
+    # default) leaves the objective as the plain shape/shape_size metric.
+    interface_ortho: dict | None = None
+
     device: Literal["cpu", "gpu", "auto"] = "cpu"
     verbose: bool = False
 
@@ -181,6 +188,13 @@ class PipelineConfig:
                 f"PipelineConfig.device must be 'cpu', 'gpu' or 'auto', got "
                 f"{self.device!r}"
             )
+        if self.interface_ortho is not None:
+            mode = self.interface_ortho.get("mode", "normal")
+            if mode not in ("normal", "continuous"):
+                raise ValueError(
+                    "PipelineConfig.interface_ortho['mode'] must be 'normal' or "
+                    f"'continuous', got {mode!r}"
+                )
 
 
 @dataclass
@@ -462,7 +476,16 @@ def generate_steps(
 
             target = mean_size_target(grid)
         # else (shape metric, no clustering) — stay None and reuse ctx_iso.
-    tmop_ctx = ctx_iso if target is None else build_sweep_context(grid, target)
+    # The composed interface term (if any) lives in the sweep context, so an
+    # interface_ortho request forces a fresh build even for the isotropic target
+    # (ctx_iso was built without it).
+    io = cfg.interface_ortho
+    if target is None and io is None:
+        tmop_ctx = ctx_iso
+    else:
+        tmop_ctx = build_sweep_context(
+            grid, iso if target is None else target, interface_ortho=io
+        )
     tmop_sweeps = max((cfg.tmop_sweeps // tmop_chunk) * tmop_chunk, tmop_chunk)
     # Block-Jacobi over the halo-padded structured store, built from the grid's
     # BlockTopology; one merged double-buffered launch per sweep, SOR weight omega.
@@ -521,7 +544,9 @@ def generate_steps(
         if pinned.size:
             # Rebuild the context so the pinned DOFs are compiled out of the
             # update set, then re-equilibrate the free grid (warm start).
-            pin_ctx = build_sweep_context(grid, iso if target is None else target)
+            pin_ctx = build_sweep_context(
+                grid, iso if target is None else target, interface_ortho=io
+            )
             session = CppStructuredSweepSession(
                 pin_ctx,
                 build_block_structured_context(grid),
