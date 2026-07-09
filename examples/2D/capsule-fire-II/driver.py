@@ -105,6 +105,14 @@ def parse_args(argv=None):
         default=40,
         help="TMOP sweeps for the pinned re-run",
     )
+    p.add_argument(
+        "--c2-weight",
+        type=float,
+        default=0.0,
+        help="block-interface C2 curvature-continuity weight (0 = off); de-kinks "
+        "grid lines crossing block seams (interface-only, so it leaves the "
+        "clustered near-wall interior alone)",
+    )
     a = p.parse_args(argv)
     print("=" * 56)
     print("FIRE II capsule forebody → TMOP smooth")

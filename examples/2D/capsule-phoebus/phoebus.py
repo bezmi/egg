@@ -134,6 +134,13 @@ def setup(a):
     pin = a["pin_layers"] > 0
     grid = topo.initialize_grid()
     metric = a.get("metric", "shape")
+    # Optional block-interface C2 curvature term (interface_only: de-kink the
+    # block seams without disturbing the clustered near-wall cells).
+    c2 = (
+        {"weight": a["c2_weight"], "interface_only": True}
+        if a.get("c2_weight", 0.0) > 0.0
+        else None
+    )
     cfg = PipelineConfig(
         tmop_sweeps=a["tmop_sweeps"],
         tmop_chunk=a["chunk"],
@@ -141,6 +148,7 @@ def setup(a):
         tmop_metric=metric,
         cluster_boundary_layers=pin,
         omega=a["omega"],
+        interface_c2=c2,
         device=a["device"],
         pin_sweeps=a["pin_sweeps"] if pin else 0,
         respace=not pin,
@@ -178,6 +186,9 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         # scale-invariant metric; "shape_size" also equalises cell areas.
         metric=egg_webui.editable("shape_size", choices=["shape", "shape_size"]),
         omega=0.8,
+        # block-interface C2 curvature-continuity weight (0 = off); de-kinks the
+        # grid lines crossing block seams (interface-only).
+        c2_weight=egg_webui.editable(0.0, label="interface C2 weight"),
         device="cpu",
     )
     topo, ents, grid, cfg = setup(a)
