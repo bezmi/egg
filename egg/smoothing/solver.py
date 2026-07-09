@@ -196,7 +196,10 @@ class SweepContext:
 
 
 def build_sweep_context(
-    grid: MultiBlockGrid, target_fn: Callable[..., np.ndarray]
+    grid: MultiBlockGrid,
+    target_fn: Callable[..., np.ndarray],
+    *,
+    interface_ortho: dict | None = None,
 ) -> SweepContext:
     """Build the sweep context: energy stencil, constraint encoding, C++ wire.
 
@@ -204,8 +207,19 @@ def build_sweep_context(
     nodes, so every corner DOF lists the cell as incident. The per-DOF NumPy
     parity-reference views are NOT built here — they materialise lazily on
     first attribute access (see :class:`SweepContext`).
+
+    ``interface_ortho`` (optional) enables the composed block-boundary term: a
+    dict of keyword args for
+    :func:`egg.smoothing.interface_ortho.interface_ortho_samples` (``mode``,
+    ``weight``). The frame is frozen from ``grid``'s current node positions.
     """
     from egg.smoothing.flat_context import cell_stencil
+
+    iface = None
+    if interface_ortho:
+        from egg.smoothing.interface_ortho import interface_ortho_samples
+
+        iface = interface_ortho_samples(grid, **interface_ortho)
 
     M = grid.global_node_count
     d = grid.topology.d
@@ -274,6 +288,7 @@ def build_sweep_context(
         dict(grid.dof_constraints),
         d,
         w_inv=samp_w_inv,
+        interface=iface,
     )
 
     return SweepContext(
