@@ -1183,6 +1183,66 @@ struct BSplineSurfaceParam {
         return q;
     }
 
+    /// Damped (Levenberg-Marquardt) nearest-foot Newton from one seed.
+    ///
+    /// Converges to the true foot even where the Jacobian is rank-deficient (a
+    /// surface-of-revolution pole, `S_u -> 0`): the damping `lambda` bridges
+    /// Gauss-Newton (away from the degeneracy) and gradient descent (at it),
+    /// with residual backtracking so every accepted step reduces `|S-p|^2`.
+    /// Cold path only (the multi-start placement); the warm kernel stays on the
+    /// lean `newton_foot<false>`. Mirrors surfaces3d.py `_lm_foot`.
+    [[nodiscard]] Param<2> newton_foot_lm(const PtN<3>& p,
+                                          Param<2> q,
+                                          real u0,
+                                          real u1,
+                                          real v0,
+                                          real v1,
+                                          std::array<VecN<3>, 2>* frame_out = nullptr)
+      const
+    {
+        q[0] = std::clamp(q[0], u0, u1);
+        q[1] = std::clamp(q[1], v0, v1);
+        SurfDers S = ders_nd<2>(q);
+        VecN<3> d = S.S00 - p;
+        real r = dot(d, d);
+        real lambda = 1e-3_r * (dot(S.S10, S.S10) + dot(S.S01, S.S01) + tol::tiny);
+        for (int it = 0; it < 16; ++it) {
+            const real f1 = dot(d, S.S10), f2 = dot(d, S.S01);
+            const real j11 = dot(S.S10, S.S10) + dot(d, S.S20);
+            const real j12 = dot(S.S10, S.S01) + dot(d, S.S11);
+            const real j22 = dot(S.S01, S.S01) + dot(d, S.S02);
+            real du = 0, dv = 0;
+            bool accepted = false;
+            for (int bt = 0; bt < 6; ++bt) {  // backtrack damping until descent
+                const real a11 = j11 + lambda, a22 = j22 + lambda;
+                const real det = (a11 * a22) - (j12 * j12);
+                if (sycl::fabs(det) < tol::tiny) {
+                    lambda *= 4.0_r;
+                    continue;
+                }
+                du = -(((a22 * f1) - (j12 * f2)) / det);
+                dv = -((((-j12) * f1) + (a11 * f2)) / det);
+                const Param<2> qn {std::clamp(q[0] + du, u0, u1),
+                                   std::clamp(q[1] + dv, v0, v1)};
+                const VecN<3> dn = eval(qn) - p;
+                const real rn = dot(dn, dn);
+                if (rn < r) {
+                    q = qn;
+                    r = rn;
+                    S = ders_nd<2>(q);
+                    d = S.S00 - p;
+                    lambda = sycl::fmax(lambda * 0.3_r, tol::tiny);
+                    accepted = true;
+                    break;
+                }
+                lambda *= 4.0_r;
+            }
+            if (!accepted || (sycl::fabs(du) + sycl::fabs(dv)) < tol::newton) { break; }
+        }
+        if (frame_out != nullptr) { *frame_out = {S.S10, S.S01}; }
+        return q;
+    }
+
     /// Warm-started inverse.
     ///
     /// @tparam Warm selects the cold/warm two-kernel split (the boundary sweep
@@ -1214,22 +1274,53 @@ struct BSplineSurfaceParam {
                 const Param<2> q {std::clamp(seed[0], u0, u1), std::clamp(seed[1], v0, v1)};
                 return newton_foot<false>(p, q, u0, u1, v0, v1, frame_out);
             }
-            Param<2> q {u0, v0};
+            // Multi-start: Newton-polish the best kStarts coarse seeds and keep
+            // the globally nearest foot, so a closed surface's seam (the two
+            // u-boundary seeds evaluate to the same point) cannot trap Newton on
+            // the wrong side of the wrap. Cold path only — runs once per node, so
+            // the restarts stay off the warm kernel. Mirrors surfaces3d.py.
             constexpr int kSeed = 8;
-            real best = std::numeric_limits<real>::infinity();
+            constexpr int kStarts = 4;
+            real bestd[kStarts];
+            Param<2> bestq[kStarts];
+            for (int s = 0; s < kStarts; ++s) {
+                bestd[s] = std::numeric_limits<real>::infinity();
+                bestq[s] = Param<2> {u0, v0};
+            }
             for (int i = 0; i <= kSeed; ++i) {
                 for (int j = 0; j <= kSeed; ++j) {
                     const Param<2> t {u0 + (((u1 - u0) * i) / kSeed),
                                       v0 + (((v1 - v0) * j) / kSeed)};
                     const VecN<3> d = eval(t) - p;
                     const real dd = dot(d, d);
-                    if (dd < best) {
-                        best = dd;
-                        q = t;
+                    if (dd < bestd[kStarts - 1]) {
+                        int s = kStarts - 1;
+                        for (; s > 0 && dd < bestd[s - 1]; --s) {
+                            bestd[s] = bestd[s - 1];
+                            bestq[s] = bestq[s - 1];
+                        }
+                        bestd[s] = dd;
+                        bestq[s] = t;
                     }
                 }
             }
-            return newton_foot<true>(p, q, u0, u1, v0, v1, frame_out);
+            Param<2> best_foot {u0, v0};
+            real best_final = std::numeric_limits<real>::infinity();
+            for (int s = 0; s < kStarts; ++s) {
+                if (bestd[s] == std::numeric_limits<real>::infinity()) { continue; }
+                std::array<VecN<3>, 2> fbuf;
+                const Param<2> foot =
+                  newton_foot_lm(p, bestq[s], u0, u1, v0, v1,
+                                 frame_out != nullptr ? &fbuf : nullptr);
+                const VecN<3> d = eval(foot) - p;
+                const real dd = dot(d, d);
+                if (dd < best_final) {
+                    best_final = dd;
+                    best_foot = foot;
+                    if (frame_out != nullptr) { *frame_out = fbuf; }
+                }
+            }
+            return best_foot;
         }
     }
 };

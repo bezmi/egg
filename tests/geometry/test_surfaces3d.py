@@ -213,3 +213,59 @@ class TestBSplineSurfaceNURBS:
         for u in [0.3, 0.5, 0.7]:
             for v in [0.2, 0.8]:
                 np.testing.assert_allclose(poly.eval(u, v), rat.eval(u, v), atol=1e-13)
+
+
+class TestClosedSurfaceSeam:
+    @pytest.fixture
+    def sphere(self):
+        """Exact rational NURBS sphere (surface of revolution, seam at +x)."""
+        s2 = np.sqrt(2.0) / 2.0
+        circ = np.array(
+            [
+                (1, 0),
+                (1, 1),
+                (0, 1),
+                (-1, 1),
+                (-1, 0),
+                (-1, -1),
+                (0, -1),
+                (1, -1),
+                (1, 0),
+            ],
+            dtype=float,
+        )
+        wc = np.array([1, s2, 1, s2, 1, s2, 1, s2, 1], dtype=float)
+        ku = np.array([0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4], dtype=float)
+        merid = np.array([(0, 1), (1, 1), (1, 0), (1, -1), (0, -1)], dtype=float)
+        wm = np.array([1, s2, 1, s2, 1], dtype=float)
+        kv = np.array([0, 0, 0, 1, 1, 2, 2, 2], dtype=float)
+        ctrl = np.zeros((9, 5, 3))
+        w = np.zeros((9, 5))
+        for j in range(9):
+            for i in range(5):
+                x_i, z_i = merid[i]
+                ctrl[j, i] = 0.5 * np.array([x_i * circ[j, 0], x_i * circ[j, 1], z_i])
+                w[j, i] = wm[i] * wc[j]
+        return BSplineSurface(2, 2, ku, kv, ctrl, weights=w)
+
+    def test_seam_points_project_to_themselves(self, sphere):
+        # Points sitting exactly on the sphere near the +x parameter seam must
+        # project back onto themselves; the single-seed Newton used to snap them
+        # onto the wrong side of the u-wrap (up to 0.1+ off a radius-0.5 sphere).
+        for ang in np.deg2rad(np.linspace(-20, 20, 21)):
+            for pol in np.deg2rad([60, 90, 120]):
+                p = 0.5 * np.array(
+                    [np.sin(pol) * np.cos(ang), np.sin(pol) * np.sin(ang), np.cos(pol)]
+                )
+                np.testing.assert_allclose(sphere.project(p), p, atol=1e-9)
+
+    def test_pole_points_project_to_themselves(self, sphere):
+        # Near the degenerate +-z poles S_u -> 0, so the plain Newton's Jacobian
+        # is rank-deficient and it stalled (foot up to 0.1+ off). The damped
+        # (Levenberg-Marquardt) foot solver converges through the degeneracy.
+        for pol in np.deg2rad([2, 5, 10, 170, 175, 178]):
+            for ang in np.deg2rad([0.0, 37.0, 90.0, 213.0]):
+                p = 0.5 * np.array(
+                    [np.sin(pol) * np.cos(ang), np.sin(pol) * np.sin(ang), np.cos(pol)]
+                )
+                np.testing.assert_allclose(sphere.project(p), p, atol=1e-9)
