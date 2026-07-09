@@ -183,15 +183,16 @@ def interface_ortho_samples(
         (which relocates the kink one layer in). ``n_layers=1`` acts on the
         first edge only — the concentrating behaviour; kept for parity/tests.
     cluster_relax : float
-        In ``[0, 1]``, how strongly to relax the orthogonality target where the
+        In ``[0, 1]``, how strongly to fade the term's *weight* where the
         near-seam cell is anisotropic. A wall-normal-clustered cell is a thin
-        sliver whose shape is set by the clustering, not the blocking; forcing
-        its crossing edge perpendicular to an oblique seam would tilt it off the
-        wall-normal. This fades the target toward the crossing edge's *current*
-        direction by ``cluster_relax * aniso`` (``aniso`` = 0 for a square cell,
-        →1 for a sliver), so the term backs off in the clustered band and only
-        acts where the blocking, not the clustering, owns the cell shape. ``0``
-        (default) keeps the plain orthogonality target.
+        sliver whose shape is set by the clustering, not the blocking; on such a
+        seam the orthogonality target cannot beat the clustering target, so at
+        any weight it only perturbs and leaves the seam wavy. Each sample's
+        weight is scaled by ``1 − cluster_relax * aniso**3`` (``aniso`` = 0 for a
+        square cell, →1 for a sliver; cubed so only genuine slivers fade and a
+        merely sheared cell keeps full weight), so the term backs off in the
+        clustered band and only acts where the blocking, not the clustering, owns
+        the cell shape. ``0`` (default) keeps full weight everywhere.
     topology : BlockTopology, optional
         Defaults to ``grid.topology``.
     """
@@ -241,25 +242,31 @@ def interface_ortho_samples(
         Rp = int(m[k, j + 1]) if j + 1 < m.shape[1] else -1
         Rm = int(m[k, j - 1]) if j - 1 >= 0 else -1
         t = _smoothstep(k / n_layers)  # 0 at seam → 1 at band edge
-        # Clustering relax: a thin near-seam cell (its shape set by wall-normal
-        # clustering, not the blocking) fades the orthogonality target toward the
-        # crossing edge's current direction — which follows the clustering — so
-        # the term does not tilt the clustered cells off the wall-normal. aniso
-        # is the cross/tangent length imbalance: 0 for a square cell, →1 sliver.
-        # Cubed so only genuine slivers (near-wall aspect ~20+, aniso≈0.95) relax
-        # and a merely sheared/moderate-aspect cell (aniso≈0.3) is left alone.
+        c_hat = (1.0 - t) * base + t * e_hat
+        # Clustering relax: fade the sample WEIGHT toward zero where the near-seam
+        # cell is a sliver (its shape set by wall-normal clustering, not the
+        # blocking). On such a seam the orthogonality target cannot win against
+        # the clustering target, so at any weight it only perturbs — leaving the
+        # seam wavy. Fading the weight backs the term off there and lets the base
+        # metric smooth freely. (Fading the target *direction* toward the current
+        # crossing instead — an earlier attempt — locks that waviness in.) aniso
+        # is the cross/tangent length imbalance (0 square, →1 sliver), cubed so
+        # only genuine slivers (near-wall aspect ~20+, aniso≈0.95) fade and a
+        # merely sheared/moderate-aspect cell (aniso≈0.3) keeps full weight.
+        w_sample = weight
         if cluster_relax > 0.0:
             tl = [float(np.linalg.norm(X[R] - X[corner])) for R in (Rp, Rm) if R >= 0]
             if tl:
                 lt = float(np.mean(tl))
                 hi = max(ne, lt)
                 aniso = 0.0 if hi == 0.0 else 1.0 - (min(ne, lt) / hi)
-                t = t + (1.0 - t) * cluster_relax * (aniso**3)
-        c_hat = (1.0 - t) * base + t * e_hat
+                w_sample = weight * (1.0 - (cluster_relax * (aniso**3)))
+        if w_sample <= 0.0:
+            return
         got = _sample_for(X, corner, Q, Rp, Rm, ca, ta, c_hat, frozen)
         if got is not None:
             rows.append(got)
-            wts.append(weight)
+            wts.append(w_sample)
 
     for conn in topo.interface_connections:
         biA = block_names.index(conn.face_a.block_name)

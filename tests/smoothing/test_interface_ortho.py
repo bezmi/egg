@@ -89,20 +89,21 @@ def _pgram(res, shear=1.0):
     return b.build().initialize_grid()
 
 
-def _relax_shift(grid):
-    """Max change in the target W_inv from turning the clustering relax on."""
+def _relax_fade(grid):
+    """Total weight removed by turning the clustering relax on (as a fraction)."""
     a0 = interface_ortho_samples(grid, mode="normal", weight=1.0, cluster_relax=0.0)
     a1 = interface_ortho_samples(grid, mode="normal", weight=1.0, cluster_relax=1.0)
-    return float(np.abs(a0.W_inv - a1.W_inv).max())
+    return 1.0 - float(a1.weight.sum() / a0.weight.sum())
 
 
-def test_cluster_relax_engages_only_on_slivers():
-    # On an oblique seam with ~square cells the relax barely moves the target;
-    # on thin (clustered-like) cells it engages strongly and follows the current
-    # crossing direction. Cubed aniso keeps a merely sheared cell untouched.
-    square = _relax_shift(_pgram(res=(8, 8)))  # aniso ~ 0.1
-    thin = _relax_shift(_pgram(res=(8, 40)))  # aniso ~ 0.8 (sliver)
-    assert thin > 10.0 * square + 1e-9
+def test_cluster_relax_fades_only_on_slivers():
+    # The relax fades the term's weight where cells are thin (clustered-like) and
+    # leaves it alone on ~square cells. Cubed aniso keeps a merely sheared cell
+    # near full weight; a sliver seam loses most of it.
+    square = _relax_fade(_pgram(res=(8, 8)))  # aniso ~ 0.1 -> tiny fade
+    thin = _relax_fade(_pgram(res=(8, 80)))  # sliver cells -> most weight faded
+    assert square < 0.05
+    assert thin > 0.5
 
 
 @pytest.mark.parametrize("mode", ["normal", "continuous"])
