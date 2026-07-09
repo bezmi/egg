@@ -100,15 +100,23 @@ def _side_frames(grid, block_names, face) -> dict[int, dict]:
     return out
 
 
-def _sample_for(X, P, fr, c_hat) -> tuple | None:
+def _smoothstep(t: float) -> float:
+    """Hermite smoothstep on [0, 1]."""
+    t = min(max(t, 0.0), 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _sample_for(X, corner, Q, Rp, Rm, ca, ta, c_hat) -> tuple | None:
     """One corner sample (columns cross, tangent) with target W = [c_hat*Lc | f].
 
-    ``c_hat`` is the target cross direction; picks the tangent neighbour that
-    makes det W > 0. Returns (gc, gn0, gn1, s0, s1, W_inv(2,2), participants)
-    or None when the node has no usable tangent neighbour.
+    ``corner`` is the sample corner (a seam node at layer 0, else a near-seam
+    interior node), ``Q`` its cross neighbour one layer deeper, ``Rp``/``Rm``
+    its +/- tangent neighbours (-1 if off-block). ``c_hat`` is the target cross
+    direction; picks the tangent neighbour that makes det W > 0. Returns
+    (gc, gn0, gn1, s0, s1, W_inv(2,2), participants) or None.
     """
-    p = X[P]
-    e = X[fr["Q"]] - p  # current cross edge
+    p = X[corner]
+    e = X[Q] - p  # current cross edge
     Lc = float(np.linalg.norm(e))
     if Lc == 0.0:
         return None
@@ -119,10 +127,9 @@ def _sample_for(X, P, fr, c_hat) -> tuple | None:
     c = c / nc
     if float(np.dot(c, e)) < 0.0:
         c = -c
-    ca, ta = fr["cross_axis"], fr["tan_axis"]
 
     # Try each available tangent neighbour, keep the one giving det W > 0.
-    for R in (fr["Rp"], fr["Rm"]):
+    for R in (Rp, Rm):
         if R < 0:
             continue
         f = X[R] - p  # current tangent edge (used verbatim as W's tan column)
@@ -133,16 +140,21 @@ def _sample_for(X, P, fr, c_hat) -> tuple | None:
             continue
         gn = [0, 0]
         s = [1.0, 1.0]
-        gn[ca], gn[ta] = fr["Q"], R
+        gn[ca], gn[ta] = Q, R
         W_inv = np.linalg.inv(W)
-        part_node = np.array([P, fr["Q"], R], dtype=np.int64)
+        part_node = np.array([corner, Q, R], dtype=np.int64)
         part_role = np.array([0, 1 + ca, 1 + ta], dtype=np.int32)
-        return (P, gn[0], gn[1], s[0], s[1], W_inv, part_node, part_role)
+        return (corner, gn[0], gn[1], s[0], s[1], W_inv, part_node, part_role)
     return None
 
 
 def interface_ortho_samples(
-    grid, *, mode: str = "normal", weight: float = 1.0, topology=None
+    grid,
+    *,
+    mode: str = "normal",
+    weight: float = 1.0,
+    n_layers: int = 3,
+    topology=None,
 ) -> InterfaceSamples:
     """Build the interface orthogonality/continuity samples for a 2D grid.
 
@@ -152,6 +164,15 @@ def interface_ortho_samples(
     mode : {"normal", "continuous"}
     weight : float
         Per-sample weight of the composed term (soft; larger = more dominant).
+    n_layers : int
+        Depth of the near-seam band the term acts on. The crossing edge is
+        oriented not just at the seam (layer 0) but through the first
+        ``n_layers`` layers on each side; each layer's target direction is
+        blended from the seam constraint toward the edge's *current* direction
+        deeper in (smoothstep in ``k/n_layers``), so the grid line curves
+        *gradually* to the target seam angle instead of snapping the first edge
+        (which relocates the kink one layer in). ``n_layers=1`` acts on the
+        first edge only — the concentrating behaviour; kept for parity/tests.
     topology : BlockTopology, optional
         Defaults to ``grid.topology``.
     """
@@ -164,27 +185,68 @@ def interface_ortho_samples(
     block_names = list(topo.block_specs.keys())
 
     rows: list[tuple] = []
+    wts: list[float] = []
+
+    def side(m, j, ca, ta, base_dir, k):
+        """Emit the layer-k crossing sample of column j on one oriented map.
+
+        The target cross direction is blended from ``base_dir`` (the seam
+        constraint: normal, or the straight-crossing direction) at the seam
+        toward the edge's *current* direction deeper in the band, so the grid
+        line curves smoothly to meet the seam instead of being straightened to
+        a fixed direction (which just relocates the kink to the band edge)."""
+        if k + 1 >= m.shape[0]:
+            return
+        corner, Q = int(m[k, j]), int(m[k + 1, j])
+        e = X[Q] - X[corner]
+        ne = float(np.linalg.norm(e))
+        if ne == 0.0:
+            return
+        e_hat = e / ne
+        base = np.asarray(base_dir, dtype=float)
+        nb = float(np.linalg.norm(base))
+        if nb == 0.0:
+            return
+        base = base / nb
+        if float(np.dot(base, e_hat)) < 0.0:
+            base = -base
+        t = _smoothstep(k / n_layers)  # 0 at seam → 1 at band edge
+        c_hat = (1.0 - t) * base + t * e_hat
+        Rp = int(m[k, j + 1]) if j + 1 < m.shape[1] else -1
+        Rm = int(m[k, j - 1]) if j - 1 >= 0 else -1
+        got = _sample_for(X, corner, Q, Rp, Rm, ca, ta, c_hat)
+        if got is not None:
+            rows.append(got)
+            wts.append(weight)
+
     for conn in topo.interface_connections:
-        fa = _side_frames(grid, block_names, conn.face_a)
-        fb = _side_frames(grid, block_names, conn.face_b)
-        for P, frA in fa.items():
-            frB = fb.get(P)
-            if frB is None:
-                continue  # non-conforming seam node; skip
+        biA = block_names.index(conn.face_a.block_name)
+        biB = block_names.index(conn.face_b.block_name)
+        mA = _oriented_map(
+            np.asarray(grid.block_dof_maps[biA]), conn.face_a.axis, conn.face_a.side
+        )
+        mB = _oriented_map(
+            np.asarray(grid.block_dof_maps[biB]), conn.face_b.axis, conn.face_b.side
+        )
+        caA, taA = conn.face_a.axis, 1 - conn.face_a.axis
+        caB, taB = conn.face_b.axis, 1 - conn.face_b.axis
+        posB = {int(mB[0, j]): j for j in range(mB.shape[1])}
+        for jA in range(1, mA.shape[1] - 1):  # skip seam-corner endpoints
+            P = int(mA[0, jA])
+            jB = posB.get(P)
+            if jB is None or jB in (0, mB.shape[1] - 1):
+                continue  # non-conforming or corner seam node
             if mode == "normal":
-                # Seam tangent from the seam polyline (central difference).
-                tp = X[frA["Rp"]] if frA["Rp"] >= 0 else X[P]
-                tm = X[frA["Rm"]] if frA["Rm"] >= 0 else X[P]
-                tan = tp - tm
-                n_hat = np.array([-tan[1], tan[0]])  # rotate +90
-                cA = cB = n_hat
-            else:  # continuous: straight crossing line through P
-                cross = X[frA["Q"]] - X[frB["Q"]]
+                # Seam normal (rotate the seam tangent), shared by both sides so
+                # orthogonality-both-sides gives a straight crossing (continuity).
+                tan = X[int(mA[0, jA + 1])] - X[int(mA[0, jA - 1])]
+                cA = cB = np.array([-tan[1], tan[0]])
+            else:  # continuous: straight crossing direction through the seam
+                cross = X[int(mA[1, jA])] - X[int(mB[1, jB])]
                 cA, cB = cross, -cross
-            for fr, c_hat in ((frA, cA), (frB, cB)):
-                got = _sample_for(X, P, fr, c_hat)
-                if got is not None:
-                    rows.append(got)
+            for k in range(n_layers):
+                side(mA, jA, caA, taA, cA, k)
+                side(mB, jB, caB, taB, cB, k)
 
     if not rows:
         z = np.zeros(0)
@@ -198,5 +260,6 @@ def interface_ortho_samples(
     W_inv = np.stack([r[5] for r in rows])
     part_node = np.stack([r[6] for r in rows])
     part_role = np.stack([r[7] for r in rows])
-    w = np.full(gc.shape[0], float(weight))
-    return InterfaceSamples(gc, gn0, gn1, s0, s1, W_inv, w, part_node, part_role)
+    return InterfaceSamples(
+        gc, gn0, gn1, s0, s1, W_inv, np.asarray(wts, dtype=float), part_node, part_role
+    )
