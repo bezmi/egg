@@ -141,6 +141,15 @@ def setup(a):
     # outer rows reach the neighbour spacing on their own.
     pin = a["bl_first_height"] > 0.0 and a["pin_layers"] > 0
     grid = topo.initialize_grid()
+    # Optional block-interface C2 curvature-continuity term: de-kinks grid lines
+    # crossing the O-grid/H-grid seams (and the 5-way singularities between them).
+    # interface_only: act on windows that cross a seam, not the (legitimately
+    # curved) clustered interior near the egg wall.
+    c2 = (
+        {"weight": a["c2_weight"], "interface_only": True}
+        if a.get("c2_weight", 0.0) > 0.0
+        else None
+    )
     cfg = PipelineConfig(
         sweeps_per_delta=a["sweeps_per_delta"],
         tmop_sweeps=a["tmop_sweeps"],
@@ -149,6 +158,7 @@ def setup(a):
         cluster_boundary_layers=pin,
         bl_blend_neighbours=False,
         omega=a["omega"],
+        interface_c2=c2,
         device=a["device"],
         pin_sweeps=a["pin_sweeps"] if pin else 0,
         respace=a["bl_first_height"] > 0.0 and not pin,

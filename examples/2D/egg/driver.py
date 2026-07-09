@@ -83,6 +83,13 @@ def parse_args(argv=None):
         default=0.8,
         help="block-Jacobi SOR/damping weight (1.0 = undamped)",
     )
+    p.add_argument(
+        "--c2-weight",
+        type=float,
+        default=0.0,
+        help="block-interface C2 curvature-continuity weight (0 = off); de-kinks "
+        "grid lines crossing block seams (the 5-way singularities included)",
+    )
     a = p.parse_args(argv)
     print("=" * 56)
     print("egg in rectangle → TMOP smooth")
