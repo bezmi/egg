@@ -136,9 +136,10 @@ def setup(a):
     metric = a.get("metric", "shape")
     # Optional block-interface C2 curvature term (interface_only: de-kink the
     # block seams without disturbing the clustered near-wall cells).
+    c2w, c2s = a.get("c2_weight", 0.0), a.get("c2_singularity", 0.0)
     c2 = (
-        {"weight": a["c2_weight"], "interface_only": True}
-        if a.get("c2_weight", 0.0) > 0.0
+        {"weight": c2w, "interface_only": True, "singularity_weight": c2s}
+        if (c2w > 0.0 or c2s > 0.0)
         else None
     )
     # Optional block-interface orthogonality term (cross-seam edge ⊥ seam);
@@ -202,6 +203,7 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         # block-interface C2 curvature-continuity weight (0 = off); de-kinks the
         # grid lines crossing block seams (interface-only).
         c2_weight=egg_webui.editable(0.0, label="interface C2 weight"),
+        c2_singularity=egg_webui.editable(0.0, label="singularity ring C2 weight"),
         ortho_weight=egg_webui.editable(0.0, label="interface orthogonality weight"),
         ortho_layers=egg_webui.editable(3, label="orthogonality band layers"),
         ortho_relax=egg_webui.editable(1.0, label="orthogonality clustering relax"),

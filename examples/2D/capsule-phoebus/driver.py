@@ -76,6 +76,13 @@ def parse_args(argv=None):
         "near-wall interior alone)",
     )
     p.add_argument(
+        "--c2-singularity",
+        type=float,
+        default=0.0,
+        help="C2 weight on the ring around each singular node (0 = off); rounds "
+        "the sharp singular-fan corners into a smooth (C1) loop",
+    )
+    p.add_argument(
         "--ortho-weight",
         type=float,
         default=0.0,

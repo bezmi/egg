@@ -91,6 +91,13 @@ def parse_args(argv=None):
         "grid lines crossing block seams (the 5-way singularities included)",
     )
     p.add_argument(
+        "--c2-singularity",
+        type=float,
+        default=0.0,
+        help="C2 weight on the ring around each singular (5-way) node (0 = off); "
+        "rounds the sharp pentagon corners into a smooth (C1) fan",
+    )
+    p.add_argument(
         "--ortho-weight",
         type=float,
         default=0.0,

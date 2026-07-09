@@ -74,12 +74,79 @@ def _seam_nodes(grid) -> np.ndarray:
     return np.array([n for n, c in seen.items() if c > 1], dtype=np.int64)
 
 
+def _singularity_rings(grid, topology) -> list[list[int]]:
+    """Ordered node loop encircling each singular (valence != 4) node.
+
+    The fan of cells meeting at a singular node ``S`` has a boundary ring of
+    ``2N`` nodes (the ``N`` spokes alternating with the ``N`` far corners of the
+    cells). ``grid_lines`` walks straightest-continuation and *diverts off* this
+    ring at the sharp far corners, so the curvature term never sees it — leaving
+    the ring kinked. This assembles it explicitly from the cells incident to
+    ``S`` (across every block, since ``S`` is a shared corner), chained into the
+    loop. Returns one node-id list per singularity (``S`` itself excluded)."""
+    maps = [np.asarray(m) for m in grid.block_dof_maps]
+    block_names = list(topology.block_specs.keys())
+    rings: list[list[int]] = []
+    for sg in getattr(topology, "singularities", []):
+        bi = block_names.index(sg.block_name)
+        s = int(maps[bi][tuple(sg.logical_idx)])
+        # (spoke_a, far, spoke_b) for every cell with S at a corner.
+        cells: list[tuple[int, int, int]] = []
+        seen: set = set()
+        for mm in maps:
+            n0, n1 = mm.shape
+            for i, j in np.argwhere(mm == s):
+                for di, dj in ((0, 0), (-1, 0), (0, -1), (-1, -1)):
+                    ci, cj = int(i) + di, int(j) + dj
+                    if not (0 <= ci < n0 - 1 and 0 <= cj < n1 - 1):
+                        continue
+                    quad = [
+                        int(mm[ci, cj]),
+                        int(mm[ci + 1, cj]),
+                        int(mm[ci + 1, cj + 1]),
+                        int(mm[ci, cj + 1]),
+                    ]
+                    if s not in quad:
+                        continue
+                    k = quad.index(s)
+                    a, far, b = quad[(k + 1) % 4], quad[(k + 2) % 4], quad[(k + 3) % 4]
+                    key = (far, min(a, b), max(a, b))
+                    if key not in seen:
+                        seen.add(key)
+                        cells.append((a, far, b))
+        if len(cells) < 2:
+            continue
+        ring = [cells[0][0], cells[0][1], cells[0][2]]
+        used = [False] * len(cells)
+        used[0] = True
+        for _ in range(len(cells) - 1):
+            last = ring[-1]
+            for idx, (a, far, b) in enumerate(cells):
+                if used[idx]:
+                    continue
+                if a == last:
+                    ring += [far, b]
+                    used[idx] = True
+                    break
+                if b == last:
+                    ring += [far, a]
+                    used[idx] = True
+                    break
+        if len(ring) > 1 and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        ring = list(dict.fromkeys(ring))  # unique, order-preserving
+        if len(ring) >= 4:
+            rings.append(ring)
+    return rings
+
+
 def curvature_windows(
     grid,
     *,
     weight: float = 1.0,
     iface_boost: float = 1.0,
     interface_only: bool = False,
+    singularity_weight: float = 0.0,
     topology=None,
 ) -> CurvatureWindows:
     """Build the curvature-continuity windows for a 2D grid.
@@ -95,6 +162,11 @@ def curvature_windows(
     interface_only : bool
         Drop windows that do not touch a seam (base weight applies only through
         the boost); the pure across-interface term.
+    singularity_weight : float
+        If > 0, also emit windows around each singular (valence != 4) node's
+        boundary ring (see :func:`_singularity_rings`), weighted by this. The C2
+        term drives a closed ring toward constant curvature (a smooth loop), so
+        the fan's sharp pentagon corners round out — C1-continuous ring edges.
     topology : BlockTopology, optional
         Defaults to ``grid.topology``.
     """
@@ -104,19 +176,38 @@ def curvature_windows(
     nbr, partner = grid_adjacency(grid)
     lines = grid_lines(grid, nbr, partner)
     cc = _curv_cols(lines)
-    if cc[0].size == 0:
-        return CurvatureWindows()
-    nodes = np.stack(cc, axis=1).astype(np.int64)  # (W, 4)
+    have_lines = cc[0].size > 0
+    nodes = (
+        np.stack(cc, axis=1).astype(np.int64)
+        if have_lines
+        else np.zeros((0, 4), np.int64)
+    )
 
     n_total = int(np.asarray(grid.global_nodes).shape[0])
     is_seam = np.zeros(n_total, bool)
     is_seam[_seam_nodes(grid)] = True
-    touches = is_seam[nodes].any(axis=1)
+    touches = is_seam[nodes].any(axis=1) if have_lines else np.zeros(0, bool)
 
     w = np.where(touches, weight * iface_boost, weight).astype(float)
-    if interface_only:
+    if interface_only and have_lines:
         keep = touches
         nodes, w = nodes[keep], w[keep]
+
+    # Singularity ring windows (closed loop → constant-curvature → smooth fan).
+    if singularity_weight > 0.0:
+        ring_rows = []
+        for ring in _singularity_rings(grid, topo):
+            r = np.asarray(ring, dtype=np.int64)
+            L = r.shape[0]
+            idx = (np.arange(L)[:, None] + np.arange(4)[None, :]) % L
+            ring_rows.append(r[idx])  # (L, 4) closed windows
+        if ring_rows:
+            rn = np.concatenate(ring_rows, axis=0)
+            nodes = np.concatenate([nodes, rn], axis=0)
+            w = np.concatenate([w, np.full(rn.shape[0], singularity_weight)])
+
+    if nodes.shape[0] == 0:
+        return CurvatureWindows()
     return CurvatureWindows(nodes=np.ascontiguousarray(nodes), weight=w)
 
 

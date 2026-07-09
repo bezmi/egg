@@ -10,10 +10,12 @@
 
 import numpy as np
 
+from egg.geometry import Vector3
 from egg.smoothing import highorder as H
 from egg.smoothing.interface_c2 import (
     CurvatureWindows,
     _seam_nodes,
+    _singularity_rings,
     _turn_grad,
     curvature_dof_table,
     curvature_energy_grad_hess,
@@ -101,6 +103,41 @@ def test_windows_cross_seam_and_carry_boost():
     # seam-touching windows carry the boosted weight, interior ones the base.
     assert np.allclose(win.weight[touches], 5.0)
     assert np.allclose(win.weight[~touches], 1.0)
+
+
+def _fan_grid():
+    """Three quad blocks fanning around a shared centre → valence-3 singularity."""
+    b = TopologyBuilder(d=2)
+    c = Vector3(0.0, 0.0)
+    ang = [90, 210, 330]
+    n = [Vector3(float(np.cos(np.radians(x))), float(np.sin(np.radians(x)))) for x in ang]
+    f = [
+        Vector3(float(1.8 * np.cos(np.radians(x + 60))), float(1.8 * np.sin(np.radians(x + 60))))
+        for x in ang
+    ]
+    for i in range(3):
+        j = (i + 1) % 3
+        b.add_block(f"b{i}", sw=c, se=n[i], ne=f[i], nw=n[j], res=(5, 5))
+    return b.build().initialize_grid()
+
+
+def test_singularity_ring_windows():
+    grid = _fan_grid()
+    assert grid.topology.singularities  # a valence-3 node exists
+    rings = _singularity_rings(grid, grid.topology)
+    assert len(rings) == 1 and len(rings[0]) == 6  # 3 spokes + 3 far corners
+    base = curvature_windows(grid, weight=0.0, singularity_weight=0.0)
+    withs = curvature_windows(grid, weight=0.0, singularity_weight=2.0)
+    assert len(withs) == len(base) + 6  # one closed window per ring node
+    assert np.allclose(withs.weight[-6:], 2.0)
+
+
+def test_no_singularity_rings_on_cartesian_grid():
+    grid = _lr_grid()
+    assert not _singularity_rings(grid, grid.topology)
+    w0 = curvature_windows(grid, weight=1.0, singularity_weight=0.0)
+    w1 = curvature_windows(grid, weight=1.0, singularity_weight=5.0)
+    assert len(w1) == len(w0)  # nothing to add
 
 
 def test_interface_only_keeps_seam_windows():

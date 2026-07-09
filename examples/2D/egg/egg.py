@@ -145,9 +145,10 @@ def setup(a):
     # crossing the O-grid/H-grid seams (and the 5-way singularities between them).
     # interface_only: act on windows that cross a seam, not the (legitimately
     # curved) clustered interior near the egg wall.
+    c2w, c2s = a.get("c2_weight", 0.0), a.get("c2_singularity", 0.0)
     c2 = (
-        {"weight": a["c2_weight"], "interface_only": True}
-        if a.get("c2_weight", 0.0) > 0.0
+        {"weight": c2w, "interface_only": True, "singularity_weight": c2s}
+        if (c2w > 0.0 or c2s > 0.0)
         else None
     )
     # Optional block-interface orthogonality term: pulls the cross-seam edge
@@ -223,6 +224,7 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         # the grid lines crossing block seams; orthogonality pulls the cross-seam
         # edge perpendicular to the seam.
         c2_weight=egg_webui.editable(0.0, label="interface C2 weight"),
+        c2_singularity=egg_webui.editable(0.0, label="singularity ring C2 weight"),
         ortho_weight=egg_webui.editable(0.0, label="interface orthogonality weight"),
         ortho_layers=egg_webui.editable(3, label="orthogonality band layers"),
         ortho_relax=egg_webui.editable(1.0, label="orthogonality clustering relax"),
