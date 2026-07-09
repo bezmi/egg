@@ -117,11 +117,53 @@ if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "${XDG_RUNTIME_DIR:-}/$WAYLAND_DISPLAY"
 		-v "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY":"$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
 	)
 fi
-if [ -e /dev/dri/renderD128 ]; then
-	# keep-groups carries the host render/video gids in (in case the node isn't 0666).
-	# SYS_PTRACE makes the default seccomp profile permit kcmp(2), which mesa uses to
-	# dedupe DRM fds (os_same_file_description). Without it amdgpu warns and crashes.
-	display_args+=(--device /dev/dri/renderD128 --group-add keep-groups --cap-add=SYS_PTRACE)
+# Render the GL window on whichever GPU actually drives the connected monitors.
+# On a hybrid host the wrong GPU means GLX/DRI3 fails (e.g. mesa tries the nouveau
+# driver against the proprietary nvidia kmod: "failed to create dri3 screen").
+# This is a RENDER-ONLY concern, independent of the compute BACKEND above: `cpu`
+# still opens a hardware-accelerated window.
+#   - amd (radeonsi) / intel (iris): mesa is already in the image, so passing the
+#     GPU's render node is all it needs.
+#   - nvidia: GL needs the proprietary userspace (libGLX_nvidia/libEGL_nvidia),
+#     which the *graphics* CDI device injects, matched to the host driver. (That
+#     spec also mounts libcuda read-only, but nothing here uses it — the cpu image's
+#     acpp has no CUDA backend. Regenerate the CDI spec graphics-only to trim it.)
+render_node_for_displays() {
+	local st conn card rd
+	for st in /sys/class/drm/card*-*/status; do
+		[ -e "$st" ] || continue
+		[ "$(cat "$st" 2>/dev/null)" = connected ] || continue
+		conn=$(basename "$(dirname "$st")"); card=${conn%%-*}
+		for rd in "/sys/class/drm/$card/device/drm/"renderD*; do
+			[ -e "$rd" ] && { basename "$rd"; return 0; }
+		done
+	done
+	return 1
+}
+render_node=$(render_node_for_displays || true)
+[ -z "$render_node" ] && [ -e /dev/dri/renderD128 ] && render_node=renderD128
+render_drv=""
+[ -n "$render_node" ] && render_drv=$(basename "$(readlink -f "/sys/class/drm/$render_node/device/driver" 2>/dev/null)")
+
+# keep-groups carries the host render/video gids in (in case the node isn't 0666).
+# SYS_PTRACE makes the default seccomp profile permit kcmp(2), which mesa uses to
+# dedupe DRM fds (os_same_file_description). Without it amdgpu warns and crashes.
+if [ "$render_drv" = nvidia ]; then
+	if [ -f /etc/cdi/nvidia.yaml ]; then
+		# Don't double-add if a gpu BACKEND (cuda/all) already passed it.
+		case " ${gpu_args[*]} " in
+		*" nvidia.com/gpu=all "*) : ;;
+		*) gpu_args+=(--device nvidia.com/gpu=all) ;;
+		esac
+		display_args+=(--group-add keep-groups --cap-add=SYS_PTRACE)
+	else
+		echo ">> warning: display GPU is nvidia but /etc/cdi/nvidia.yaml is missing;" >&2
+		echo ">>          the GL window will fall back to software (llvmpipe). Fix with:" >&2
+		echo ">>          sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml" >&2
+		display_args+=(-e LIBGL_ALWAYS_SOFTWARE=1)
+	fi
+elif [ -n "$render_node" ] && [ -e "/dev/dri/$render_node" ]; then
+	display_args+=(--device "/dev/dri/$render_node" --group-add keep-groups --cap-add=SYS_PTRACE)
 else
 	display_args+=(-e LIBGL_ALWAYS_SOFTWARE=1)
 fi

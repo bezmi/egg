@@ -182,6 +182,13 @@ RUN apt-get update \
         python3-tk mesa-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# Docs: `uv run --group docs sphinx-build` pulls sphinx/breathe from the docs
+# dependency group, but conf.py shells out to the `doxygen` binary up front to
+# regenerate the C++ XML for Breathe (HAVE_DOT=NO, so graphviz isn't needed).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends doxygen \
+    && rm -rf /var/lib/apt/lists/*
+
 # egg-prewarm: compile AdaptiveCpp's SSCP kernels into its on-disk JIT cache
 # before any GUI runs. The generic-SSCP JIT uses libLLVM in-process; if it fires
 # while mesa's libLLVM is loaded for rendering (--plot-live), the two collide and
