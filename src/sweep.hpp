@@ -10,6 +10,7 @@
 /// Device-resident block-Jacobi barrier/untangle sweep.
 #pragma once
 
+#include "curvature.hpp"
 #include "device.hpp"
 #include "geometry.hpp"
 #include "metric.hpp"
@@ -85,6 +86,16 @@ template <int D> struct SweepGroupHostT {
     // path, where the fast path never applies.
     std::vector<int> interior_block;    // [ndof] or empty; -1 = use stored arrays
     std::vector<int> interior_logical;  // [ndof * D] or empty
+
+    // Block-interface C2 curvature term (2D): per-DOF fixed-K window table. Each
+    // free DOF lists the curvature windows it participates in — four node ids per
+    // window (global; remapped to structured owner slots), the DOF's slot 0..3,
+    // and the window weight. curv_k == 0 means no curvature term. Both consumers
+    // (metric_kernel accumulation, interior_update_kernel trial energy) read it.
+    int curv_k = 0;
+    std::vector<int> curv_nodes;    // [ndof * curv_k * 4]
+    std::vector<int> curv_slot;     // [ndof * curv_k]  (-1 = pad)
+    std::vector<real> curv_weight;  // [ndof * curv_k]
 };
 
 template <int D> struct EnergyStencilHostT {
@@ -155,6 +166,13 @@ template <int D> struct GroupViewT {
     const int* block_off = nullptr;         // [num_blocks] (shared)
     const int* nstride = nullptr;           // [num_blocks * D] (shared)
 
+    // Block-interface C2 curvature term (2D; null when absent): per-DOF fixed-K
+    // window table (see SweepGroupHostT). curv_nodes holds structured node ids.
+    int curv_k = 0;
+    const int* curv_nodes = nullptr;    // [ndof * curv_k * 4]
+    const int* curv_slot = nullptr;     // [ndof * curv_k]
+    const real* curv_weight = nullptr;  // [ndof * curv_k]
+
     // True when DOF d's patch can be synthesized from the block layout (its whole
     // patch lies inside one block's interior); fills the block + logical index.
     bool interior(std::size_t d, int& block, int (&logical)[D]) const
@@ -208,6 +226,11 @@ template <int D> struct GroupViewT {
         if (interior_block != nullptr) {
             sub.interior_block = interior_block + begin;
             sub.interior_logical = interior_logical + (begin * D);
+        }
+        if (curv_nodes != nullptr) {
+            sub.curv_nodes = curv_nodes + (begin * curv_k * 4);
+            sub.curv_slot = curv_slot + (begin * curv_k);
+            sub.curv_weight = curv_weight + (begin * curv_k);
         }
         return sub;
     }
@@ -351,6 +374,30 @@ template <int D> class SweepDeviceContextT
                 dg.interior_logical = {q, ilog};
             }
 
+            // Curvature window table: K-wide per DOF, reordered in lockstep.
+            if (g.curv_k > 0) {
+                const int K = g.curv_k;
+                dg.curv_k = K;
+                std::vector<int> cn(g.ndof * static_cast<std::size_t>(K) * 4);
+                std::vector<int> cs(g.ndof * static_cast<std::size_t>(K));
+                std::vector<real> cw(g.ndof * static_cast<std::size_t>(K));
+                for (std::size_t i = 0; i < perm.size(); ++i) {
+                    const auto src = static_cast<std::size_t>(perm[i]);
+                    for (int j = 0; j < K; ++j) {
+                        const std::size_t dst_e = (i * static_cast<std::size_t>(K)) + j;
+                        const std::size_t src_e = (src * static_cast<std::size_t>(K)) + j;
+                        cs[dst_e] = g.curv_slot[src_e];
+                        cw[dst_e] = g.curv_weight[src_e];
+                        for (int m = 0; m < 4; ++m) {
+                            cn[(dst_e * 4) + m] = g.curv_nodes[(src_e * 4) + m];
+                        }
+                    }
+                }
+                dg.curv_nodes = {q, cn};
+                dg.curv_slot = {q, cs};
+                dg.curv_weight = {q, cw};
+            }
+
             groups_.push_back(std::move(dg));
         }
 
@@ -471,6 +518,9 @@ template <int D> class SweepDeviceContextT
         UsmBuffer<int> dof_idx, P_of, sample_offset;
         UsmBuffer<int> part_of, row_of;                   // [ndof] DOF -> (partition, row)
         UsmBuffer<int> interior_block, interior_logical;  // [ndof], [ndof*D]; empty if unstructured
+        int curv_k = 0;                                   // curvature windows per DOF (0 = none)
+        UsmBuffer<int> curv_nodes, curv_slot;             // [ndof*curv_k*4], [ndof*curv_k]
+        UsmBuffer<real> curv_weight;                      // [ndof*curv_k]
         std::vector<DevicePartition> partitions;
 
         GroupViewT<D> view(const PartitionView* pvs,
@@ -506,6 +556,12 @@ template <int D> class SweepDeviceContextT
                 gv.interior_logical = interior_logical.data();
                 gv.block_off = block_off;
                 gv.nstride = nstride;
+            }
+            if (curv_nodes.size() > 0) {
+                gv.curv_k = curv_k;
+                gv.curv_nodes = curv_nodes.data();
+                gv.curv_slot = curv_slot.data();
+                gv.curv_weight = curv_weight.data();
             }
             return gv;
         }
@@ -565,6 +621,13 @@ template <int D> class SweepDeviceContextT
         const bool structured = !groups_.empty() && groups_[0].interior_block.size() > 0;
         std::vector<int> interior_block(total_ndof, -1);
         std::vector<int> interior_logical(total_ndof * static_cast<std::size_t>(D), 0);
+        // Curvature window table carried through the merge (0-wide when absent).
+        const bool has_curv = !groups_.empty() && groups_[0].curv_k > 0;
+        const int curv_k = has_curv ? groups_[0].curv_k : 0;
+        const std::size_t ck = static_cast<std::size_t>(curv_k);
+        std::vector<int> curv_nodes(total_ndof * ck * 4, -1);
+        std::vector<int> curv_slot(total_ndof * ck, -1);
+        std::vector<real> curv_weight(total_ndof * ck, 0.0_r);
         std::vector<PartitionView> merged_pvs;
         merged_pvs.reserve(total_parts);
 
@@ -599,6 +662,24 @@ template <int D> class SweepDeviceContextT
                     for (int k = 0; k < D; ++k) {
                         interior_logical[((dbase + r) * D) + static_cast<std::size_t>(k)] =
                           g_il[(r * D) + static_cast<std::size_t>(k)];
+                    }
+                }
+            }
+            if (has_curv && dg.curv_k > 0) {
+                std::vector<int> g_cn(gd * ck * 4), g_cs(gd * ck);
+                std::vector<real> g_cw(gd * ck);
+                dg.curv_nodes.download(g_cn.data());
+                dg.curv_slot.download(g_cs.data());
+                dg.curv_weight.download(g_cw.data());
+                for (std::size_t r = 0; r < gd; ++r) {
+                    for (std::size_t j = 0; j < ck; ++j) {
+                        const std::size_t d_e = ((dbase + r) * ck) + j;
+                        const std::size_t s_e = (r * ck) + j;
+                        curv_slot[d_e] = g_cs[s_e];
+                        curv_weight[d_e] = g_cw[s_e];
+                        for (int m = 0; m < 4; ++m) {
+                            curv_nodes[(d_e * 4) + m] = g_cn[(s_e * 4) + m];
+                        }
                     }
                 }
             }
@@ -652,6 +733,24 @@ template <int D> class SweepDeviceContextT
                 }
             }
             m_interior_logical_ = UsmBuffer<int> {q_, ril};
+        }
+        if (has_curv) {
+            m_curv_k_ = curv_k;
+            std::vector<int> rcn(total_ndof * ck * 4), rcs(total_ndof * ck);
+            std::vector<real> rcw(total_ndof * ck);
+            for (std::size_t i = 0; i < perm.size(); ++i) {
+                const auto src = static_cast<std::size_t>(perm[i]);
+                for (std::size_t j = 0; j < ck; ++j) {
+                    const std::size_t d_e = (i * ck) + j;
+                    const std::size_t s_e = (src * ck) + j;
+                    rcs[d_e] = curv_slot[s_e];
+                    rcw[d_e] = curv_weight[s_e];
+                    for (int m = 0; m < 4; ++m) { rcn[(d_e * 4) + m] = curv_nodes[(s_e * 4) + m]; }
+                }
+            }
+            m_curv_nodes_ = UsmBuffer<int> {q_, rcn};
+            m_curv_slot_ = UsmBuffer<int> {q_, rcs};
+            m_curv_weight_ = UsmBuffer<real> {q_, rcw};
         }
 
         // Per-partition reordered-position lists for the boundary tail: bucket
@@ -716,6 +815,12 @@ template <int D> class SweepDeviceContextT
             gv.interior_logical = m_interior_logical_.data();
             gv.block_off = block_off_.data();
             gv.nstride = nstride_.data();
+        }
+        if (has_curv) {
+            gv.curv_k = m_curv_k_;
+            gv.curv_nodes = m_curv_nodes_.data();
+            gv.curv_slot = m_curv_slot_.data();
+            gv.curv_weight = m_curv_weight_.data();
         }
         merged_view_ = gv;
 
@@ -888,6 +993,9 @@ template <int D> class SweepDeviceContextT
     UsmBuffer<int> m_sample_id_, m_role_;
     UsmBuffer<int> m_dof_idx_, m_P_of_, m_sample_offset_, m_part_of_, m_row_of_;
     UsmBuffer<int> m_interior_block_, m_interior_logical_;  // structured only; empty otherwise
+    int m_curv_k_ = 0;                                      // curvature windows per DOF (0 = none)
+    UsmBuffer<int> m_curv_nodes_, m_curv_slot_;             // curvature table; empty otherwise
+    UsmBuffer<real> m_curv_weight_;
     UsmBuffer<PartitionView> m_partitions_;
 
     // Per-partition boundary launch descriptors (§4.7 / S1). m_part_positions_
@@ -1104,6 +1212,34 @@ inline void metric_kernel(sycl::queue& q,
         real* hslot = hess_buf + (base * D * D);
         for (int k = 0; k < D * D; ++k) { hslot[k] = r.hess[k]; }
         e0_buf[base] = r.energy;
+
+        // Block-interface C2 curvature term (2D): add the DOF's window
+        // contributions on top of the shape metric. The det barrier is
+        // untouched, so validity is still owned by the shape/mindet gate.
+        if constexpr (D == 2) {
+            if (g.curv_nodes != nullptr) {
+                const int K = g.curv_k;
+                const std::size_t off = d * static_cast<std::size_t>(K);
+                VecN<2> cg {};
+                MatN<2> ch {};
+                real ce = 0.0_r;
+                curv_dof_accumulate(K,
+                                    g.curv_nodes + (off * 4),
+                                    g.curv_slot + off,
+                                    g.curv_weight + off,
+                                    X,
+                                    cg,
+                                    ch,
+                                    ce);
+                gslot[0] += cg[0];
+                gslot[1] += cg[1];
+                hslot[0] += ch[0];
+                hslot[1] += ch[1];
+                hslot[2] += ch[2];
+                hslot[3] += ch[3];
+                e0_buf[base] += ce;
+            }
+        }
     });
 }
 
@@ -1189,6 +1325,18 @@ inline void interior_update_kernel(sycl::queue& q,
                   D>(g.block_off, g.nstride, block, logical, X, dof, trial, objective, e_new, mdet);
             } else {
                 trial_energy_mindet<D>(pv, X, dof, trial, objective, e_new, mdet);
+            }
+            // Block-interface C2 curvature: add the DOF's window energies with
+            // its node moved to the trial (others frozen), matching the curv
+            // energy folded into e0 by metric_kernel — so the accept rule gates
+            // on the composed objective. mdet (the barrier) is untouched.
+            if constexpr (D == 2) {
+                if (g.curv_nodes != nullptr) {
+                    const int K = g.curv_k;
+                    const std::size_t off = d * static_cast<std::size_t>(K);
+                    e_new += curv_dof_trial_energy(
+                      K, g.curv_nodes + (off * 4), g.curv_slot + off, g.curv_weight + off, X, trial);
+                }
             }
             // Shift the trial energy by the same linear term as e0 above, so
             // the acceptance compares the FAS objective on both sides.

@@ -200,6 +200,7 @@ def build_sweep_context(
     target_fn: Callable[..., np.ndarray],
     *,
     interface_ortho: dict | None = None,
+    interface_c2: dict | None = None,
 ) -> SweepContext:
     """Build the sweep context: energy stencil, constraint encoding, C++ wire.
 
@@ -220,6 +221,12 @@ def build_sweep_context(
         from egg.smoothing.interface_ortho import interface_ortho_samples
 
         iface = interface_ortho_samples(grid, **interface_ortho)
+
+    curvature = None
+    if interface_c2:
+        from egg.smoothing.interface_c2 import curvature_windows
+
+        curvature = curvature_windows(grid, **interface_c2)
 
     M = grid.global_node_count
     d = grid.topology.d
@@ -289,6 +296,7 @@ def build_sweep_context(
         d,
         w_inv=samp_w_inv,
         interface=iface,
+        curvature=curvature,
     )
 
     return SweepContext(

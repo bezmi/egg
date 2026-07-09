@@ -343,6 +343,18 @@ egg::SweepContextHostT<D>
             sg.interior_block = extract_int(gd, "interior_block");
             sg.interior_logical = extract_int(gd, "interior_logical");
         }
+        // Block-interface C2 curvature window table (2D): per-DOF fixed-K arrays
+        // (curv_nodes [ndof*K*4], curv_slot [ndof*K], curv_weight [ndof*K]). The
+        // node ids are global here; apply_structured_remap rewrites them to the
+        // structured owner slots (like the energy stencil).
+        if (gd.contains("curv_k")) {
+            sg.curv_k = gd["curv_k"].cast<int>();
+            if (sg.curv_k > 0) {
+                sg.curv_nodes = extract_int(gd, "curv_nodes");
+                sg.curv_slot = extract_int(gd, "curv_slot");
+                sg.curv_weight = extract_real(gd, "curv_weight");
+            }
+        }
 
         // Typed per-entity-type SoA sub-dicts (the sole carrier of entity
         // data). Each present type contributes {tag, kFields, dof_local,
@@ -719,6 +731,22 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     };
     remap_stencil(host.energy_stencil.gc);
     for (int k = 0; k < D; ++k) { remap_stencil(host.energy_stencil.gn[k]); }
+
+    // Curvature-window nodes resolve to their OWNER structured slot (g2s): the
+    // packed X is global-readable and read frozen per sweep, so every DOF reads
+    // the same node value regardless of block. Pad slots (-1) pass through.
+    for (auto& g : host.groups) {
+        for (int& x : g.curv_nodes) {
+            if (x < 0) { continue; }
+            const int s = g2s[static_cast<std::size_t>(x)];
+            if (s < 0) {
+                throw std::invalid_argument(
+                  "structured: a curvature-window node references a global node absent from "
+                  "every block's interior map");
+            }
+            x = s;
+        }
+    }
 
     host.X = std::move(Xp);
     host.num_nodes = layout.total_reals() / static_cast<std::size_t>(D);

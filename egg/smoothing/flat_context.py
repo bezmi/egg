@@ -122,7 +122,9 @@ def cell_stencil(blocks, d):
     }
 
 
-def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv, interface=None):
+def build_flat_context(
+    blocks, free_mask, dof_entities, d, *, w_inv, interface=None, curvature=None
+):
     """Assemble the ragged ``{"groups", "energy_stencil"}`` wire format.
 
     ``blocks``       list of global-node-id arrays, one per structured block;
@@ -269,6 +271,18 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv, interface=N
             "entities": group_entities_by_type(dofs.tolist(), dof_entities, d=d),
         }
         g.update(sample_fields(m_sid, uniform_out=True))
+        # Block-interface C2 curvature window table (per-DOF, aligned with the
+        # group's flatnonzero(free_mask) DOF order). Node ids are global; the
+        # structured remap rewrites them to owner slots.
+        if curvature is not None and len(curvature) > 0:
+            from .interface_c2 import curvature_dof_table
+
+            tab = curvature_dof_table(free_mask, curvature)
+            if tab:
+                g["curv_k"] = tab["curv_k"]
+                g["curv_nodes"] = np.ascontiguousarray(tab["curv_nodes"].reshape(-1))
+                g["curv_slot"] = np.ascontiguousarray(tab["curv_slot"].reshape(-1))
+                g["curv_weight"] = np.ascontiguousarray(tab["curv_weight"].reshape(-1))
         groups.append(g)
 
     all_sid = np.arange(ns)

@@ -167,6 +167,13 @@ class PipelineConfig:
     # default) leaves the objective as the plain shape/shape_size metric.
     interface_ortho: dict | None = None
 
+    # Optional block-interface C2 curvature term (2D). When set, the TMOP phase
+    # adds the curvature-continuity term over grid-line windows (see
+    # egg.smoothing.interface_c2): a dict of kwargs forwarded to
+    # curvature_windows, e.g. {"weight": 0.0, "iface_boost": 20.0}. Concentrates
+    # curvature continuity across block seams; None leaves it off.
+    interface_c2: dict | None = None
+
     device: Literal["cpu", "gpu", "auto"] = "cpu"
     verbose: bool = False
 
@@ -480,11 +487,15 @@ def generate_steps(
     # interface_ortho request forces a fresh build even for the isotropic target
     # (ctx_iso was built without it).
     io = cfg.interface_ortho
-    if target is None and io is None:
+    ic2 = cfg.interface_c2
+    if target is None and io is None and ic2 is None:
         tmop_ctx = ctx_iso
     else:
         tmop_ctx = build_sweep_context(
-            grid, iso if target is None else target, interface_ortho=io
+            grid,
+            iso if target is None else target,
+            interface_ortho=io,
+            interface_c2=ic2,
         )
     tmop_sweeps = max((cfg.tmop_sweeps // tmop_chunk) * tmop_chunk, tmop_chunk)
     # Block-Jacobi over the halo-padded structured store, built from the grid's
@@ -545,7 +556,10 @@ def generate_steps(
             # Rebuild the context so the pinned DOFs are compiled out of the
             # update set, then re-equilibrate the free grid (warm start).
             pin_ctx = build_sweep_context(
-                grid, iso if target is None else target, interface_ortho=io
+                grid,
+                iso if target is None else target,
+                interface_ortho=io,
+                interface_c2=ic2,
             )
             session = CppStructuredSweepSession(
                 pin_ctx,

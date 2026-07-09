@@ -110,4 +110,76 @@ inline void curv_window_accumulate(const PtN<2>& p0,
     hess[3] += hcoef * d[1] * d[1];
 }
 
+/// Accumulate a free DOF's @p K curvature windows into (grad, hess, e0), reading
+/// node positions from @p X. @p nodes is [K*4] structured node ids, @p slot [K]
+/// the DOF's slot in each window (−1 = pad), @p weight [K] the window weight.
+inline void curv_dof_accumulate(int K,
+                                const int* nodes,
+                                const int* slot,
+                                const real* weight,
+                                const real* X,
+                                VecN<2>& grad,
+                                MatN<2>& hess,
+                                real& e0)
+{
+    for (int j = 0; j < K; ++j) {
+        const int s = slot[j];
+        if (s < 0) { continue; }
+        const int* wn = nodes + (j * 4);
+        const PtN<2> p0 = load_pt<2>(X, wn[0]);
+        const PtN<2> p1 = load_pt<2>(X, wn[1]);
+        const PtN<2> p2 = load_pt<2>(X, wn[2]);
+        const PtN<2> p3 = load_pt<2>(X, wn[3]);
+        std::array<VecN<2>, 4> dr {};
+        const real r = curv_window_residual_grad(p0, p1, p2, p3, dr);
+        const real w = weight[j];
+        // Gauss-Newton gradient/Hessian for this DOF's slot.
+        const VecN<2>& d = dr[s];
+        const real gcoef = 2.0_r * w * r;
+        grad[0] += gcoef * d[0];
+        grad[1] += gcoef * d[1];
+        const real hc = 2.0_r * w;
+        hess[0] += hc * d[0] * d[0];
+        hess[1] += hc * d[0] * d[1];
+        hess[2] += hc * d[1] * d[0];
+        hess[3] += hc * d[1] * d[1];
+        // Block-Jacobi stabiliser: this 4th-order (biharmonic) term couples the
+        // DOF to the other three window nodes, frozen during the sweep. Add the
+        // coupling row-sum |dr_s|·Σ|dr_m| to the diagonal so the per-DOF step is
+        // contractive (diagonally dominant) — the minimiser is unchanged (grad
+        // untouched), only the step is tempered, so no need to over-damp omega.
+        const real ds = std::sqrt((d[0] * d[0]) + (d[1] * d[1]));
+        real off = 0.0_r;
+        for (int m = 0; m < 4; ++m) {
+            if (m == s) { continue; }
+            off += std::sqrt((dr[m][0] * dr[m][0]) + (dr[m][1] * dr[m][1]));
+        }
+        const real stab = hc * ds * off;
+        hess[0] += stab;
+        hess[3] += stab;
+        e0 += w * r * r;
+    }
+}
+
+/// A free DOF's curvature energy with its own node moved to @p trial (the other
+/// window nodes stay at the frozen @p X snapshot) — the line-search increment.
+inline real curv_dof_trial_energy(int K,
+                                  const int* nodes,
+                                  const int* slot,
+                                  const real* weight,
+                                  const real* X,
+                                  const PtN<2>& trial)
+{
+    real e = 0.0_r;
+    for (int j = 0; j < K; ++j) {
+        const int s = slot[j];
+        if (s < 0) { continue; }
+        const int* wn = nodes + (j * 4);
+        PtN<2> p[4];
+        for (int m = 0; m < 4; ++m) { p[m] = (m == s) ? trial : load_pt<2>(X, wn[m]); }
+        e += weight[j] * curv_window_energy(p[0], p[1], p[2], p[3]);
+    }
+    return e;
+}
+
 }  // namespace egg
