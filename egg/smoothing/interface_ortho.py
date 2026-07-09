@@ -106,7 +106,7 @@ def _smoothstep(t: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
-def _sample_for(X, corner, Q, Rp, Rm, ca, ta, c_hat) -> tuple | None:
+def _sample_for(X, corner, Q, Rp, Rm, ca, ta, c_hat, frozen) -> tuple | None:
     """One corner sample (columns cross, tangent) with target W = [c_hat*Lc | f].
 
     ``corner`` is the sample corner (a seam node at layer 0, else a near-seam
@@ -114,6 +114,11 @@ def _sample_for(X, corner, Q, Rp, Rm, ca, ta, c_hat) -> tuple | None:
     its +/- tangent neighbours (-1 if off-block). ``c_hat`` is the target cross
     direction; picks the tangent neighbour that makes det W > 0. Returns
     (gc, gn0, gn1, s0, s1, W_inv(2,2), participants) or None.
+
+    A participant in ``frozen`` (the block-boundary nodes) is registered with
+    role -1, so the term never scatters force onto it — the seam's smoothness
+    is the base shape metric's job, and the term orthogonalises by moving only
+    the interior nodes. The seam node is still read for the sample geometry.
     """
     p = X[corner]
     e = X[Q] - p  # current cross edge
@@ -144,6 +149,9 @@ def _sample_for(X, corner, Q, Rp, Rm, ca, ta, c_hat) -> tuple | None:
         W_inv = np.linalg.inv(W)
         part_node = np.array([corner, Q, R], dtype=np.int64)
         part_role = np.array([0, 1 + ca, 1 + ta], dtype=np.int32)
+        for i, node in enumerate(part_node):
+            if int(node) in frozen:
+                part_role[i] = -1  # block-boundary node: read, never pushed
         return (corner, gn[0], gn[1], s[0], s[1], W_inv, part_node, part_role)
     return None
 
@@ -184,6 +192,15 @@ def interface_ortho_samples(
     X = np.asarray(grid.global_nodes, dtype=float)
     block_names = list(topo.block_specs.keys())
 
+    # Every block-boundary node: the term reads these but never pushes them, so
+    # the seam stays as smooth as the base shape metric makes it.
+    frozen: set[int] = set()
+    for conn in topo.interface_connections:
+        for face in (conn.face_a, conn.face_b):
+            bi = block_names.index(face.block_name)
+            m = _oriented_map(np.asarray(grid.block_dof_maps[bi]), face.axis, face.side)
+            frozen.update(int(x) for x in m[0, :])
+
     rows: list[tuple] = []
     wts: list[float] = []
 
@@ -214,7 +231,7 @@ def interface_ortho_samples(
         c_hat = (1.0 - t) * base + t * e_hat
         Rp = int(m[k, j + 1]) if j + 1 < m.shape[1] else -1
         Rm = int(m[k, j - 1]) if j - 1 >= 0 else -1
-        got = _sample_for(X, corner, Q, Rp, Rm, ca, ta, c_hat)
+        got = _sample_for(X, corner, Q, Rp, Rm, ca, ta, c_hat, frozen)
         if got is not None:
             rows.append(got)
             wts.append(weight)

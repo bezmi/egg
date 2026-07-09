@@ -91,7 +91,10 @@ def test_gradient_matches_finite_difference(mode):
     X = grid.global_nodes.copy()
     X += 0.05 * rng.normal(size=X.shape)  # away from the exact zero (flat grad)
 
-    dof = int(np.unique(s.part_node[:, 1:])[0])  # a moving neighbour DOF
+    # A moving (role >= 0) participant: block-boundary nodes carry role -1 (the
+    # term reads but never pushes them), so their analytic grad is 0 by design.
+    moving = s.part_node[s.part_role >= 0]
+    dof = int(np.unique(moving)[0])
     g = _grad_at(X, s, dof)
     eps = 1e-6
     fd = np.zeros(2)

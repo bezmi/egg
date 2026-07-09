@@ -185,9 +185,13 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv, interface=N
         ext_mnode = interface.part_node.reshape(-1)
         ext_msid = np.repeat(np.arange(ns, ns + n_if), interface.part_node.shape[1])
         ext_mrole = interface.part_role.reshape(-1)
-        st["m_node"] = np.concatenate([st["m_node"], ext_mnode])
-        st["m_sid"] = np.concatenate([st["m_sid"], ext_msid])
-        st["m_role"] = np.concatenate([st["m_role"], ext_mrole])
+        # role -1 marks a block-boundary participant: the sample still counts in
+        # the global energy, but it is not registered in that node's patch, so
+        # the term scatters no force onto seam nodes (keeps the boundary smooth).
+        reg = ext_mrole >= 0
+        st["m_node"] = np.concatenate([st["m_node"], ext_mnode[reg]])
+        st["m_sid"] = np.concatenate([st["m_sid"], ext_msid[reg]])
+        st["m_role"] = np.concatenate([st["m_role"], ext_mrole[reg]])
         ns = ns + n_if
         uniform_w = False
         synth_interior = False
