@@ -41,7 +41,12 @@ import numpy as np
 
 from .highorder import _curv_cols, grid_adjacency, grid_lines
 
-__all__ = ["CurvatureWindows", "curvature_windows", "curvature_energy_grad_hess"]
+__all__ = [
+    "CurvatureWindows",
+    "curvature_windows",
+    "curvature_energy_grad_hess",
+    "curvature_dof_table",
+]
 
 
 @dataclass
@@ -113,6 +118,55 @@ def curvature_windows(
         keep = touches
         nodes, w = nodes[keep], w[keep]
     return CurvatureWindows(nodes=np.ascontiguousarray(nodes), weight=w)
+
+
+def curvature_dof_table(free_mask, win: CurvatureWindows):
+    """Per-free-DOF fixed-K curvature-window table (wire layout).
+
+    Aligns with the flat context's group DOF order (``np.flatnonzero(free_mask)``):
+    for each free DOF, every window it participates in is listed with the DOF's
+    slot (0..3) and the window's weight, padded to a common width ``K`` (slot
+    ``-1`` marks an empty pad). The four node ids are GLOBAL — the structured
+    remap rewrites them to owner node indices, and the packed X (read frozen per
+    sweep) is global-readable, so no ghost slot is needed.
+
+    Returns a dict of wire arrays: ``curv_k`` (int), ``curv_nodes``
+    ``(ndof, K, 4)`` int32, ``curv_slot`` ``(ndof, K)`` int32,
+    ``curv_weight`` ``(ndof, K)`` float64. Empty dict when there are no windows.
+    """
+    free = np.asarray(free_mask)
+    dofs = np.flatnonzero(free)
+    if len(win) == 0 or dofs.size == 0:
+        return {}
+    pos = np.full(free.shape[0], -1, dtype=np.int64)
+    pos[dofs] = np.arange(dofs.size)
+
+    lists: list[list[tuple]] = [[] for _ in range(dofs.size)]
+    is_free = free[win.nodes]  # (W, 4)
+    for wi in range(len(win)):
+        row = win.nodes[wi]
+        w = float(win.weight[wi])
+        for slot in range(4):
+            if is_free[wi, slot]:
+                lists[int(pos[int(row[slot])])].append((row, slot, w))
+
+    K = max((len(entry) for entry in lists), default=0)
+    if K == 0:
+        return {}
+    curv_nodes = np.full((dofs.size, K, 4), -1, dtype=np.int32)
+    curv_slot = np.full((dofs.size, K), -1, dtype=np.int32)
+    curv_weight = np.zeros((dofs.size, K), dtype=np.float64)
+    for i, entry in enumerate(lists):
+        for j, (row, slot, w) in enumerate(entry):
+            curv_nodes[i, j] = row
+            curv_slot[i, j] = slot
+            curv_weight[i, j] = w
+    return {
+        "curv_k": int(K),
+        "curv_nodes": np.ascontiguousarray(curv_nodes),
+        "curv_slot": np.ascontiguousarray(curv_slot),
+        "curv_weight": np.ascontiguousarray(curv_weight),
+    }
 
 
 def _perp(v):

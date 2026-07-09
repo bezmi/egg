@@ -14,6 +14,8 @@ from egg.smoothing import highorder as H
 from egg.smoothing.interface_c2 import (
     CurvatureWindows,
     _seam_nodes,
+    _turn_grad,
+    curvature_dof_table,
     curvature_energy_grad_hess,
     curvature_windows,
 )
@@ -107,3 +109,33 @@ def test_interface_only_keeps_seam_windows():
     only = curvature_windows(grid, weight=1.0, iface_boost=3.0, interface_only=True)
     assert 0 < len(only) < len(full)
     assert np.allclose(only.weight, 3.0)
+
+
+def test_dof_table_reconstructs_global_gradient():
+    """Each free DOF's fixed-K windows sum to its global-gradient entry — the
+    consistency the C++ metric/line-search kernels rely on."""
+    grid = _lr_grid()
+    X = np.asarray(grid.global_nodes).copy()
+    free = np.asarray(grid.free_mask)
+    rng = np.random.default_rng(0)
+    X[free] += 0.03 * rng.normal(size=X[free].shape)
+    win = curvature_windows(grid, weight=1.0, iface_boost=3.0)
+    tab = curvature_dof_table(free, win)
+    _, gglob, _ = curvature_energy_grad_hess(X, win)
+
+    dofs = np.flatnonzero(free)
+    gtab = np.zeros_like(X)
+    for i, dof in enumerate(dofs):
+        for j in range(tab["curv_k"]):
+            slot = int(tab["curv_slot"][i, j])
+            if slot < 0:
+                continue
+            nodes = tab["curv_nodes"][i, j]
+            w = tab["curv_weight"][i, j]
+            p = [X[nodes[k]][None] for k in range(4)]
+            th1, g1 = _turn_grad(p[0], p[1], p[2])
+            th2, g2 = _turn_grad(p[1], p[2], p[3])
+            r = float((th1 - th2)[0])
+            dr = [g1[0, 0], g1[0, 1] - g2[0, 0], g1[0, 2] - g2[0, 1], -g2[0, 2]]
+            gtab[dof] += 2.0 * w * r * dr[slot]
+    assert np.abs(gtab[dofs] - gglob[dofs]).max() < 1e-10
