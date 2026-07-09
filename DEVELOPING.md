@@ -289,8 +289,62 @@ uv sync \
 
 To make a setting persistent (no flag each time), add it under
 `[tool.scikit-build.cmake.define]` in `pyproject.toml` (where `ACPP_TARGETS`
-already defaults to `generic`), or export the equivalent environment variable
-(e.g. `CMAKE_PREFIX_PATH`).
+already defaults to `generic`), or export any define through the
+`SKBUILD_CMAKE_DEFINE` environment variable (semicolon-separated `VAR=VALUE`
+pairs), which scikit-build-core reads on every build. The
+[precision knob](#precision-fp32-vs-fp64) below relies on exactly this.
+
+### Precision: fp32 vs fp64
+
+`egg::real` is a build-time knob, the `EGG_REAL_IS_FP32` CMake define:
+
+| Value | `egg::real` | Use for |
+|---|---|---|
+| `OFF` (default) | `double` | CPU correctness gate; run the suites here with tight tolerances |
+| `ON` | `float` | GPU runs and fast iteration |
+
+**Use fp32 on the GPU.** fp64 roughly doubles kernel register pressure and
+spills, so the GPU path runs much slower (and big meshes may not fit). fp32 is
+the intended GPU precision; keep fp64 for the CPU correctness gate.
+
+Set it per build like any define:
+
+```bash
+uv sync -C cmake.define.EGG_REAL_IS_FP32=ON -C cmake.define.EGG_BUILD_TESTS=ON
+```
+
+**The `-C` flags are one-shot**, applied at configure time only. Any later
+rebuild without them (`uv run`, `uv sync`, `uv sync --group cad`) reconfigures
+back to the default (`OFF`, fp64), so an fp32 build silently becomes fp64. This
+is why `--no-sync` gets used, to skip the rebuild.
+
+**Make it persistent** with `SKBUILD_CMAKE_DEFINE`: sourced from the
+environment, it re-applies on every build, so it never reverts and needs no
+`-C` or `--no-sync`:
+
+```bash
+export SKBUILD_CMAKE_DEFINE="EGG_REAL_IS_FP32=ON;EGG_BUILD_TESTS=ON"   # ';'-separated
+uv sync --group cad      # fp32, keeps the group, no revert
+uv run pytest tests/     # plain uv run (auto-sync) stays fp32
+```
+
+Best set project-local via [direnv](https://direnv.net): that `export` in an
+(untracked) `.envrc`, then `direnv allow`. Flip `ON`/`OFF` for fp64. (fish
+without direnv: `set -Ux SKBUILD_CMAKE_DEFINE "…"`.)
+
+Switching precision does not always invalidate uv's build cache, so force one
+rebuild when you flip it:
+
+```bash
+uv sync --reinstall-package egg
+```
+
+Check what you built:
+
+```bash
+uv run python -c "from egg._cpp import cpp_core; print(cpp_core.REAL_IS_FLOAT)"
+# True = fp32, False = fp64
+```
 
 ---
 
