@@ -133,6 +133,10 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         } else {
             eq(g.W_inv.size(), ts * egg::dim::wInv(D), "W_inv");
         }
+        // Weight is optional (unit when omitted); one shared value or one per sample.
+        if (!g.weight.empty()) {
+            eq(g.weight.size(), g.wt_uniform ? std::size_t {1} : ts, "weight");
+        }
         // J is optional (recomputed in-kernel); only size-check it when supplied.
         if (!g.J.empty()) { eq(g.J.size(), ts * egg::dim::jSize(D), "J"); }
         eq(g.dof_idx.size(), g.ndof, "dof_idx");
@@ -236,6 +240,10 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
     if (es.W_inv.size() != egg::dim::wInv(D)) {
         eqs(es.W_inv.size(), ns * egg::dim::wInv(D), "W_inv");
     }
+    // Weight is optional; one shared value or one per sample.
+    if (!es.weight.empty() && es.weight.size() != 1) {
+        eqs(es.weight.size(), ns, "weight");
+    }
     check_index(es.gc, "gc", "energy_stencil");
     for (int k = 0; k < D; ++k) {
         check_index(es.gn[k], ("gn" + std::to_string(k)).c_str(), "energy_stencil");
@@ -313,6 +321,13 @@ egg::SweepContextHostT<D>
         // A single-row W_inv (length wInv, not total_samples*wInv) is a uniform
         // target: every sample shares it, read with stride 0 in the metric table.
         sg.w_uniform = (sg.W_inv.size() == egg::dim::wInv(D));
+        // Per-sample energy weight (composed interface-orthogonality term). Optional:
+        // a single-value array is a uniform weight (read with stride 0); omission
+        // means unit weight everywhere.
+        if (gd.contains("weight")) {
+            sg.weight = extract_real(gd, "weight");
+            sg.wt_uniform = (sg.weight.size() == 1);
+        }
         sg.role = extract_int(gd, "role");
         // J is optional: no kernel reads it (the role-selected chain-Jacobian
         // block is recomputed in-kernel from s + W_inv). Contexts may omit it.
@@ -384,6 +399,8 @@ egg::SweepContextHostT<D>
         host.energy_stencil.s[k] = extract_real(es, "s" + std::to_string(k));
     }
     host.energy_stencil.W_inv = extract_real(es, "W_inv");
+    // Optional per-sample energy weight; omission ⇒ unit weight (one shared row).
+    if (es.contains("weight")) { host.energy_stencil.weight = extract_real(es, "weight"); }
 
     // Fail fast on a malformed context before any device allocation / kernel.
     validate_context<D>(host);

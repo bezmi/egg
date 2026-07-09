@@ -42,6 +42,11 @@ template <int D> struct PatchViewT {
     // with stride 0, so every sample reads row 0; the read site multiplies the
     // table index by this stride, so the kernel is unchanged otherwise.
     int w_stride = dim::wInv(D);
+    // Per-sample energy weight (composed interface-orthogonality term). Shared-
+    // table base indexed like W_inv; wt_stride is 0 for a uniform table (one
+    // shared value, e.g. all 1.0). Null ⇒ unit weight everywhere.
+    const real* weight = nullptr;
+    int wt_stride = 1;
 };
 
 template <int D> struct PatchResultT {
@@ -56,8 +61,23 @@ template <int D> struct StencilSampleViewT {
     const int* gc;
     const int* gn[D];
     const real* s[D];
-    const real* W_inv;  // [P * dim::wInv(D)]
+    const real* W_inv;             // [P * dim::wInv(D)]
+    const real* weight = nullptr;  // [P] per-sample weight, or null ⇒ unit
+    int wt_stride = 1;
 };
+
+/// Per-occurrence energy weight: `weight[wt_stride·idx]` when the view carries
+/// a weight table (null ⇒ 1.0). Mirrors the W_inv uniform-stride read.
+template <class V> inline real occ_weight(const V& sv, int idx)
+{
+    if constexpr (requires { sv.weight; }) {
+        if (sv.weight != nullptr) {
+            return sv
+              .weight[static_cast<std::size_t>(sv.wt_stride) * static_cast<std::size_t>(idx)];
+        }
+    }
+    return 1.0_r;
+}
 
 /// det(A), row-major: generic structure, specialized arithmetic per D so the
 /// D=2 build stays bit-identical (a generic LU/cofactor is not).
@@ -137,8 +157,9 @@ inline void
     mindet = std::numeric_limits<real>::infinity();
     for (int p = 0; p < sv.P; ++p) {
         real detA;
-        const VecTN<D> t = sample_vecT<D>(sv, X, table_index(sv, p), detA);
-        energy += objective.value(t);
+        const int idx = table_index(sv, p);
+        const VecTN<D> t = sample_vecT<D>(sv, X, idx, detA);
+        energy += occ_weight(sv, idx) * objective.value(t);
         mindet = std::min(detA, mindet);
     }
 }
@@ -175,7 +196,7 @@ inline void trial_energy_mindet(const PatchViewT<D>& pv,
         }
         real detA;
         const VecTN<D> t = assemble_vecT<D>(corner, nbr, sc, &pv.W_inv[pv.w_stride * sid], detA);
-        e_new += objective.value(t);
+        e_new += occ_weight(pv, sid) * objective.value(t);
         mdet = std::min(detA, mdet);
     }
 }
@@ -214,8 +235,13 @@ template <int D> inline void role_Jb(int role, const real* s, const real* w, rea
 /// value + gradient + contracted Hessian without materialising the 81-entry
 /// metric Hessian.
 template <int D, ObjectiveD<D> M>
-inline void accumulate_sample(
-  M& objective, const VecTN<D>& t, const real* w, int role, const real* svals, PatchResultT<D>& r)
+inline void accumulate_sample(M& objective,
+                              const VecTN<D>& t,
+                              const real* w,
+                              int role,
+                              const real* svals,
+                              PatchResultT<D>& r,
+                              real wt = 1.0_r)
 {
     constexpr int kVT = dim::vecT(D);
     constexpr bool kUseJhj = requires(M m, VecTN<D> tt, real* d) { m.eval_jhj(tt, d, d, d, d); };
@@ -232,11 +258,11 @@ inline void accumulate_sample(
         real gg[kVT];
         real jhj[D * D];
         objective.eval_jhj(t, Jb, &val, gg, jhj);
-        r.energy += val;
+        r.energy += wt * val;
         for (int i = 0; i < kVT; ++i) { g[i] = gg[i]; }
-        for (int i = 0; i < D * D; ++i) { r.hess[i] += jhj[i]; }
+        for (int i = 0; i < D * D; ++i) { r.hess[i] += wt * jhj[i]; }
     } else {
-        r.energy += objective.value(t);
+        r.energy += wt * objective.value(t);
         g = objective.grad(t);
     }
 
@@ -262,7 +288,7 @@ inline void accumulate_sample(
         const int ax = role - 1;
         for (int i = 0; i < D; ++i) { c[i] = svals[ax] * dA[i][ax]; }
     }  // role == -1: absent, contributes nothing
-    for (int i = 0; i < D; ++i) { r.grad[i] += c[i]; }
+    for (int i = 0; i < D; ++i) { r.grad[i] += wt * c[i]; }
 
     // --- hessian (non-fused path) ---
     // Role-selected Jb (kVT×D, recomputed from s + W_inv); skip entirely when
@@ -286,7 +312,7 @@ inline void accumulate_sample(
                 for (int j = 0; j < D; ++j) {
                     real acc = 0.0_r;
                     for (int a = 0; a < kVT; ++a) { acc += Jb(a, i) * HJb[a][j]; }
-                    r.hess[(i * D) + j] += acc;
+                    r.hess[(i * D) + j] += wt * acc;
                 }
             }
         }
@@ -315,7 +341,7 @@ inline PatchResultT<D>
         const int role = sv.role[p];
         real svals[D];
         for (int k = 0; k < D; ++k) { svals[k] = sv.s[k][sid]; }
-        accumulate_sample<D>(objective, t, w, role, svals, r);
+        accumulate_sample<D>(objective, t, w, role, svals, r, occ_weight(sv, sid));
     }
     return r;
 }

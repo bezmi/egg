@@ -67,6 +67,8 @@ template <int D> struct SweepGroupHostT {
     std::vector<real> s[D];          // [total_samples] per axis (was s0, s1)
     std::vector<real> W_inv;         // [total_samples * dim::wInv(D)], or one row if w_uniform
     bool w_uniform = false;          // W_inv is a single shared row (uniform/identity target)
+    std::vector<real> weight;        // [total_samples] energy weight, or one row if wt_uniform
+    bool wt_uniform = false;         // weight is a single shared value (e.g. all 1.0)
     std::vector<int> role;           // [total_samples]
     std::vector<real> J;             // [total_samples * dim::jSize(D)]
     std::vector<int> dof_idx;        // [ndof]
@@ -90,7 +92,8 @@ template <int D> struct EnergyStencilHostT {
     std::vector<int> gc;  // [num_samples]
     std::vector<int> gn[D];
     std::vector<real> s[D];
-    std::vector<real> W_inv;  // [num_samples * dim::wInv(D)]
+    std::vector<real> W_inv;   // [num_samples * dim::wInv(D)]
+    std::vector<real> weight;  // [num_samples] energy weight, or one row if uniform
 };
 
 template <int D> struct SweepContextHostT {
@@ -136,6 +139,8 @@ template <int D> struct GroupViewT {
     View1<const std::int8_t> s[D];                  // [n_table] per-axis sign ±1
     View1<const real> W_inv;                        // [n_table * wInv], or one row if uniform
     int w_stride = dim::wInv(D);                    // 0 when W_inv is a uniform shared row
+    View1<const real> weight;                       // [n_table] weight, or one row if uniform
+    int wt_stride = 1;                              // 0 when weight is a uniform shared value
     View1<const int> dof_idx, P_of, sample_offset;  // [ndof]
     View1<const int> part_of, row_of;               // [ndof] DOF -> (partition, row)
     const PartitionView* partitions = nullptr;      // [num_partitions]
@@ -180,6 +185,8 @@ template <int D> struct GroupViewT {
         }
         pv.W_inv = W_inv.data_handle();
         pv.w_stride = w_stride;
+        pv.weight = weight.data_handle();
+        pv.wt_stride = wt_stride;
         return pv;
     }
 
@@ -215,6 +222,8 @@ template <int D> struct StencilViewT {
     // W_inv row stride: dim::wInv(D), or 0 when every sample shares one row (a
     // uniform target), in which case W_inv holds a single dim::wInv(D)-wide row.
     int w_stride = dim::wInv(D);
+    View1<const real> weight;  // [num_samples] energy weight, or one row when uniform
+    int wt_stride = 1;         // 0 when every sample shares one weight value
 };
 
 // Base pointers of the shared deduplicated metric table, indexed by a patch
@@ -228,6 +237,8 @@ template <int D> struct MetricTableViewT {
     // W_inv row stride: dim::wInv(D), or 0 when every sample shares one row (a
     // uniform target), in which case W_inv holds a single dim::wInv(D)-wide row.
     int w_stride = dim::wInv(D);
+    View1<const real> weight;  // [n_table] energy weight, or one row when uniform
+    int wt_stride = 1;         // 0 when every sample shares one weight value
 };
 
 template <int D> class SweepDeviceContextT
@@ -356,6 +367,9 @@ template <int D> class SweepDeviceContextT
             stencil_.s[k] = {q, es.s[k]};
         }
         stencil_.W_inv = {q, es.W_inv};
+        // Energy weight per stencil sample: default to one shared 1.0 when the
+        // wire omits it, so the reduction reads it with stride 0.
+        stencil_.weight = {q, es.weight.empty() ? std::vector<real> {1.0_r} : es.weight};
 
         // Build the per-group PartitionView arrays (host copies), retained for
         // the merged block-Jacobi view (which uploads its own concatenated copy).
@@ -478,6 +492,8 @@ template <int D> class SweepDeviceContextT
             }
             gv.W_inv = tbl.W_inv;
             gv.w_stride = tbl.w_stride;
+            gv.weight = tbl.weight;
+            gv.wt_stride = tbl.wt_stride;
             gv.dof_idx = View1<const int> {dof_idx.data(), ndof};
             gv.P_of = View1<const int> {P_of.data(), ndof};
             gv.sample_offset = View1<const int> {sample_offset.data(), ndof};
@@ -501,6 +517,7 @@ template <int D> class SweepDeviceContextT
         UsmBuffer<int> gn[D];
         UsmBuffer<real> s[D];
         UsmBuffer<real> W_inv;
+        UsmBuffer<real> weight;
 
         StencilViewT<D> view() const
         {
@@ -514,6 +531,9 @@ template <int D> class SweepDeviceContextT
             // One shared row (size == wInv) => stride 0; otherwise per-sample rows.
             sv.W_inv = View1<const real> {W_inv.data(), W_inv.size()};
             sv.w_stride = (W_inv.size() == dim::wInv(D)) ? 0 : dim::wInv(D);
+            // One shared value => stride 0; otherwise one weight per sample.
+            sv.weight = View1<const real> {weight.data(), weight.size()};
+            sv.wt_stride = (weight.size() == 1) ? 0 : 1;
             return sv;
         }
     };
@@ -682,6 +702,8 @@ template <int D> class SweepDeviceContextT
         }
         gv.W_inv = tbl.W_inv;
         gv.w_stride = tbl.w_stride;
+        gv.weight = tbl.weight;
+        gv.wt_stride = tbl.wt_stride;
         gv.dof_idx = View1<const int> {m_dof_idx_.data(), total_ndof};
         gv.P_of = View1<const int> {m_P_of_.data(), total_ndof};
         gv.sample_offset = View1<const int> {m_sample_offset_.data(), total_ndof};
@@ -738,6 +760,8 @@ template <int D> class SweepDeviceContextT
         UsmBuffer<std::int8_t> s[D];  // per-axis sign ±1 (was real; widened on read)
         UsmBuffer<real> W_inv;
         bool w_uniform = false;  // every sample shares one W_inv row → store one row
+        UsmBuffer<real> weight;  // [n] energy weight, or one row when uniform
+        bool wt_uniform = false;
     } table_;
 
     MetricTableViewT<D> table_view() const
@@ -752,6 +776,8 @@ template <int D> class SweepDeviceContextT
         t.w_stride = table_.w_uniform ? 0 : static_cast<int>(wInv);
         t.W_inv =
           View1<const real> {table_.W_inv.data(), table_.w_uniform ? wInv : (table_.n * wInv)};
+        t.wt_stride = table_.wt_uniform ? 0 : 1;
+        t.weight = View1<const real> {table_.weight.data(), table_.wt_uniform ? 1 : table_.n};
         return t;
     }
 
@@ -769,6 +795,7 @@ template <int D> class SweepDeviceContextT
         std::vector<std::int8_t>
           t_s[D];  // s is ±1; store as int8 (key still hashes the real bytes)
         std::vector<real> t_W;
+        std::vector<real> t_wt;  // per-table-sample energy weight (parallel to t_W)
         std::vector<std::vector<int>> sid(host.groups.size());
 
         // Dedup key: the raw bytes of one occurrence's (gc, gn[], s[], W_inv).
@@ -793,6 +820,11 @@ template <int D> class SweepDeviceContextT
             // sample. The deduped table then collapses to a single row (below).
             const std::size_t wrow = g.w_uniform ? 0 : (p * wInv);
             put(&g.W_inv[wrow], wInv * sizeof(real));
+            // Weight is part of the dedup identity: two otherwise-identical samples
+            // with different weights (e.g. a base cell and its interface-orthogonality
+            // twin) must not fold together.
+            const real wv = g.weight.empty() ? 1.0_r : g.weight[g.wt_uniform ? 0 : p];
+            put(&wv, sizeof(real));
 
             const auto [it, fresh] = seen.try_emplace(key, static_cast<int>(t_gc.size()));
             if (!fresh) { return it->second; }
@@ -803,6 +835,7 @@ template <int D> class SweepDeviceContextT
                 t_s[k].push_back(static_cast<std::int8_t>(g.s[k][p]));
             }
             for (std::size_t e = 0; e < wInv; ++e) { t_W.push_back(g.W_inv[wrow + e]); }
+            t_wt.push_back(wv);
             return it->second;
         };
 
@@ -828,6 +861,15 @@ template <int D> class SweepDeviceContextT
         table_.w_uniform = uniform;
         if (uniform) { t_W.resize(wInv); }
 
+        // Collapse an all-equal weight column to one shared value (the common
+        // no-interface case, all 1.0), read with stride 0.
+        bool wt_uniform = !t_wt.empty();
+        for (std::size_t r = 1; r < t_wt.size() && wt_uniform; ++r) {
+            if (t_wt[r] != t_wt[0]) { wt_uniform = false; }
+        }
+        table_.wt_uniform = wt_uniform;
+        if (wt_uniform) { t_wt.resize(1); }
+
         table_.n = t_gc.size();
         table_.gc = {q_, t_gc};
         for (int k = 0; k < D; ++k) {
@@ -835,6 +877,7 @@ template <int D> class SweepDeviceContextT
             table_.s[k] = {q_, t_s[k]};
         }
         table_.W_inv = {q_, t_W};
+        table_.weight = {q_, t_wt};
         return sid;
     }
 
@@ -1392,7 +1435,12 @@ inline void reduce_energy_mindet(
                        }
                        real detA;
                        const VecTN<D> t = assemble_vecT<D>(corner, nbr, sc, w, detA);
-                       e_sum += objective.value(t);
+                       // Weight view may be empty on coarse levels that never carry
+                       // one — read unit weight then (stride 0 reads the shared row).
+                       const real wt = es.weight.extent(0) > 0
+                                         ? es.weight[i * static_cast<std::size_t>(es.wt_stride)]
+                                         : 1.0_r;
+                       e_sum += wt * objective.value(t);
                        m_min.combine(detA);
                    });
 }
