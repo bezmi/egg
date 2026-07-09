@@ -1,0 +1,104 @@
+# Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+#
+# PolyForm Noncommercial License 2.0.0-pre.2
+# https://github.com/bezmi/egg/blob/main/LICENSE.md
+# Free to use and redistribute for personal and noncommercial purposes.
+# See the license for details.
+# For commercial licensing, contact s.imran@tuta.io
+
+"""Interface orthogonality/continuity term: zero on a clean seam, restoring."""
+
+import numpy as np
+import pytest
+
+from egg.smoothing import batch
+from egg.smoothing.interface_ortho import interface_ortho_samples
+from egg.topology.builder import TopologyBuilder
+
+
+def _lr_grid(res=(4, 4)):
+    """Two unit blocks sharing the x=2 edge (axis-0 seam)."""
+    b = TopologyBuilder(d=2)
+    for name, pos in [
+        ("A", (0.0, 0.0)),
+        ("D", (0.0, 2.0)),
+        ("B", (2.0, 0.0)),
+        ("C", (2.0, 2.0)),
+        ("E", (4.0, 0.0)),
+        ("F", (4.0, 2.0)),
+    ]:
+        b.add_corner(name, pos, fixed=True)
+    b.add_block("L", ("A", "D", "B", "C"), res)
+    b.add_block("R", ("B", "C", "E", "F"), res)
+    b.connect("L", 0, 1, "R", 0, 0)
+    return b.build().initialize_grid()
+
+
+def _energy(X, s):
+    e, _ = batch.energy_and_mindet(
+        X, s.gc, s.gn0, s.gn1, s.s0, s.s1, s.W_inv, weight=s.weight
+    )
+    return e
+
+
+def _grad_at(X, s, dof):
+    """Analytic interface-term gradient (2,) w.r.t. one DOF via batch scatter."""
+    hit = s.part_node == dof  # (P, 3)
+    rows, which = np.nonzero(hit)
+    if rows.size == 0:
+        return np.zeros(2)
+    role = s.part_role[rows, which]
+    g, _ = batch.dof_grad_hess(
+        X,
+        s.gc[rows],
+        s.gn0[rows],
+        s.gn1[rows],
+        s.s0[rows],
+        s.s1[rows],
+        s.W_inv[rows],
+        role,
+        weight=s.weight[rows],
+    )
+    return g
+
+
+@pytest.mark.parametrize("mode", ["normal", "continuous"])
+def test_zero_on_clean_seam(mode):
+    grid = _lr_grid()
+    s = interface_ortho_samples(grid, mode=mode, weight=1.0)
+    assert len(s) > 0
+    assert _energy(grid.global_nodes, s) < 1e-9
+
+
+@pytest.mark.parametrize("mode", ["normal", "continuous"])
+def test_perturbation_raises_energy(mode):
+    grid = _lr_grid()
+    s = interface_ortho_samples(grid, mode=mode, weight=1.0)  # frame frozen here
+    X = grid.global_nodes.copy()
+    # Tilt only the cross-seam (inner) neighbours in y — seam nodes stay put, so
+    # this is a genuine skew of the crossing edge, not a rigid translation.
+    movers = np.unique(s.part_node[:, 1])
+    Xp = X.copy()
+    Xp[movers, 1] += 0.2
+    assert _energy(Xp, s) > 1e-4
+
+
+@pytest.mark.parametrize("mode", ["normal", "continuous"])
+def test_gradient_matches_finite_difference(mode):
+    grid = _lr_grid()
+    s = interface_ortho_samples(grid, mode=mode, weight=1.0)
+    rng = np.random.default_rng(0)
+    X = grid.global_nodes.copy()
+    X += 0.05 * rng.normal(size=X.shape)  # away from the exact zero (flat grad)
+
+    dof = int(np.unique(s.part_node[:, 1:])[0])  # a moving neighbour DOF
+    g = _grad_at(X, s, dof)
+    eps = 1e-6
+    fd = np.zeros(2)
+    for k in range(2):
+        Xp = X.copy()
+        Xm = X.copy()
+        Xp[dof, k] += eps
+        Xm[dof, k] -= eps
+        fd[k] = (_energy(Xp, s) - _energy(Xm, s)) / (2 * eps)
+    assert np.allclose(g, fd, atol=1e-5, rtol=1e-4)
