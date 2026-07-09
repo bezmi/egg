@@ -141,6 +141,13 @@ def setup(a):
         if a.get("c2_weight", 0.0) > 0.0
         else None
     )
+    # Optional block-interface orthogonality term (cross-seam edge ⊥ seam);
+    # composes with the C2 term.
+    ortho = (
+        {"mode": "normal", "weight": a["ortho_weight"]}
+        if a.get("ortho_weight", 0.0) > 0.0
+        else None
+    )
     cfg = PipelineConfig(
         tmop_sweeps=a["tmop_sweeps"],
         tmop_chunk=a["chunk"],
@@ -149,6 +156,7 @@ def setup(a):
         cluster_boundary_layers=pin,
         omega=a["omega"],
         interface_c2=c2,
+        interface_ortho=ortho,
         device=a["device"],
         pin_sweeps=a["pin_sweeps"] if pin else 0,
         respace=not pin,
@@ -189,6 +197,7 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         # block-interface C2 curvature-continuity weight (0 = off); de-kinks the
         # grid lines crossing block seams (interface-only).
         c2_weight=egg_webui.editable(0.0, label="interface C2 weight"),
+        ortho_weight=egg_webui.editable(0.0, label="interface orthogonality weight"),
         device="cpu",
     )
     topo, ents, grid, cfg = setup(a)

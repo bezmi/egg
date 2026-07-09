@@ -75,6 +75,13 @@ def parse_args(argv=None):
         "grid lines crossing block seams (interface-only, leaving the clustered "
         "near-wall interior alone)",
     )
+    p.add_argument(
+        "--ortho-weight",
+        type=float,
+        default=0.0,
+        help="block-interface orthogonality weight (0 = off); pulls the cross-seam "
+        "edge perpendicular to the seam (mode='normal'), straightening the crossing",
+    )
     a = p.parse_args(argv)
     print("=" * 56)
     print("Phoebus capsule → TMOP smooth")

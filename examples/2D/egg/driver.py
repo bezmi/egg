@@ -90,6 +90,13 @@ def parse_args(argv=None):
         help="block-interface C2 curvature-continuity weight (0 = off); de-kinks "
         "grid lines crossing block seams (the 5-way singularities included)",
     )
+    p.add_argument(
+        "--ortho-weight",
+        type=float,
+        default=0.0,
+        help="block-interface orthogonality weight (0 = off); pulls the cross-seam "
+        "edge perpendicular to the seam (mode='normal'), straightening the crossing",
+    )
     a = p.parse_args(argv)
     print("=" * 56)
     print("egg in rectangle → TMOP smooth")
