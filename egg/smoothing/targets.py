@@ -24,6 +24,7 @@ __all__ = [
     "AnisotropicTarget",
     "BoundaryLayerTarget",
     "MultiBlockTarget",
+    "DeclusterSingularities",
     "build_topology_target",
     "mean_size_target",
 ]
@@ -266,6 +267,87 @@ class BoundaryLayerTarget:
         if np.linalg.det(W) < 0:
             W[:, other] = -t_hat * s_t
         return W
+
+
+class DeclusterSingularities:
+    """Wrap a target, isotropising it near singular (valence != 2d) nodes.
+
+    Around each singularity the anisotropic wall-clustering target fights the
+    regular fan the C2 / orthogonality metric wants — a clustered pentagon can
+    never be both equal-angled and equal-length. This wrapper blends the base
+    ``W`` toward a *size-preserving* isotropic target ``h * I`` (``h`` the base
+    cell edge from ``det W``) over a graph-hop radius around every singularity,
+    so the fan relaxes to far-field spacing there while the base target is
+    untouched elsewhere. ``det W`` stays positive (convex blend of the base
+    ``W`` and a co-oriented ``h * I`` of the same determinant scale).
+
+    Parameters
+    ----------
+    base : callable
+        The target being wrapped (``target_fn`` signature).
+    grid : MultiBlockGrid
+        Supplies block DOF maps and the singularity list.
+    radius : int
+        Graph-hop radius of the isotropic band around each singular node.
+    topology : BlockTopology, optional
+        Defaults to ``grid.topology``.
+    """
+
+    def __init__(self, base, grid, *, radius=3, topology=None):
+        self.base = base
+        topo = topology if topology is not None else grid.topology
+        self.d = topo.d
+        block_names = list(topo.block_specs.keys())
+        maps = [np.asarray(m) for m in grid.block_dof_maps]
+
+        nbr: dict[int, set] = {}
+        for m in maps:
+            for ax in range(self.d):
+                a = np.moveaxis(m, ax, 0)
+                for u, v in zip(a[:-1].reshape(-1), a[1:].reshape(-1)):
+                    nbr.setdefault(int(u), set()).add(int(v))
+                    nbr.setdefault(int(v), set()).add(int(u))
+
+        seeds: list[int] = []
+        for sg in getattr(topo, "singularities", []):
+            bi = block_names.index(sg.block_name)
+            seeds.append(int(maps[bi][tuple(sg.logical_idx)]))
+        # BFS hop distance from the nearest singularity (capped at radius).
+        hop = {s: 0 for s in seeds}
+        frontier = list(seeds)
+        for _ in range(int(radius)):
+            nxt = []
+            for u in frontier:
+                for v in nbr.get(u, ()):
+                    if v not in hop:
+                        hop[v] = hop[u] + 1
+                        nxt.append(v)
+            frontier = nxt
+        # per-node blend weight (1 at the singularity, smoothstep to 0 at radius)
+        self._lam = {n: _smoothstep(1.0 - h / max(radius, 1)) for n, h in hop.items()}
+        # precompute the max corner blend per (block, cell_base)
+        self._cell_lam: dict[tuple[int, tuple], float] = {}
+        for bi, m in enumerate(maps):
+            shp = m.shape
+            from itertools import product as _product
+
+            for base_idx in _product(*[range(s - 1) for s in shp]):
+                lam = 0.0
+                for off in _product((0, 1), repeat=self.d):
+                    node = int(m[tuple(b + o for b, o in zip(base_idx, off))])
+                    lam = max(lam, self._lam.get(node, 0.0))
+                if lam > 0.0:
+                    self._cell_lam[(bi, tuple(base_idx))] = lam
+
+    def __call__(self, bi, block, cell_base, corner_offset) -> np.ndarray:
+        """Base W blended toward size-preserving isotropy near singularities."""
+        W = self.base(bi, block, cell_base, corner_offset)
+        lam = self._cell_lam.get((bi, tuple(int(c) for c in cell_base)), 0.0)
+        if lam <= 0.0:
+            return W
+        d = W.shape[0]
+        h = abs(float(np.linalg.det(W))) ** (1.0 / d)
+        return (1.0 - lam) * W + lam * (h * np.eye(d))
 
 
 class MultiBlockTarget:
