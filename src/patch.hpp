@@ -297,7 +297,7 @@ inline void accumulate_sample(
 /// batch.patch_eval (numerically identical to the JAX patch_eval_jax); D=2
 /// accumulation order matches the original unrolled code bit-for-bit.
 template <int D, ObjectiveD<D> M = ShapeObjectiveT<D>>
-__attribute__((noinline)) inline PatchResultT<D>
+inline PatchResultT<D>
   patch_eval(const PatchViewT<D>& sv, const real* X, M objective = {})
 {
     PatchResultT<D> r {};

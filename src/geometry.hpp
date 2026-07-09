@@ -1114,7 +1114,7 @@ struct BSplineSurfaceParam {
     /// @f$ F = ((S-p)\cdot S_u, (S-p)\cdot S_v) @f$ with the exact Jacobian
     /// (needs the second partials), clamping each iterate to the domain. A
     /// near-singular Jacobian (e.g. at a degenerate corner) stops early.
-    __attribute__((noinline)) [[nodiscard]] Param<2> invert(const PtN<3>& p) const
+    [[nodiscard]] Param<2> invert(const PtN<3>& p) const
     { return invert_seeded(p, {}, false); }
 
     /// Newton iteration on the nearest-foot stationarity
@@ -1195,7 +1195,7 @@ struct BSplineSurfaceParam {
     ///     `newton_foot<false>` (GN nd=1). That keeps the heavy de Boor nd=2 rows
     ///     and the grid out of the warm kernel entirely — the scratch lever.
     template <bool Warm = false>
-    __attribute__((noinline)) [[nodiscard]] Param<2>
+    [[nodiscard]] Param<2>
       invert_seeded(const PtN<3>& p,
                     Param<2> seed,
                     bool has_seed,

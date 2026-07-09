@@ -272,7 +272,7 @@ struct MuCond3Eval {
     real hess[81];  // 9x9 row-major, symmetric
 };
 
-__attribute__((noinline)) inline MuCond3Eval mu_cond3_eval(const real* t)
+inline MuCond3Eval mu_cond3_eval(const real* t)
 {
     MuCond3Eval r;
     // --- Common Subexpressions (SymPy CSE) ---
@@ -625,7 +625,7 @@ __attribute__((noinline)) inline MuCond3Eval mu_cond3_eval(const real* t)
 /// are precomputed once by the caller and shared across all 6 directions, so
 /// this body is only the cheap w-contractions. mu = f − 1, f = s q/(9 D²);
 /// returns f''. Verified vs wᵀHw to ~7e-13 (derive_cond3.py).
-__attribute__((noinline)) inline real
+inline real
   mu_cond3_d2dir(const real* t, const real* cof, real s, real q, real D, const real* w)
 {
     // Cofactor directional derivatives. Index map (a,b,c,d) per i:
@@ -684,7 +684,7 @@ __attribute__((noinline)) inline real
 }
 
 /// Value + gradient of mu_cond3 at t, written to memory (pool dies here).
-__attribute__((noinline)) inline void mu_cond3_valgrad(const real* t, real* val_out, real* grad_out)
+inline void mu_cond3_valgrad(const real* t, real* val_out, real* grad_out)
 {
     // --- Common Subexpressions (SymPy CSE) ---
     const real x0 = ((t[0] * t[0])) + ((t[1] * t[1])) + ((t[2] * t[2])) + ((t[3] * t[3])) +
@@ -753,7 +753,7 @@ __attribute__((noinline)) inline void mu_cond3_valgrad(const real* t, real* val_
 /// via 6 directional 2nd derivatives + polarization; never forms the 81-entry
 /// Hessian. Jb is the runtime 9×3 row-major chain matrix (column i = vᵢ).
 /// cof/s/q/D are computed once and shared by the 6 mu_cond3_d2dir calls.
-__attribute__((noinline)) inline void
+inline void
   mu_cond3_jhj(const real* t, const real* Jb, real* val_out, real* grad_out, real* jhj_out)
 {
     mu_cond3_valgrad(t, val_out, grad_out);
