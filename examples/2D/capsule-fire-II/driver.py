@@ -120,6 +120,19 @@ def parse_args(argv=None):
         help="block-interface orthogonality weight (0 = off); pulls the cross-seam "
         "edge perpendicular to the seam (mode='normal'), straightening the crossing",
     )
+    p.add_argument(
+        "--ortho-layers",
+        type=int,
+        default=3,
+        help="near-seam band depth the orthogonality term acts on (1 = seam only)",
+    )
+    p.add_argument(
+        "--ortho-relax",
+        type=float,
+        default=1.0,
+        help="[0,1] relax orthogonality where near-seam cells are clustered slivers "
+        "(follows the wall-normal instead of forcing perpendicular-to-seam)",
+    )
     a = p.parse_args(argv)
     print("=" * 56)
     print("FIRE II capsule forebody → TMOP smooth")

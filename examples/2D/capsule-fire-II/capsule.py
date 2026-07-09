@@ -240,7 +240,12 @@ def setup(a):
     # Optional block-interface orthogonality term (pulls the cross-seam edge
     # perpendicular to the seam); composes with the C2 term.
     ortho = (
-        {"mode": "normal", "weight": a["ortho_weight"]}
+        {
+            "mode": "normal",
+            "weight": a["ortho_weight"],
+            "n_layers": a.get("ortho_layers", 3),
+            "cluster_relax": a.get("ortho_relax", 1.0),
+        }
         if a.get("ortho_weight", 0.0) > 0.0
         else None
     )
@@ -309,6 +314,8 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         # clustered near-wall cells alone.
         c2_weight=egg_webui.editable(0.0, label="interface C2 weight"),
         ortho_weight=egg_webui.editable(0.0, label="interface orthogonality weight"),
+        ortho_layers=egg_webui.editable(3, label="orthogonality band layers"),
+        ortho_relax=egg_webui.editable(1.0, label="orthogonality clustering relax"),
         device="cpu",
     )
     topo, ents, grid, cfg = setup(a)

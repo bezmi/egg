@@ -70,6 +70,41 @@ def test_zero_on_clean_seam(mode):
     assert _energy(grid.global_nodes, s) < 1e-9
 
 
+def _pgram(res, shear=1.0):
+    """Two sheared blocks sharing an oblique seam (so the orthogonality target
+    genuinely differs from the current crossing direction)."""
+    b = TopologyBuilder(d=2)
+    for n, p in [
+        ("A", (0, 0)),
+        ("D", (shear, 2)),
+        ("B", (2, 0)),
+        ("C", (2 + shear, 2)),
+        ("E", (4, 0)),
+        ("F", (4 + shear, 2)),
+    ]:
+        b.add_corner(n, p, fixed=True)
+    b.add_block("L", ("A", "D", "B", "C"), res)
+    b.add_block("R", ("B", "C", "E", "F"), res)
+    b.connect("L", 0, 1, "R", 0, 0)
+    return b.build().initialize_grid()
+
+
+def _relax_shift(grid):
+    """Max change in the target W_inv from turning the clustering relax on."""
+    a0 = interface_ortho_samples(grid, mode="normal", weight=1.0, cluster_relax=0.0)
+    a1 = interface_ortho_samples(grid, mode="normal", weight=1.0, cluster_relax=1.0)
+    return float(np.abs(a0.W_inv - a1.W_inv).max())
+
+
+def test_cluster_relax_engages_only_on_slivers():
+    # On an oblique seam with ~square cells the relax barely moves the target;
+    # on thin (clustered-like) cells it engages strongly and follows the current
+    # crossing direction. Cubed aniso keeps a merely sheared cell untouched.
+    square = _relax_shift(_pgram(res=(8, 8)))  # aniso ~ 0.1
+    thin = _relax_shift(_pgram(res=(8, 40)))  # aniso ~ 0.8 (sliver)
+    assert thin > 10.0 * square + 1e-9
+
+
 @pytest.mark.parametrize("mode", ["normal", "continuous"])
 def test_perturbation_raises_energy(mode):
     grid = _lr_grid()
