@@ -283,6 +283,7 @@ if(EGG_BUILD_TESTS)
     tests/cpp/test_curves.cpp
     tests/cpp/test_3d.cpp
     tests/cpp/test_patch.cpp
+    tests/cpp/test_curvature.cpp
     tests/cpp/test_structured.cpp
     tests/cpp/test_multigrid.cpp)
   add_executable(cpp_tests ${_cpp_tests_srcs})
