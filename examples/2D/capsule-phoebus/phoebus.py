@@ -134,6 +134,26 @@ def setup(a):
     pin = a["pin_layers"] > 0
     grid = topo.initialize_grid()
     metric = a.get("metric", "shape")
+    # Optional block-interface C2 curvature term (interface_only: de-kink the
+    # block seams without disturbing the clustered near-wall cells).
+    c2w, c2s = a.get("c2_weight", 0.0), a.get("c2_singularity", 0.0)
+    c2 = (
+        {"weight": c2w, "interface_only": True, "singularity_weight": c2s}
+        if (c2w > 0.0 or c2s > 0.0)
+        else None
+    )
+    # Optional block-interface orthogonality term (cross-seam edge ⊥ seam);
+    # composes with the C2 term.
+    ortho = (
+        {
+            "mode": "normal",
+            "weight": a["ortho_weight"],
+            "n_layers": a.get("ortho_layers", 3),
+            "cluster_relax": a.get("ortho_relax", 1.0),
+        }
+        if a.get("ortho_weight", 0.0) > 0.0
+        else None
+    )
     cfg = PipelineConfig(
         tmop_sweeps=a["tmop_sweeps"],
         tmop_chunk=a["chunk"],
@@ -141,6 +161,8 @@ def setup(a):
         tmop_metric=metric,
         cluster_boundary_layers=pin,
         omega=a["omega"],
+        interface_c2=c2,
+        interface_ortho=ortho,
         device=a["device"],
         pin_sweeps=a["pin_sweeps"] if pin else 0,
         respace=not pin,
@@ -178,6 +200,13 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         # scale-invariant metric; "shape_size" also equalises cell areas.
         metric=egg_webui.editable("shape_size", choices=["shape", "shape_size"]),
         omega=0.8,
+        # block-interface C2 curvature-continuity weight (0 = off); de-kinks the
+        # grid lines crossing block seams (interface-only).
+        c2_weight=egg_webui.editable(0.0, label="interface C2 weight"),
+        c2_singularity=egg_webui.editable(0.0, label="singularity ring C2 weight"),
+        ortho_weight=egg_webui.editable(0.0, label="interface orthogonality weight"),
+        ortho_layers=egg_webui.editable(3, label="orthogonality band layers"),
+        ortho_relax=egg_webui.editable(1.0, label="orthogonality clustering relax"),
         device="cpu",
     )
     topo, ents, grid, cfg = setup(a)

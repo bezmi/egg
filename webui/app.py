@@ -959,6 +959,27 @@ async def get(view: str = "grid"):
                 ),
                 Div(cls="menu-sep"),
                 Label(
+                    Input(
+                        type="checkbox",
+                        checked=True,
+                        cls="scene-toggle",
+                        data_toggle="block-fill",
+                    ),
+                    "block colours",
+                    title="soft per-block colour fill and line tint",
+                ),
+                Label(
+                    Input(
+                        type="checkbox",
+                        checked=True,
+                        cls="scene-toggle",
+                        data_toggle="block-outline",
+                    ),
+                    "block boundaries",
+                    title="thicker outlines around each grid block",
+                ),
+                Div(cls="menu-sep"),
+                Label(
                     "theme",
                     Select(
                         # catppuccin flavors, dark → light; JS restores the

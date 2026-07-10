@@ -454,7 +454,7 @@ def test_set_guard_param_rewrites_only_that_literal():
     code = (EXAMPLES_2D / "egg/egg.py").read_text()
     new = scene.set_guard_param(code, "tmop_sweeps", "120")
     changed = [(a, b) for a, b in zip(code.splitlines(), new.splitlines()) if a != b]
-    assert changed == [("        tmop_sweeps=600,", "        tmop_sweeps=120,")]
+    assert changed == [("        tmop_sweeps=5000,", "        tmop_sweeps=120,")]
     # user spellings survive; strings get quoted
     new = scene.set_guard_param(code, "bl_first_height", "2.5e-3")
     assert "bl_first_height=2.5e-3," in new

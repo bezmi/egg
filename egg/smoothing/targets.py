@@ -24,6 +24,7 @@ __all__ = [
     "AnisotropicTarget",
     "BoundaryLayerTarget",
     "MultiBlockTarget",
+    "DeclusterSingularities",
     "build_topology_target",
     "mean_size_target",
 ]
@@ -66,7 +67,8 @@ class BoundaryLayerTarget:
     blocks (the shape metric is scale-invariant, so only the ``s_n/s_t``
     ratio acts). Orientation comes from the geometry *entity*, which stays
     stable even while the working mesh is folded during untangling.
-    ``det W = s_t * s_n > 0``.
+    At construction ``det W = s_t * s_n > 0``; when ``det_scale`` is set
+    the matrix is rescaled so ``det W = det_scale`` at call time.
 
     Parameters
     ----------
@@ -106,6 +108,14 @@ class BoundaryLayerTarget:
         the metric prefers uniformly sheared parallelograms that follow the
         boundary instead of trading layer heights for orthogonality to it.
         Usually set via ``build_topology_target(relax_orthogonality=…)``.
+    det_scale : float, optional
+        Target determinant, passed by ``build_topology_target`` to match the
+        far-field default. When set, the raw ``W`` is rescaled so
+        ``det W = det_scale`` — the wall-normal / tangential aspect ratio is
+        preserved but the absolute size is normalised to the global default,
+        keeping the ``(det T - 1)^2`` term in ``shape_size`` uniform across
+        blocks. ``None`` (the default) leaves ``det W`` at its natural value
+        (``s_n * s_t``), which is correct under a scale-invariant shape metric.
     """
 
     def __init__(
@@ -122,6 +132,7 @@ class BoundaryLayerTarget:
         tangential_spacing=None,
         k_offset=0,
         boundary_shear=None,
+        det_scale=None,
     ):
         if interior_spacing is None and tangential_spacing is None:
             raise ValueError(
@@ -144,6 +155,7 @@ class BoundaryLayerTarget:
         self.max_height = None if max_height is None else float(max_height)
         self.k_offset = int(k_offset)
         self.boundary_shear = dict(boundary_shear or {})
+        self.det_scale = None if det_scale is None else float(det_scale)
         # anchor position -> (q, n_hat, t_hat). Every layer and corner of a
         # wall column shares one anchor, and each frame costs three projected
         # inversions of ``entity`` (Newton per composite segment) — without
@@ -265,7 +277,92 @@ class BoundaryLayerTarget:
         # Guarantee det W > 0 (flip the tangential column if needed).
         if np.linalg.det(W) < 0:
             W[:, other] = -t_hat * s_t
+        if self.det_scale is not None:
+            det_W = float(np.linalg.det(W))
+            if det_W > 0:
+                W *= (self.det_scale / det_W) ** (1.0 / d)
         return W
+
+
+class DeclusterSingularities:
+    """Wrap a target, isotropising it near singular (valence != 2d) nodes.
+
+    Around each singularity the anisotropic wall-clustering target fights the
+    regular fan the C2 / orthogonality metric wants — a clustered pentagon can
+    never be both equal-angled and equal-length. This wrapper blends the base
+    ``W`` toward a *size-preserving* isotropic target ``h * I`` (``h`` the base
+    cell edge from ``det W``) over a graph-hop radius around every singularity,
+    so the fan relaxes to far-field spacing there while the base target is
+    untouched elsewhere. ``det W`` stays positive (convex blend of the base
+    ``W`` and a co-oriented ``h * I`` of the same determinant scale).
+
+    Parameters
+    ----------
+    base : callable
+        The target being wrapped (``target_fn`` signature).
+    grid : MultiBlockGrid
+        Supplies block DOF maps and the singularity list.
+    radius : int
+        Graph-hop radius of the isotropic band around each singular node.
+    topology : BlockTopology, optional
+        Defaults to ``grid.topology``.
+    """
+
+    def __init__(self, base, grid, *, radius=3, topology=None):
+        self.base = base
+        topo = topology if topology is not None else grid.topology
+        self.d = topo.d
+        block_names = list(topo.block_specs.keys())
+        maps = [np.asarray(m) for m in grid.block_dof_maps]
+
+        nbr: dict[int, set] = {}
+        for m in maps:
+            for ax in range(self.d):
+                a = np.moveaxis(m, ax, 0)
+                for u, v in zip(a[:-1].reshape(-1), a[1:].reshape(-1)):
+                    nbr.setdefault(int(u), set()).add(int(v))
+                    nbr.setdefault(int(v), set()).add(int(u))
+
+        seeds: list[int] = []
+        for sg in getattr(topo, "singularities", []):
+            bi = block_names.index(sg.block_name)
+            seeds.append(int(maps[bi][tuple(sg.logical_idx)]))
+        # BFS hop distance from the nearest singularity (capped at radius).
+        hop = {s: 0 for s in seeds}
+        frontier = list(seeds)
+        for _ in range(int(radius)):
+            nxt = []
+            for u in frontier:
+                for v in nbr.get(u, ()):
+                    if v not in hop:
+                        hop[v] = hop[u] + 1
+                        nxt.append(v)
+            frontier = nxt
+        # per-node blend weight (1 at the singularity, smoothstep to 0 at radius)
+        self._lam = {n: _smoothstep(1.0 - h / max(radius, 1)) for n, h in hop.items()}
+        # precompute the max corner blend per (block, cell_base)
+        self._cell_lam: dict[tuple[int, tuple], float] = {}
+        for bi, m in enumerate(maps):
+            shp = m.shape
+            from itertools import product as _product
+
+            for base_idx in _product(*[range(s - 1) for s in shp]):
+                lam = 0.0
+                for off in _product((0, 1), repeat=self.d):
+                    node = int(m[tuple(b + o for b, o in zip(base_idx, off))])
+                    lam = max(lam, self._lam.get(node, 0.0))
+                if lam > 0.0:
+                    self._cell_lam[(bi, tuple(base_idx))] = lam
+
+    def __call__(self, bi, block, cell_base, corner_offset) -> np.ndarray:
+        """Base W blended toward size-preserving isotropy near singularities."""
+        W = self.base(bi, block, cell_base, corner_offset)
+        lam = self._cell_lam.get((bi, tuple(int(c) for c in cell_base)), 0.0)
+        if lam <= 0.0:
+            return W
+        d = W.shape[0]
+        h = abs(float(np.linalg.det(W))) ** (1.0 / d)
+        return (1.0 - lam) * W + lam * (h * np.eye(d))
 
 
 class MultiBlockTarget:
@@ -402,6 +499,13 @@ def build_topology_target(
     instead of fighting over a global value; the wall-normal growth is
     capped at that spacing, making far-from-wall cells isotropic like the
     default target.
+
+    Each :class:`BoundaryLayerTarget` is created with ``det_scale`` set to
+    ``det(default_target)`` so its ``det W`` matches the far-field default.
+    This keeps the ``(det T - 1)^2`` size term in ``shape_size`` uniform
+    across all blocks; under a scale-invariant shape metric the
+    normalisation is a no-op for convergence (only the ratio
+    ``s_n / s_t`` affects the objective).
     """
     d = topology.d
     if default is None:
@@ -418,6 +522,8 @@ def build_topology_target(
     specs = getattr(topology, "boundary_layer_specs", {})
     if not specs:
         return default
+
+    det_scale = float(np.linalg.det(default(-1, None, (0,), (0,))))
 
     block_names = list(topology.block_specs.keys())
     per_block: dict[int, BoundaryLayerTarget] = {}
@@ -442,6 +548,7 @@ def build_topology_target(
             interior_spacing=interior_spacing,
             max_height=spec["max_height"],
             tangential_spacing=s_t,
+            det_scale=det_scale,
         )
 
     if blend_neighbours:
@@ -471,6 +578,7 @@ def build_topology_target(
                     topology, nb[0], nb[1], nb[2]
                 ),
                 k_offset=wall_cells,
+                det_scale=det_scale,
             )
 
     if relax_orthogonality:

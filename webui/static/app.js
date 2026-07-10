@@ -368,6 +368,10 @@ function applyView() {
       g.style.display = cb.checked ? '' : 'none';
     });
   });
+  const vd = document.getElementById('view');
+  document.querySelectorAll('.scene-toggle').forEach((cb) => {
+    if (vd) vd.classList.toggle('no-' + cb.dataset.toggle, !cb.checked);
+  });
   const par = document.getElementById('params');
   if (par && par.tagName === 'DETAILS')
     par.open = localStorage.getItem('egg-params-open') === '1';
@@ -417,7 +421,7 @@ window.eggSetCode = (code) => {
 };
 
 document.addEventListener('change', (e) => {
-  if (e.target.matches('.layer-toggle')) applyView();
+  if (e.target.matches('.layer-toggle, .scene-toggle')) applyView();
 });
 
 // Parameter panel: an input change rewrites that value's source span in

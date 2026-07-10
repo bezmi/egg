@@ -73,12 +73,21 @@ def _mu_batch(T, metric):
     raise ValueError(f"Unknown metric: {metric}")
 
 
-def energy_and_mindet(X, gc, gn0, gn1, s0, s1, W_inv, metric="shape_2d"):
-    """Sum of mu and min det(A) over a patch's P corner samples."""
+def energy_and_mindet(X, gc, gn0, gn1, s0, s1, W_inv, metric="shape_2d", weight=None):
+    """Sum of mu and min det(A) over a patch's P corner samples.
+
+    ``weight`` (optional (P,) array) scales each sample's mu — the composed
+    interface-orthogonality term ships extra samples at a fraction weight. The
+    min det(A) barrier is weight-independent (it depends on geometry, not the
+    target or the weight).
+    """
     A = assemble_A(X, gc, gn0, gn1, s0, s1)
     det_A = _detA(A)
     T = np.einsum("pij,pjk->pik", A, W_inv)
-    return float(_mu_batch(T, metric).sum()), float(det_A.min())
+    mu = _mu_batch(T, metric)
+    if weight is not None:
+        mu = mu * weight
+    return float(mu.sum()), float(det_A.min())
 
 
 def _grad_T(T, metric="shape_2d"):
@@ -184,14 +193,17 @@ def make_chain_J(s0, s1, W_inv):
     return np.einsum("pij,pjk->pik", M, dA)
 
 
-def dof_grad_hess(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d"):
+def dof_grad_hess(
+    X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d", weight=None
+):
     """Gradient (2,) and Hessian (2, 2) of patch energy w.r.t. one moving DOF.
 
     Each sample contributes only through the column(s) the DOF participates in,
     selected by ``role`` (0 = corner, 1 = nbr0, 2 = nbr1).
 
     If ``J`` is provided (precomputed via :func:`make_chain_J`), the chain-rule
-    Jacobian is not recomputed.
+    Jacobian is not recomputed. ``weight`` (optional (P,)) scales each sample's
+    contribution to grad and Hessian identically (E = sum w_p mu_p).
     """
     A = assemble_A(X, gc, gn0, gn1, s0, s1)
     T = np.einsum("pij,pjk->pik", A, W_inv)
@@ -206,6 +218,8 @@ def dof_grad_hess(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d
     contrib[is_c] = -(s0[is_c, None] * col0[is_c] + s1[is_c, None] * col1[is_c])
     contrib[is_0] = s0[is_0, None] * col0[is_0]
     contrib[is_1] = s1[is_1, None] * col1[is_1]
+    if weight is not None:
+        contrib = contrib * np.asarray(weight)[:, None]
     grad = contrib.sum(0)
 
     H_T = _hess_T(T, metric)
@@ -217,11 +231,15 @@ def dof_grad_hess(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d
     Jb = np.take_along_axis(J, cols[:, None, :], axis=2)  # (P, 4, 2)
     Jb[~valid] = 0.0
     blk = np.einsum("pai,pab,pbj->pij", Jb, H_T, Jb)
+    if weight is not None:
+        blk = blk * np.asarray(weight)[:, None, None]
     H = blk.sum(0)
     return grad, H
 
 
-def patch_eval(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d"):
+def patch_eval(
+    X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d", weight=None
+):
     """Combined patch evaluation: (grad, hess, energy, mindet) in one pass.
 
     Computes ``A`` and ``T = A @ W_inv`` once, then derives the gradient,
@@ -230,14 +248,19 @@ def patch_eval(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d"):
     separately on the same position array ``X``.
 
     If ``J`` is provided (precomputed via :func:`make_chain_J`), the chain-rule
-    Jacobian is not recomputed.
+    Jacobian is not recomputed. ``weight`` (optional (P,)) scales each sample's
+    mu (energy, grad, Hessian); the min-det barrier is weight-independent.
     """
     A = assemble_A(X, gc, gn0, gn1, s0, s1)
     det_A = _detA(A)
     T = np.einsum("pij,pjk->pik", A, W_inv)
+    w = None if weight is None else np.asarray(weight)
 
     # --- energy & mindet ---
-    energy = float(_mu_batch(T, metric).sum())
+    mu = _mu_batch(T, metric)
+    if w is not None:
+        mu = mu * w
+    energy = float(mu.sum())
     mindet = float(det_A.min())
 
     # --- gradient ---
@@ -250,6 +273,8 @@ def patch_eval(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d"):
     contrib[is_c] = -(s0[is_c, None] * col0[is_c] + s1[is_c, None] * col1[is_c])
     contrib[is_0] = s0[is_0, None] * col0[is_0]
     contrib[is_1] = s1[is_1, None] * col1[is_1]
+    if w is not None:
+        contrib = contrib * w[:, None]
     grad = contrib.sum(0)
 
     # --- hessian ---
@@ -262,6 +287,8 @@ def patch_eval(X, gc, gn0, gn1, s0, s1, W_inv, role, J=None, metric="shape_2d"):
     Jb = np.take_along_axis(J, cols[:, None, :], axis=2)
     Jb[~valid] = 0.0
     blk = np.einsum("pai,pab,pbj->pij", Jb, H_T, Jb)
+    if w is not None:
+        blk = blk * w[:, None, None]
     hess = blk.sum(0)
 
     return grad, hess, energy, mindet

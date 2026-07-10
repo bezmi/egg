@@ -122,7 +122,9 @@ def cell_stencil(blocks, d):
     }
 
 
-def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
+def build_flat_context(
+    blocks, free_mask, dof_entities, d, *, w_inv, interface=None, curvature=None
+):
     """Assemble the ragged ``{"groups", "energy_stencil"}`` wire format.
 
     ``blocks``       list of global-node-id arrays, one per structured block;
@@ -130,7 +132,11 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
     ``dof_entities`` ``{node id -> entity}`` for every moving DOF (``None`` free);
     ``w_inv``        the inverse target metric, either one uniform ``(d, d)``
                      matrix or one ``(ns, d, d)`` matrix per sample (energy-
-                     stencil order).
+                     stencil order);
+    ``interface``    optional :class:`~egg.smoothing.interface_ortho.InterfaceSamples`
+                     of extra weighted shape samples (the composed block-boundary
+                     orthogonality/continuity term); appended to the sample table
+                     with their own ``W_inv`` and per-sample ``weight``.
 
     A single group holds every moving DOF (under frozen halos every free DOF
     reads the previous snapshot, so the DOFs need no ordering). Each DOF
@@ -157,6 +163,40 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
     synth_interior = bool(
         np.allclose(w0, w0[0, 0] * np.eye(d)) and (uniform_w or np.allclose(w_inv, w0))
     )
+
+    # Composed interface term: append its samples to the shared table with a
+    # per-sample weight (1.0 for the base samples). Forces a per-sample W_inv and
+    # disables interior synthesis (a synthesized patch would miss these stored
+    # samples), so any node touched by an interface sample ships a real stencil.
+    weight = None
+    if interface is not None and len(interface) > 0:
+        n_if = len(interface)
+        base_w = w_inv if not uniform_w else np.broadcast_to(w_inv, (ns, d, d))
+        w_inv = np.concatenate([base_w, interface.W_inv], axis=0)
+        weight = np.concatenate([np.ones(ns), np.asarray(interface.weight)])
+        st = dict(st)
+        st["gc"] = np.concatenate([st["gc"], interface.gc])
+        st["gn"] = [
+            np.concatenate([st["gn"][0], interface.gn0]),
+            np.concatenate([st["gn"][1], interface.gn1]),
+        ]
+        st["s"] = [
+            np.concatenate([st["s"][0], interface.s0]),
+            np.concatenate([st["s"][1], interface.s1]),
+        ]
+        ext_mnode = interface.part_node.reshape(-1)
+        ext_msid = np.repeat(np.arange(ns, ns + n_if), interface.part_node.shape[1])
+        ext_mrole = interface.part_role.reshape(-1)
+        # role -1 marks a block-boundary participant: the sample still counts in
+        # the global energy, but it is not registered in that node's patch, so
+        # the term scatters no force onto seam nodes (keeps the boundary smooth).
+        reg = ext_mrole >= 0
+        st["m_node"] = np.concatenate([st["m_node"], ext_mnode[reg]])
+        st["m_sid"] = np.concatenate([st["m_sid"], ext_msid[reg]])
+        st["m_role"] = np.concatenate([st["m_role"], ext_mrole[reg]])
+        ns = ns + n_if
+        uniform_w = False
+        synth_interior = False
 
     # Interior-eligible nodes: strictly inside a block (logical in [1, n-2] on every
     # axis), so the node AND its whole 2^d-cell patch sit inside that block. The C++
@@ -204,6 +244,8 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
         else:
             W = w_inv[sid].reshape(-1, dd)
         out["W_inv"] = np.ascontiguousarray(W)
+        if weight is not None:
+            out["weight"] = np.ascontiguousarray(weight[sid], dtype=np.float64)
         return out
 
     # Sort membership by node so each DOF's samples are contiguous and the DOFs
@@ -229,6 +271,18 @@ def build_flat_context(blocks, free_mask, dof_entities, d, *, w_inv):
             "entities": group_entities_by_type(dofs.tolist(), dof_entities, d=d),
         }
         g.update(sample_fields(m_sid, uniform_out=True))
+        # Block-interface C2 curvature window table (per-DOF, aligned with the
+        # group's flatnonzero(free_mask) DOF order). Node ids are global; the
+        # structured remap rewrites them to owner slots.
+        if curvature is not None and len(curvature) > 0:
+            from .interface_c2 import curvature_dof_table
+
+            tab = curvature_dof_table(free_mask, curvature)
+            if tab:
+                g["curv_k"] = tab["curv_k"]
+                g["curv_nodes"] = np.ascontiguousarray(tab["curv_nodes"].reshape(-1))
+                g["curv_slot"] = np.ascontiguousarray(tab["curv_slot"].reshape(-1))
+                g["curv_weight"] = np.ascontiguousarray(tab["curv_weight"].reshape(-1))
         groups.append(g)
 
     all_sid = np.arange(ns)

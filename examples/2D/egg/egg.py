@@ -108,7 +108,7 @@ def build_egg_in_rectangle(bl_first_height=0.0, bl_growth=1.5, n_fixed=2):
         # interior wall, so no domain boundary meets it obliquely and
         # relax_orthogonality stays empty.
         b.set_boundary_layer(
-            egg, first_height=bl_first_height, growth=bl_growth, n_fixed=n_fixed
+            egg, first_height=bl_first_height, growth=bl_growth, n_fixed=n_fixed, n_layers=2
         )
 
     topology = b.build()
@@ -141,14 +141,40 @@ def setup(a):
     # outer rows reach the neighbour spacing on their own.
     pin = a["bl_first_height"] > 0.0 and a["pin_layers"] > 0
     grid = topo.initialize_grid()
+    # Optional block-interface C2 curvature-continuity term: de-kinks grid lines
+    # crossing the O-grid/H-grid seams (and the 5-way singularities between them).
+    # interface_only: act on windows that cross a seam, not the (legitimately
+    # curved) clustered interior near the egg wall.
+    c2w, c2s = a.get("c2_weight", 0.0), a.get("c2_singularity", 0.0)
+    c2 = (
+        {"weight": c2w, "interface_only": True, "singularity_weight": c2s}
+        if (c2w > 0.0 or c2s > 0.0)
+        else None
+    )
+    # Optional block-interface orthogonality term: pulls the cross-seam edge
+    # perpendicular to the seam (mode="normal"), which also straightens the
+    # crossing (continuity). Composes with the C2 term above.
+    ortho = (
+        {
+            "mode": "normal",
+            "weight": a["ortho_weight"],
+            "n_layers": a.get("ortho_layers", 3),
+            "cluster_relax": a.get("ortho_relax", 1.0),
+        }
+        if a.get("ortho_weight", 0.0) > 0.0
+        else None
+    )
     cfg = PipelineConfig(
         sweeps_per_delta=a["sweeps_per_delta"],
         tmop_sweeps=a["tmop_sweeps"],
         tmop_chunk=a["chunk"],
         tmop_smoother=a["smoother"],
+        tmop_metric="shape_size",
         cluster_boundary_layers=pin,
         bl_blend_neighbours=False,
         omega=a["omega"],
+        interface_c2=c2,
+        interface_ortho=ortho,
         device=a["device"],
         pin_sweeps=a["pin_sweeps"] if pin else 0,
         respace=a["bl_first_height"] > 0.0 and not pin,
@@ -188,13 +214,21 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
     a = egg_webui.params(
         bl_first_height=5.0e-3,
         bl_growth=1.5,
-        pin_layers=2,
-        pin_sweeps=300,
+        pin_layers=1,
+        pin_sweeps=5000,
         sweeps_per_delta=20,
-        tmop_sweeps=600,
+        tmop_sweeps=5000,
         chunk=50,
         smoother="jacobi",
         omega=0.8,
+        # block-interface terms (0 = off), editable in the run panel: C2 de-kinks
+        # the grid lines crossing block seams; orthogonality pulls the cross-seam
+        # edge perpendicular to the seam.
+        c2_weight=egg_webui.editable(10, label="interface C2 weight"),
+        c2_singularity=egg_webui.editable(1, label="singularity ring C2 weight"),
+        ortho_weight=egg_webui.editable(0, label="interface orthogonality weight"),
+        ortho_layers=egg_webui.editable(3, label="orthogonality band layers"),
+        ortho_relax=egg_webui.editable(1.0, label="orthogonality clustering relax"),
         device="cpu",
     )
     topo, ents, grid, cfg = setup(a)
@@ -207,7 +241,14 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
     egg_topo = ExplicitTopology(
         base=topo,
         geometry=ents,
-        connectivity=editable({"nodes": {}, "edges": [], "res": 10}),
+        connectivity=editable({
+            "nodes": {
+            },
+            "edges": [
+                {"a": "_c6", "b": "_c7", "res": 10},
+            ],
+            "res": 10,
+        }),
     )
     topo = egg_topo.build()
     grid = topo.initialize_grid()

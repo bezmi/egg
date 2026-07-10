@@ -205,6 +205,10 @@ inline void reduce_linesearch_pair(sycl::queue& q,
                            cn[k] = load_pt<D>(corr, es.gn[k][i]);
                            sc[k] = es.s[k][i];
                        }
+                       // Composed-term weight (unit when the level carries no weight).
+                       const real wt = es.weight.extent(0) > 0
+                                         ? es.weight[i * static_cast<std::size_t>(es.wt_stride)]
+                                         : 1.0_r;
                        const auto eval = [&](real a, auto& e_sum, auto& m_min) {
                            PtN<D> corner;
                            std::array<PtN<D>, D> nbr;
@@ -216,7 +220,7 @@ inline void reduce_linesearch_pair(sycl::queue& q,
                            }
                            real detA;
                            const VecTN<D> t = assemble_vecT<D>(corner, nbr, sc, w, detA);
-                           e_sum += objective.value(t);
+                           e_sum += wt * objective.value(t);
                            m_min.combine(detA);
                        };
                        eval(a0, e0_sum, m0_min);

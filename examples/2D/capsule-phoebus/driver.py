@@ -67,6 +67,41 @@ def parse_args(argv=None):
         default=5000,
         help="TMOP sweeps for the pinned re-run",
     )
+    p.add_argument(
+        "--c2-weight",
+        type=float,
+        default=0.0,
+        help="block-interface C2 curvature-continuity weight (0 = off); de-kinks "
+        "grid lines crossing block seams (interface-only, leaving the clustered "
+        "near-wall interior alone)",
+    )
+    p.add_argument(
+        "--c2-singularity",
+        type=float,
+        default=0.0,
+        help="C2 weight on the ring around each singular node (0 = off); rounds "
+        "the sharp singular-fan corners into a smooth (C1) loop",
+    )
+    p.add_argument(
+        "--ortho-weight",
+        type=float,
+        default=0.0,
+        help="block-interface orthogonality weight (0 = off); pulls the cross-seam "
+        "edge perpendicular to the seam (mode='normal'), straightening the crossing",
+    )
+    p.add_argument(
+        "--ortho-layers",
+        type=int,
+        default=3,
+        help="near-seam band depth the orthogonality term acts on (1 = seam only)",
+    )
+    p.add_argument(
+        "--ortho-relax",
+        type=float,
+        default=1.0,
+        help="[0,1] relax orthogonality where near-seam cells are clustered slivers "
+        "(follows the wall-normal instead of forcing perpendicular-to-seam)",
+    )
     a = p.parse_args(argv)
     print("=" * 56)
     print("Phoebus capsule → TMOP smooth")

@@ -281,6 +281,19 @@ html.restoring .canvas svg { visibility: hidden; }
 .grid-lines.b3, .grid-outline.b3 { stroke: color-mix(in srgb, var(--egg-block3) 55%, var(--egg-shade)); }
 .grid-lines.b4, .grid-outline.b4 { stroke: color-mix(in srgb, var(--egg-block4) 55%, var(--egg-shade)); }
 .grid-lines.b5, .grid-outline.b5 { stroke: color-mix(in srgb, var(--egg-block5) 55%, var(--egg-shade)); }
+/* View-menu toggles on #view (persists across run-frame OOB swaps of #canvas):
+   "block colours" drops the fill and reverts every block-tinted stroke to the
+   uniform grid colour; "block boundaries" hides the thicker outlines (the
+   boundary is still drawn by grid-lines, just at the thin interior width). */
+#view.no-block-fill .block-fill { display: none; }
+#view.no-block-fill .grid-lines.b0, #view.no-block-fill .grid-lines.b1,
+#view.no-block-fill .grid-lines.b2, #view.no-block-fill .grid-lines.b3,
+#view.no-block-fill .grid-lines.b4, #view.no-block-fill .grid-lines.b5,
+#view.no-block-fill .grid-outline.b0, #view.no-block-fill .grid-outline.b1,
+#view.no-block-fill .grid-outline.b2, #view.no-block-fill .grid-outline.b3,
+#view.no-block-fill .grid-outline.b4, #view.no-block-fill .grid-outline.b5
+  { stroke: var(--egg-grid-line); }
+#view.no-block-outline .grid-outline { display: none; }
 .layer-tangled { fill: var(--egg-tangled); fill-opacity: 0.35; }
 .topo-block { fill: var(--egg-topo-line); fill-opacity: 0.02;
               stroke: var(--egg-topo-line); stroke-width: 1.6; }
