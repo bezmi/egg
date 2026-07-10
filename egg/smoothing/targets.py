@@ -67,7 +67,8 @@ class BoundaryLayerTarget:
     blocks (the shape metric is scale-invariant, so only the ``s_n/s_t``
     ratio acts). Orientation comes from the geometry *entity*, which stays
     stable even while the working mesh is folded during untangling.
-    ``det W = s_t * s_n > 0``.
+    At construction ``det W = s_t * s_n > 0``; when ``det_scale`` is set
+    the matrix is rescaled so ``det W = det_scale`` at call time.
 
     Parameters
     ----------
@@ -107,6 +108,14 @@ class BoundaryLayerTarget:
         the metric prefers uniformly sheared parallelograms that follow the
         boundary instead of trading layer heights for orthogonality to it.
         Usually set via ``build_topology_target(relax_orthogonality=…)``.
+    det_scale : float, optional
+        Target determinant, passed by ``build_topology_target`` to match the
+        far-field default. When set, the raw ``W`` is rescaled so
+        ``det W = det_scale`` — the wall-normal / tangential aspect ratio is
+        preserved but the absolute size is normalised to the global default,
+        keeping the ``(det T - 1)^2`` term in ``shape_size`` uniform across
+        blocks. ``None`` (the default) leaves ``det W`` at its natural value
+        (``s_n * s_t``), which is correct under a scale-invariant shape metric.
     """
 
     def __init__(
@@ -123,6 +132,7 @@ class BoundaryLayerTarget:
         tangential_spacing=None,
         k_offset=0,
         boundary_shear=None,
+        det_scale=None,
     ):
         if interior_spacing is None and tangential_spacing is None:
             raise ValueError(
@@ -145,6 +155,7 @@ class BoundaryLayerTarget:
         self.max_height = None if max_height is None else float(max_height)
         self.k_offset = int(k_offset)
         self.boundary_shear = dict(boundary_shear or {})
+        self.det_scale = None if det_scale is None else float(det_scale)
         # anchor position -> (q, n_hat, t_hat). Every layer and corner of a
         # wall column shares one anchor, and each frame costs three projected
         # inversions of ``entity`` (Newton per composite segment) — without
@@ -266,6 +277,10 @@ class BoundaryLayerTarget:
         # Guarantee det W > 0 (flip the tangential column if needed).
         if np.linalg.det(W) < 0:
             W[:, other] = -t_hat * s_t
+        if self.det_scale is not None:
+            det_W = float(np.linalg.det(W))
+            if det_W > 0:
+                W *= (self.det_scale / det_W) ** (1.0 / d)
         return W
 
 
@@ -484,6 +499,13 @@ def build_topology_target(
     instead of fighting over a global value; the wall-normal growth is
     capped at that spacing, making far-from-wall cells isotropic like the
     default target.
+
+    Each :class:`BoundaryLayerTarget` is created with ``det_scale`` set to
+    ``det(default_target)`` so its ``det W`` matches the far-field default.
+    This keeps the ``(det T - 1)^2`` size term in ``shape_size`` uniform
+    across all blocks; under a scale-invariant shape metric the
+    normalisation is a no-op for convergence (only the ratio
+    ``s_n / s_t`` affects the objective).
     """
     d = topology.d
     if default is None:
@@ -500,6 +522,8 @@ def build_topology_target(
     specs = getattr(topology, "boundary_layer_specs", {})
     if not specs:
         return default
+
+    det_scale = float(np.linalg.det(default(-1, None, (0,), (0,))))
 
     block_names = list(topology.block_specs.keys())
     per_block: dict[int, BoundaryLayerTarget] = {}
@@ -524,6 +548,7 @@ def build_topology_target(
             interior_spacing=interior_spacing,
             max_height=spec["max_height"],
             tangential_spacing=s_t,
+            det_scale=det_scale,
         )
 
     if blend_neighbours:
@@ -553,6 +578,7 @@ def build_topology_target(
                     topology, nb[0], nb[1], nb[2]
                 ),
                 k_offset=wall_cells,
+                det_scale=det_scale,
             )
 
     if relax_orthogonality:
