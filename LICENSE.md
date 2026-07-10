@@ -12,6 +12,9 @@
 > **official releases signed by the maintainer** (see "Release authenticity" in
 > [DEPLOY.md](./DEPLOY.md)); a `LICENSE-COUNTDOWN.md` in an unsigned or
 > third-party build does not bind the maintainer or grant any rights.
+>
+> All example code in the `examples/` directory is released under the
+> MIT license.
 
 > To discuss licensing for commercial use, please contact us.
 
