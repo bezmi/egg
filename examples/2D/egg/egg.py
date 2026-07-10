@@ -108,7 +108,7 @@ def build_egg_in_rectangle(bl_first_height=0.0, bl_growth=1.5, n_fixed=2):
         # interior wall, so no domain boundary meets it obliquely and
         # relax_orthogonality stays empty.
         b.set_boundary_layer(
-            egg, first_height=bl_first_height, growth=bl_growth, n_fixed=n_fixed
+            egg, first_height=bl_first_height, growth=bl_growth, n_fixed=n_fixed, n_layers=2
         )
 
     topology = b.build()
@@ -169,6 +169,7 @@ def setup(a):
         tmop_sweeps=a["tmop_sweeps"],
         tmop_chunk=a["chunk"],
         tmop_smoother=a["smoother"],
+        tmop_metric="shape_size",
         cluster_boundary_layers=pin,
         bl_blend_neighbours=False,
         omega=a["omega"],
@@ -213,19 +214,19 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
     a = egg_webui.params(
         bl_first_height=5.0e-3,
         bl_growth=1.5,
-        pin_layers=2,
-        pin_sweeps=300,
+        pin_layers=1,
+        pin_sweeps=5000,
         sweeps_per_delta=20,
-        tmop_sweeps=600,
+        tmop_sweeps=5000,
         chunk=50,
         smoother="jacobi",
         omega=0.8,
         # block-interface terms (0 = off), editable in the run panel: C2 de-kinks
         # the grid lines crossing block seams; orthogonality pulls the cross-seam
         # edge perpendicular to the seam.
-        c2_weight=egg_webui.editable(0.0, label="interface C2 weight"),
-        c2_singularity=egg_webui.editable(0.0, label="singularity ring C2 weight"),
-        ortho_weight=egg_webui.editable(0.0, label="interface orthogonality weight"),
+        c2_weight=egg_webui.editable(10, label="interface C2 weight"),
+        c2_singularity=egg_webui.editable(1, label="singularity ring C2 weight"),
+        ortho_weight=egg_webui.editable(0, label="interface orthogonality weight"),
         ortho_layers=egg_webui.editable(3, label="orthogonality band layers"),
         ortho_relax=egg_webui.editable(1.0, label="orthogonality clustering relax"),
         device="cpu",
@@ -240,7 +241,14 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
     egg_topo = ExplicitTopology(
         base=topo,
         geometry=ents,
-        connectivity=editable({"nodes": {}, "edges": [], "res": 10}),
+        connectivity=editable({
+            "nodes": {
+            },
+            "edges": [
+                {"a": "_c6", "b": "_c7", "res": 10},
+            ],
+            "res": 10,
+        }),
     )
     topo = egg_topo.build()
     grid = topo.initialize_grid()
