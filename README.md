@@ -2,17 +2,10 @@
 
 Egg aims to be an **e**xcellent **g**rid **g**enerator.
 
-Very early WIP.
-
 A structured multi-block grid generator with a TMOP-style mesh smoother /
 untangler. Written as a C++23 core and a python driver.
 AdaptiveCpp SYCL compute for performance portable kernels
 from one source (OMP, ROCm, CUDA).
-
-NOTE: AI has been used heavily to get this to a proof-of-concept working state.
-
-Everything else (topology, geometry, TFI init, projection, visualization,
-pipeline orchestration) stays in Python.
 
 ## Setup
 
@@ -57,6 +50,7 @@ The basics:
 Details, theming, and the full script contract: [`webui/README.md`](webui/README.md).
 
 ### Documentation
+
 Start the webui after running `uv sync group pwebui --group docs`. Then, the full egg documentation is accessible through **help → documentation**.
 
 ## CAD import (3D)
