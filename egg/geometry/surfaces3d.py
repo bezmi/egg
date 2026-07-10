@@ -26,6 +26,15 @@ from .base import GeometryEntity
 
 __all__ = ["BSplineSurface"]
 
+# Newton restarts in invert(): the best few seeds are each polished so a closed
+# surface's seam cannot trap the search on the wrong side of the u-wrap.
+_INVERT_STARTS = 4
+
+# LM foot solver tolerances (fp64 reference; the C++ mirror uses tol::tiny /
+# tol::newton, which floor higher in the fp32 build).
+_TINY = 1e-30
+_NEWTON_TOL = 1e-9
+
 
 def _normalize(v: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(v)
@@ -41,6 +50,45 @@ def _orthonormalize2(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.column_stack([a, b])
 
 
+def _trim_contains(loops, u: float, v: float) -> bool:
+    """Even-odd point-in-region over closed UV loops (mirrors C++ Trim<2>)."""
+    inside = False
+    for loop in loops:
+        n = len(loop)
+        j = n - 1
+        for i in range(n):
+            a, b = loop[i], loop[j]
+            if (a[1] > v) != (b[1] > v) and u < (b[0] - a[0]) * (v - a[1]) / (
+                b[1] - a[1]
+            ) + a[0]:
+                inside = not inside
+            j = i
+    return inside
+
+
+def _trim_clamp(loops, u: float, v: float) -> tuple[float, float]:
+    """Nearest point on the loop polylines to (u, v) (mirrors C++ Trim<2>)."""
+    p = np.array([u, v], dtype=float)
+    best = p
+    best_d = np.inf
+    for loop in loops:
+        n = len(loop)
+        j = n - 1
+        for i in range(n):
+            a, b = loop[j], loop[i]
+            ab = b - a
+            ab_sq = float(ab @ ab)
+            t = float((p - a) @ ab) / ab_sq if ab_sq > 1e-30 else 0.0
+            t = min(max(t, 0.0), 1.0)
+            q = a + t * ab
+            dd = float((q - p) @ (q - p))
+            if dd < best_d:
+                best_d = dd
+                best = q
+            j = i
+    return float(best[0]), float(best[1])
+
+
 class BSplineSurface(GeometryEntity):
     """A tensor-product B-spline / NURBS surface in 3D.
 
@@ -52,7 +100,9 @@ class BSplineSurface(GeometryEntity):
     ``kMaxBSplineDegree = 7``.
     """
 
-    def __init__(self, pu: int, pv: int, knots_u, knots_v, ctrl, weights=None):
+    def __init__(
+        self, pu: int, pv: int, knots_u, knots_v, ctrl, weights=None, trim=None
+    ):
         self.pu = int(pu)
         self.pv = int(pv)
         self.knots_u = np.asarray(knots_u, dtype=float)
@@ -75,19 +125,30 @@ class BSplineSurface(GeometryEntity):
             if self.weights.shape != (self.nu, self.nv):
                 raise ValueError("weights shape must be (nu, nv)")
 
+        # UV trim: closed loops (outer first, then holes) in parameter space,
+        # mirroring the C++ Trim<2>. Empty means untrimmed (the full rectangle).
+        self.trim = None if trim is None else [np.asarray(loop, float) for loop in trim]
+
         # Pre-build the v-direction BSplines for each row (and their derivatives).
         # For the rational form, work in homogeneous coords (x*w, y*w, z*w, w).
         self._u0 = float(self.knots_u[self.pu])
         self._u1 = float(self.knots_u[self.nu])
         self._v0 = float(self.knots_v[self.pv])
         self._v1 = float(self.knots_v[self.nv])
+        self._row_cache = None  # v-direction splines, built once (see _row_splines)
 
-    def _row_splines(self, deriv: int = 0):
-        """Build v-direction BSplines for each row (optionally derivative order).
+    def _row_splines(self):
+        """The v-direction BSpline per row (base; derivatives via ``nu=``).
 
-        Derivative order is clamped to the spline degree (higher orders return a
-        zero-valued callable, matching C++ bspline_basis_ders).
+        Built once per surface and cached: the rows depend only on the (fixed)
+        control net / knots / weights, but ``_eval_ders`` calls this per foot
+        Newton step, so rebuilding the scipy splines each time dominated
+        projection. Evaluating derivatives with the ``nu=`` de Boor order (rather
+        than a ``.derivative()`` spline) stays valid at full-multiplicity
+        internal knots, which imported CAD carriers (spheres, cylinders) carry.
         """
+        if self._row_cache is not None:
+            return self._row_cache
         from scipy.interpolate import BSpline as _SciBSpline
 
         if self.weights is None:
@@ -98,17 +159,11 @@ class BSplineSurface(GeometryEntity):
                 axis=2,
             )  # (nu, nv, 4)
         edim = coeffs.shape[-1]
-        if deriv > self.pv:
-            # Beyond the degree: all derivatives are zero.
-            zero = np.zeros(edim)
-            return [(lambda v, _z=zero: _z.copy()) for _ in range(self.nu)], edim
-        splines = []
-        for i in range(self.nu):
-            spl = _SciBSpline(self.knots_v, coeffs[i, :, :], self.pv)
-            if deriv > 0:
-                spl = spl.derivative(deriv)
-            splines.append(spl)
-        return splines, edim
+        splines = [
+            _SciBSpline(self.knots_v, coeffs[i, :, :], self.pv) for i in range(self.nu)
+        ]
+        self._row_cache = (splines, edim)
+        return self._row_cache
 
     def _eval_ders(self, u: float, v: float, nd: int):
         """Evaluate S and partial derivatives up to order nd via row-then-column.
@@ -118,13 +173,16 @@ class BSplineSurface(GeometryEntity):
         """
         from scipy.interpolate import BSpline as _SciBSpline
 
-        # Evaluate the v-direction at v for each derivative order 0..nd.
-        # row_vals[a] = array (nu, edim) of the a-th v-derivative of each row at v.
+        # Evaluate the v-direction at v for each derivative order 0..nd via the
+        # nu= de Boor order. row_vals[a] = array (nu, edim) of the a-th
+        # v-derivative of each row at v (zero beyond the degree).
+        spls, edim = self._row_splines()
         row_vals = []
-        _, edim = self._row_splines(0)
         for a in range(nd + 1):
-            spls, _ = self._row_splines(a)
-            vals = np.array([spl(v) for spl in spls])  # (nu, edim)
+            if a <= self.pv:
+                vals = np.array([spl(v, nu=a) for spl in spls])  # (nu, edim)
+            else:
+                vals = np.zeros((self.nu, edim))
             row_vals.append(vals)
 
         # Now evaluate the u-direction at u for each derivative order 0..nd,
@@ -134,10 +192,8 @@ class BSplineSurface(GeometryEntity):
         for b in range(nd + 1):
             u_spl = _SciBSpline(self.knots_u, row_vals[b], self.pu)
             for a in range(nd + 1):
-                if a == 0:
-                    val = np.asarray(u_spl(u), dtype=float)
-                elif a <= self.pu:
-                    val = np.asarray(u_spl.derivative(a)(u), dtype=float)
+                if a <= self.pu:
+                    val = np.asarray(u_spl(u, nu=a), dtype=float)
                 else:
                     val = np.zeros(edim)
                 S[a, b, :edim] = val
@@ -176,35 +232,85 @@ class BSplineSurface(GeometryEntity):
         return S[1, 0], S[0, 1]
 
     def invert(self, p: np.ndarray) -> tuple[float, float]:
-        """Coarse-grid-seeded Newton on (S-p)·S_u = (S-p)·S_v = 0 (mirrors C++)."""
+        """Multi-start coarse-grid-seeded Newton on (S-p)·S_u = (S-p)·S_v = 0.
+
+        The best ``_INVERT_STARTS`` seeds are each Newton-polished and the
+        globally nearest foot is kept, so a closed surface's seam (where the two
+        u-boundary seeds evaluate to the same point) cannot trap the search on
+        the wrong side of the wrap. Mirrors C++.
+        """
         p = np.asarray(p, dtype=float)
         u0, u1, v0, v1 = self._u0, self._u1, self._v0, self._v1
         k_seed = 8
-        best_q = (u0, v0)
-        best_d = np.inf
+        seeds = []
         for i in range(k_seed + 1):
             for j in range(k_seed + 1):
                 u = u0 + (u1 - u0) * i / k_seed
                 v = v0 + (v1 - v0) * j / k_seed
                 d = self.eval(u, v) - p
-                dd = float(np.dot(d, d))
-                if dd < best_d:
-                    best_d = dd
-                    best_q = (u, v)
+                seeds.append((float(np.dot(d, d)), u, v))
+        seeds.sort(key=lambda s: s[0])
+
+        best_q = (u0, v0)
+        best_d = np.inf
+        for _, su, sv in seeds[:_INVERT_STARTS]:
+            u, v = self._lm_foot(p, su, sv, u0, u1, v0, v1)
+            d = self.eval(u, v) - p
+            dd = float(np.dot(d, d))
+            if dd < best_d:
+                best_d = dd
+                best_q = (u, v)
         u, v = best_q
-        for _ in range(12):
-            S = self._eval_ders(u, v, 2)
-            d = S[0, 0] - p
+        # Restrict the foot to the trim region: outside it, clamp to the loops.
+        if self.trim and not _trim_contains(self.trim, u, v):
+            u, v = _trim_clamp(self.trim, u, v)
+        return u, v
+
+    def _lm_foot(self, p, u, v, u0, u1, v0, v1):
+        """Damped (Levenberg-Marquardt) nearest-foot Newton from one seed.
+
+        Converges to the true foot even where the Jacobian is rank-deficient (a
+        surface-of-revolution pole, S_u -> 0): the damping bridges Gauss-Newton
+        (away from the degeneracy) and gradient descent (at it), with residual
+        backtracking on the damping so every accepted step reduces |S-p|^2.
+        Mirrors C++ newton_foot_lm.
+        """
+        S = self._eval_ders(u, v, 2)
+        d = S[0, 0] - p
+        r = float(np.dot(d, d))
+        lam = 1e-3 * (
+            float(np.dot(S[1, 0], S[1, 0]) + np.dot(S[0, 1], S[0, 1])) + _TINY
+        )
+        for _ in range(16):
             f1 = float(np.dot(d, S[1, 0]))
             f2 = float(np.dot(d, S[0, 1]))
             j11 = float(np.dot(S[1, 0], S[1, 0]) + np.dot(d, S[2, 0]))
             j12 = float(np.dot(S[1, 0], S[0, 1]) + np.dot(d, S[1, 1]))
             j22 = float(np.dot(S[0, 1], S[0, 1]) + np.dot(d, S[0, 2]))
-            det = j11 * j22 - j12 * j12
-            if abs(det) < 1e-30:
+            du = dv = 0.0
+            accepted = False
+            for _ in range(6):  # backtrack the damping until a step descends
+                a11, a22 = j11 + lam, j22 + lam
+                det = a11 * a22 - j12 * j12
+                if abs(det) < _TINY:
+                    lam *= 4.0
+                    continue
+                du = -(a22 * f1 - j12 * f2) / det
+                dv = -(-j12 * f1 + a11 * f2) / det
+                un = float(np.clip(u + du, u0, u1))
+                vn = float(np.clip(v + dv, v0, v1))
+                dn = self.eval(un, vn) - p
+                rn = float(np.dot(dn, dn))
+                if rn < r:
+                    u, v, r = un, vn, rn
+                    S = self._eval_ders(u, v, 2)
+                    d = S[0, 0] - p
+                    lam = max(lam * 0.3, _TINY)
+                    accepted = True
+                    break
+                lam *= 4.0
+            if not accepted or abs(du) + abs(dv) < _NEWTON_TOL:
                 break
-            u = float(np.clip(u - (j22 * f1 - j12 * f2) / det, u0, u1))
-            v = float(np.clip(v - (-j12 * f1 + j11 * f2) / det, v0, v1))
         return u, v
 
     @property

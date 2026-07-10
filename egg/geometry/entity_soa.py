@@ -56,7 +56,7 @@ The field layouts (offsets within each record) are frozen to match the C++
 | Plane        | 5   | 9       | 0    | [o(3), ax(3), ay(3)]                           |
 | Cylinder     | 12  | 10      | 0    | [o(3), ax(3), ay(3), r]                        |
 | Line3        | 13  | 8       | 0    | [p0(3), p1(3), t0, t1]                         |
-| BSplineSurf  | 14  | 9       | 4    | [pu,pv,nu,nv,ku_off,kv_off,ctrl_off,w_off,has_w] + seg: knots_u, knots_v, ctrl, weights |
+| BSplineSurf  | 14  | 9       | 6    | [pu,pv,nu,nv,ku_off,kv_off,ctrl_off,w_off,has_w] + seg: knots_u, knots_v, ctrl, weights, trim_verts, trim_loops |
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ _KFIELDS = {
 _KSEG = {
     TAG_BSPLINE: 3,  # knots, ctrl, weights
     TAG_COMPOSITE: 1,  # segment records
-    TAG_BSPLINESURF: 4,  # knots_u, knots_v, ctrl, weights
+    TAG_BSPLINESURF: 6,  # knots_u, knots_v, ctrl, weights, trim_verts, trim_loops
 }
 
 # Tag -> wire-format name (used as dict key in the per-group `entities` sub-dict).
@@ -417,6 +417,19 @@ def _encode_bsplinesurface(entity):
         ],
         dtype=np.float64,
     )
+    # Trim: two segmented fields. ``trim_verts`` is the loop vertices flattened
+    # [u0,v0,u1,v1,...] (outer loop first, then holes); ``trim_loops`` is the
+    # vertex-count offset table [0, n0, n0+n1, ..., total]. Both empty means
+    # untrimmed (the C++ Trim<2> reads loops.size() < 2 as untrimmed).
+    loops = entity.trim or []
+    if loops:
+        verts = np.concatenate(
+            [np.asarray(loop, dtype=np.float64).reshape(-1, 2) for loop in loops]
+        )
+        offsets = np.concatenate([[0], np.cumsum([len(loop) for loop in loops])])
+    else:
+        verts = np.empty((0, 2), dtype=np.float64)
+        offsets = np.empty(0, dtype=np.float64)
     seg = [
         np.asarray(entity.knots_u, dtype=np.float64).ravel(),
         np.asarray(entity.knots_v, dtype=np.float64).ravel(),
@@ -426,6 +439,8 @@ def _encode_bsplinesurface(entity):
             if has_w
             else np.empty(0, dtype=np.float64)
         ),
+        verts.ravel(),
+        offsets.astype(np.float64),
     ]
     return row, seg
 

@@ -123,10 +123,13 @@ class ExplicitTopology:
     geometry : dict, optional
         ``{name: entity}`` the blocking binds to by name.
     connectivity : dict, optional
-        The blocking structure (``nodes`` / ``edges`` / ``res``); wrap it with
-        :func:`editable` to opt into UI editing.
+        The blocking structure; wrap it with :func:`editable` to opt into UI
+        editing. In 2D: ``nodes`` / ``edges`` / ``res`` (traced into quads). In
+        3D: ``nodes`` (``{xyz, on}``) + ``blocks`` (each ``{corners: [8 ids in
+        product order], res}``); a boundary face whose four corners share a
+        bound surface (via each node's ``on``) rides it.
     d : int
-        Spatial dimension (2 only).
+        Spatial dimension (2 or 3).
     """
 
     def __init__(
@@ -137,8 +140,8 @@ class ExplicitTopology:
         connectivity: dict | None = None,
         d: int = 2,
     ):
-        if d != 2:
-            raise ValueError("ExplicitTopology is 2D only")
+        if d not in (2, 3):
+            raise ValueError("ExplicitTopology supports d=2 or d=3")
         self.base = base
         self.geometry = dict(geometry or {})
         self.connectivity = dict(connectivity or {})
@@ -521,6 +524,185 @@ class ExplicitTopology:
             user_res,
         )
 
+    def _base_wireframe_3d(self):
+        """The base topology as (positions, hex edges, node->surfaces, fixed,
+        entities), so a drawn overlay can subdivide/extend it."""
+        from collections import defaultdict
+        from itertools import product as _product
+
+        base = self.base
+        if isinstance(base, TopologyBuilder):
+            corners, specs, assocs = (
+                base._corners,
+                base._block_specs,
+                base._associations,
+            )
+        else:
+            corners, specs, assocs = base.corners, base.block_specs, base.associations
+        idx = list(_product((0, 1), repeat=3))
+        pmap = {ci: i for i, ci in enumerate(idx)}
+        pos = {name: np.asarray(c.position, float) for name, c in corners.items()}
+        fixed = {name: bool(getattr(c, "fixed", True)) for name, c in corners.items()}
+        edges: set = set()
+        for spec in specs.values():
+            cn = spec.corner_names
+            for a, ci in enumerate(idx):
+                for axis in range(3):
+                    nb = list(ci)
+                    nb[axis] ^= 1
+                    b = pmap[tuple(nb)]
+                    if a < b:
+                        edges.add(frozenset((cn[a], cn[b])))
+        on: dict = defaultdict(set)
+        entities: dict = {}
+        for assoc in assocs:
+            nm = getattr(assoc.entity, "name", None)
+            if nm is None:
+                continue
+            entities[nm] = assoc.entity
+            spec = specs.get(assoc.face.block_name)
+            if spec is not None:
+                for c in spec.face_corner_names(assoc.face.axis, assoc.face.side, 3):
+                    on[c].add(nm)
+        return pos, edges, on, fixed, entities
+
+    def _flatten_3d(self):
+        """Assemble the 3D blocking into a BlockTopology.
+
+        Corners come from ``nodes`` (``xyz`` + optional ``on`` surface bindings)
+        and, with a ``base``, its corners. Blocks are an explicit list (each 8
+        ids in ``product((0,1), repeat=3)`` order) or, when only ``edges`` (or a
+        base) are given, inferred by cube enumeration over the combined
+        wireframe. A boundary face whose four corners share a bound surface is
+        associated with it; a corner on two or more surfaces (or flagged
+        ``fixed``) is pinned; shared interface faces are left for connection
+        inference.
+        """
+        from collections import defaultdict
+
+        diags: list[Diagnostic] = []
+        conn = self.connectivity
+        nodes = conn.get("nodes", {}) or {}
+        blocks = conn.get("blocks", []) or []
+        edges_in = conn.get("edges", []) or []
+        default_res = conn.get("res", 10)
+        default_res = default_res if isinstance(default_res, int) else 10
+
+        geometry = dict(self.geometry)
+        tb = TopologyBuilder(d=3)
+        node_on: dict[str, set[str]] = defaultdict(set)
+        base_edges: set = set()
+
+        # Base (imperative + interactive): its corners and hex edges join the
+        # overlay wireframe, which subdivides/extends it; the merged wireframe is
+        # re-inferred (subdivision parents dropped by containment).
+        if self.base is not None:
+            bpos, base_edges, bon, bfixed, bents = self._base_wireframe_3d()
+            geometry.update(bents)
+            for name, p in bpos.items():
+                tb.add_corner(name, p, fixed=bfixed.get(name, True))
+                node_on[name] = set(bon.get(name, ()))
+
+        for nid, spec in nodes.items():
+            spec = spec or {}
+            on = list(spec.get("on") or [])
+            for lbl in on:
+                if lbl not in geometry:
+                    diags.append(
+                        Diagnostic("unknown_geometry", f"unknown geometry {lbl!r}")
+                    )
+            known = [lbl for lbl in on if lbl in geometry]
+            if str(nid) in tb._corners:  # names an existing (base) corner
+                node_on[str(nid)].update(known)
+                continue
+            xyz = spec.get("xyz")
+            if xyz is None:
+                diags.append(Diagnostic("bad_node", f"node {nid!r} has no 'xyz'"))
+                continue
+            fixed = bool(spec.get("fixed")) or len(known) >= 2
+            tb.add_corner(str(nid), np.asarray(xyz, dtype=float)[:3], fixed=fixed)
+            node_on[str(nid)] = set(known)
+
+        # Blocks: an explicit list, or inferred (cube enumeration) from the
+        # combined base + overlay edge wireframe.
+        block_lists: list = []
+        if blocks and self.base is None:
+            for i, b in enumerate(blocks):
+                corners = b.get("corners")
+                if not corners or len(corners) != 8:
+                    diags.append(
+                        Diagnostic(
+                            "bad_block", f"block {i} needs 8 corners (product order)"
+                        )
+                    )
+                    continue
+                res = b.get("res", default_res)
+                res = tuple(res) if isinstance(res, (list, tuple)) else (res, res, res)
+                block_lists.append(
+                    (b.get("name", f"blk{i}"), [str(c) for c in corners], res)
+                )
+        else:
+            from .trace3d import infer_blocks
+
+            combined = set(base_edges)
+            for e in edges_in:
+                a, b = (e.get("a"), e.get("b")) if isinstance(e, dict) else (e[0], e[1])
+                a, b = str(a), str(b)
+                if a in tb._corners and b in tb._corners:
+                    combined.add(frozenset((a, b)))
+                else:
+                    diags.append(
+                        Diagnostic(
+                            "stale_ref", f"edge references unknown node {(a, b)!r}"
+                        )
+                    )
+            if not combined:
+                diags.append(
+                    Diagnostic("no_blocks", "3D connectivity needs 'blocks' or 'edges'")
+                )
+                return None, diags
+            pos = {name: c.position for name, c in tb._corners.items()}
+            inferred, idiags = infer_blocks(
+                pos, [tuple(e) for e in combined], node_on=node_on
+            )
+            diags += idiags
+            block_lists = [
+                (f"blk{i}", corners, (default_res,) * 3)
+                for i, corners in enumerate(inferred)
+            ]
+
+        for name, corners, res in block_lists:
+            try:
+                tb.add_block(name, corners=corners, resolutions=res)
+            except (ValueError, TypeError) as exc:
+                diags.append(Diagnostic("bad_block", str(exc)))
+
+        # Associate only boundary faces: an interface face (shared by two blocks)
+        # is left for connection inference and never carries a surface.
+        face_count: dict = defaultdict(int)
+        for spec in tb._block_specs.values():
+            for axis in range(3):
+                for side in (0, 1):
+                    face_count[frozenset(spec.face_corner_names(axis, side, 3))] += 1
+        for name, spec in list(tb._block_specs.items()):
+            for axis in range(3):
+                for side in (0, 1):
+                    fc = spec.face_corner_names(axis, side, 3)
+                    key = frozenset(fc)
+                    if len(key) != len(fc) or face_count[key] != 1:
+                        continue  # degenerate or shared interface
+                    common = set.intersection(*(node_on.get(c, set()) for c in fc))
+                    for ent_name in sorted(common):
+                        tb.associate(name, axis, side, geometry[ent_name])
+
+        errors = [d for d in diags if not d.kind.startswith("warn")]
+        if errors:
+            return None, diags
+        try:
+            return tb.build(), diags
+        except Exception as exc:  # a non-conforming assembly still fails to build
+            return None, [Diagnostic("build_error", str(exc))]
+
     def flatten(self):
         """Compile base + blocking into a BlockTopology, or ``(None, diagnostics)``.
 
@@ -528,6 +710,8 @@ class ExplicitTopology:
         topology is ``None`` and each :class:`~egg.topology.trace.Diagnostic`
         names what to fix.
         """
+        if self.d == 3:
+            return self._flatten_3d()
         diags: list[Diagnostic] = []
         (
             pos,

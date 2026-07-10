@@ -264,6 +264,61 @@ class BlockTopology:
                         break
             conn.orientation = orientation
 
+    def _interface_axis_map(
+        self, conn: InterfaceConnection
+    ) -> tuple[list[int], list[int], list[tuple[int, bool]]]:
+        """Map a shared face's free axes from block A to block B.
+
+        Returns ``(free_axes_a, free_axes_b, axis_map)`` where
+        ``axis_map[p] = (q, rev)`` means face_a free axis ``free_axes_a[p]``
+        corresponds to face_b free axis ``free_axes_b[q]``, reversed when
+        ``rev``. Derived from the corner-name correspondence
+        (``conn.orientation``), so it resolves every rotation and reflection of
+        the shared quad, for one free axis (2D) or two (3D).
+        """
+        spec_a = self.block_specs[conn.face_a.block_name]
+        spec_b = self.block_specs[conn.face_b.block_name]
+        axis_a, side_a = conn.face_a.axis, conn.face_a.side
+        axis_b, side_b = conn.face_b.axis, conn.face_b.side
+        free_axes_a = [k for k in range(self.d) if k != axis_a]
+        free_axes_b = [k for k in range(self.d) if k != axis_b]
+
+        def free_corner_map(spec, axis, side, free_axes):
+            # product-space free coords ({0,1}^(d-1)) -> corner name
+            out: dict[tuple[int, ...], str] = {}
+            for idx, cname in zip(product((0, 1), repeat=self.d), spec.corner_names):
+                if idx[axis] == side:
+                    out[tuple(idx[k] for k in free_axes)] = cname
+            return out
+
+        cmap_a = free_corner_map(spec_a, axis_a, side_a, free_axes_a)
+        b_coords_of = {
+            name: coords
+            for coords, name in free_corner_map(
+                spec_b, axis_b, side_b, free_axes_b
+            ).items()
+        }
+
+        def matched_b(coords):
+            name = cmap_a[coords]
+            return b_coords_of[conn.orientation.get(name, name)]
+
+        nfree = len(free_axes_a)
+        b_origin = matched_b((0,) * nfree)
+        axis_map: list[tuple[int, bool]] = []
+        for p in range(nfree):
+            b_flip = matched_b(tuple(1 if i == p else 0 for i in range(nfree)))
+            changed = [q for q in range(nfree) if b_flip[q] != b_origin[q]]
+            if len(changed) != 1:
+                raise ValueError(
+                    f"interface {conn.face_a.block_name}[{axis_a},{side_a}] ↔ "
+                    f"{conn.face_b.block_name}[{axis_b},{side_b}] has a degenerate "
+                    "corner correspondence (not a consistent face map)"
+                )
+            q = changed[0]
+            axis_map.append((q, bool(b_origin[q])))
+        return free_axes_a, free_axes_b, axis_map
+
     def _build_dof_map(self) -> MultiBlockGrid:
         """Build the shared-DOF index map using union-find.
 
@@ -332,74 +387,26 @@ class BlockTopology:
             fixed_a = 0 if side_a == 0 else shape_a[axis_a] - 1
             fixed_b = 0 if side_b == 0 else shape_b[axis_b] - 1
 
-            # Free axes (everything except the face axis)
-            free_axes_a = [k for k in range(self.d) if k != axis_a]
-            free_axes_b = [k for k in range(self.d) if k != axis_b]
+            free_axes_a, free_axes_b, axis_map = self._interface_axis_map(conn)
 
-            # Get corner names on each face and their logical indices
-            names_a = spec_a.face_corner_names(axis_a, side_a, self.d)
-            corner_indices_a = spec_a.face_corner_indices(axis_a, side_a, self.d)
-            names_b = spec_b.face_corner_names(axis_b, side_b, self.d)
-            corner_indices_b = spec_b.face_corner_indices(axis_b, side_b, self.d)
-
-            # Map each face_a corner to its corresponding face_b corner via orientation
-            name_to_b_corner = {}
-            for ci_b, name_b in zip(corner_indices_b, names_b):
-                name_to_b_corner[name_b] = ci_b
-
-            corner_a_ci_to_b_ci: dict[int, int] = {}
-            for ci_a, name_a in zip(corner_indices_a, names_a):
-                b_name = conn.orientation.get(name_a, name_a)
-                corner_a_ci_to_b_ci[ci_a] = name_to_b_corner[b_name]
-
-            # Build the mapping from face_a free-axis indices → face_b free-axis indices
-            # For 2D: face is an edge with 1 free axis; orientation = direction or reversal
-            # For 3D: more complex mapping; we support axis correspondence
-
-            free_shapes_a = [shape_a[k] for k in free_axes_a]
-            free_shapes_b = [shape_b[k] for k in free_axes_b]
-
-            for free_idx_tuple in product(*[range(s) for s in free_shapes_a]):
-                # Build logical index in block A for this face node
+            for free_idx_tuple in product(*[range(shape_a[k]) for k in free_axes_a]):
                 logical_a = [0] * self.d
                 logical_a[axis_a] = fixed_a
                 for j, k in enumerate(free_axes_a):
                     logical_a[k] = free_idx_tuple[j]
 
-                # Build logical index in block B
-                # Determine the matching free-axis indices on block B
                 logical_b = [0] * self.d
                 logical_b[axis_b] = fixed_b
+                for p, (q, rev) in enumerate(axis_map):
+                    kb = free_axes_b[q]
+                    logical_b[kb] = (
+                        shape_b[kb] - 1 - free_idx_tuple[p]
+                        if rev
+                        else free_idx_tuple[p]
+                    )
 
-                if self.d == 2:
-                    # 2D: faces are edges, 1 free axis
-                    # Check orientation: does node walk in same or opposite direction?
-                    c0_a_idx = corner_a_ci_to_b_ci.get(corner_indices_a[0])
-                    if c0_a_idx is not None:
-                        # Determine direction: if first corner of A maps to first corner of B, same direction
-                        # A node at free index k walks from A's first corner to A's second corner
-                        # The matching B index depends on the direction
-                        n_free = free_shapes_b[0]
-                        if conn.orientation.get(names_a[0]) == names_b[0]:
-                            # Same direction
-                            logical_b[free_axes_b[0]] = free_idx_tuple[0]
-                        else:
-                            # Reversed
-                            logical_b[free_axes_b[0]] = n_free - 1 - free_idx_tuple[0]
-                    else:
-                        # Fallback: direct mapping
-                        logical_b[free_axes_b[0]] = free_idx_tuple[0]
-                else:
-                    # 3D: faces are quads, 2 free axes — deferred
-                    # For initial 3D support: assume same-orientation direct mapping
-                    for j, k in enumerate(free_axes_b):
-                        logical_b[k] = free_idx_tuple[min(j, len(free_idx_tuple) - 1)]
-
-                logical_a_t = tuple(logical_a)
-                logical_b_t = tuple(logical_b)
-
-                dof_a = logical_to_provisional(idx_a, logical_a_t)
-                dof_b = logical_to_provisional(idx_b, logical_b_t)
+                dof_a = logical_to_provisional(idx_a, tuple(logical_a))
+                dof_b = logical_to_provisional(idx_b, tuple(logical_b))
                 union(dof_a, dof_b)
 
         # 5. Collapse unions to sequential global indices
@@ -501,22 +508,13 @@ class BlockTopology:
             free_axes_a = [k for k in range(self.d) if k != axis_a]
             free_axes_b = [k for k in range(self.d) if k != axis_b]
 
-            names_a = spec_a.face_corner_names(axis_a, side_a, self.d)
-            names_b = spec_b.face_corner_names(axis_b, side_b, self.d)
-            reversed_2d = (
-                self.d == 2
-                and len(names_a) >= 2
-                and conn.orientation.get(names_a[0]) != names_b[0]
-            )
-
-            free_shapes_a = [shape_a[k] for k in free_axes_a]
-            free_shapes_b = [shape_b[k] for k in free_axes_b]
+            _, _, axis_map = self._interface_axis_map(conn)
 
             # Lookup for bidirectional mapping
             dof_a = self.grid.block_dof_maps[block_names.index(conn.face_a.block_name)]
             dof_b = self.grid.block_dof_maps[block_names.index(conn.face_b.block_name)]
 
-            for free_idx_tuple in product(*[range(s) for s in free_shapes_a]):
+            for free_idx_tuple in product(*[range(shape_a[k]) for k in free_axes_a]):
                 logical_a = [0] * self.d
                 logical_a[axis_a] = fixed_a
                 for j, k in enumerate(free_axes_a):
@@ -525,12 +523,13 @@ class BlockTopology:
 
                 logical_b = [0] * self.d
                 logical_b[axis_b] = fixed_b
-                if self.d == 2 and free_axes_b:
-                    n_fb = free_shapes_b[0] if free_shapes_b else 1
-                    if reversed_2d:
-                        logical_b[free_axes_b[0]] = n_fb - 1 - free_idx_tuple[0]
-                    else:
-                        logical_b[free_axes_b[0]] = free_idx_tuple[0]
+                for p, (q, rev) in enumerate(axis_map):
+                    kb = free_axes_b[q]
+                    logical_b[kb] = (
+                        shape_b[kb] - 1 - free_idx_tuple[p]
+                        if rev
+                        else free_idx_tuple[p]
+                    )
 
                 # Inward neighbor in block B (step away from shared face)
                 inward_b = list(logical_b)
@@ -675,33 +674,32 @@ class BlockTopology:
                 gidx = int(dof_map[actual])
                 global_nodes[gidx] = self.corners[cname].position.copy()
 
-            # Step 2: Space nodes along each edge (1D face). When both
-            # corners are Nodes placed on the same Edge, interpolate the
-            # edge *parameter* (shortest way around a closed curve) — the
-            # chord projected onto a strongly curved wall can leave whole
-            # spans of it empty (a narrow tip: no chord point projects onto
-            # the apex, and the smoother cannot recover the gap). Otherwise
-            # fall back to the chord; step 3 projects it onto the entity.
-            for axis in range(self.d):
-                for side in (0, 1):
-                    fixed = 0 if side == 0 else shape[axis] - 1
-                    face_cnames = spec.face_corner_names(axis, side, self.d)
-                    if len(face_cnames) != 2:
-                        continue
-                    c0 = self.corners[face_cnames[0]].position
-                    c1 = self.corners[face_cnames[1]].position
-                    src0 = self.corners[face_cnames[0]].source
-                    src1 = self.corners[face_cnames[1]].source
+            # Step 2: space nodes along each block edge. When both endpoint
+            # corners are Nodes on a common curve, interpolate the edge
+            # parameter (shortest way around a closed curve) so a strongly
+            # curved wall is sampled along the curve rather than its chord,
+            # which can leave a sharp apex empty. Otherwise fall back to the
+            # chord; step 3 projects it onto any associated entity.
+            corner_of = dict(zip(product((0, 1), repeat=self.d), spec.corner_names))
+            for edge_axis in range(self.d):
+                n_edge = shape[edge_axis]
+                if n_edge < 3:
+                    continue
+                others = [a for a in range(self.d) if a != edge_axis]
+                for combo in product((0, 1), repeat=len(others)):
+                    end_ci = [[0] * self.d, [0] * self.d]
+                    for e in (0, 1):
+                        end_ci[e][edge_axis] = e
+                        for a, s in zip(others, combo):
+                            end_ci[e][a] = s
+                    c0 = self.corners[corner_of[tuple(end_ci[0])]]
+                    c1 = self.corners[corner_of[tuple(end_ci[1])]]
 
-                    edge = getattr(src0, "edge", None)
+                    edge = getattr(c0.source, "edge", None)
                     param = None
-                    if edge is not None and getattr(src1, "edge", None) is edge:
-                        t0, t1 = float(src0.t), float(src1.t)
-                        dt = t1 - t0
-                        # A curve is a closed loop if it says so or if its
-                        # endpoints coincide (a closed Spline/imported SVG
-                        # path is a CompositePath, whose ``closed`` class
-                        # attribute stays False).
+                    if edge is not None and getattr(c1.source, "edge", None) is edge:
+                        t0 = float(c0.source.t)
+                        dt = float(c1.source.t) - t0
                         p0, p1 = edge.point_at(0.0), edge.point_at(1.0)
                         closed = bool(getattr(edge.entity, "closed", False)) or (
                             abs(p1 - p0) <= 1e-9 * (1.0 + abs(p0))
@@ -710,30 +708,26 @@ class BlockTopology:
                             dt -= np.copysign(1.0, dt)
                         param = (t0, dt, closed)
 
-                    free_axes = [a for a in range(self.d) if a != axis]
-                    if not free_axes:
-                        continue
-                    free_axis = free_axes[0]
-                    n_edge_nodes = shape[free_axis]
-
-                    for k in range(1, n_edge_nodes - 1):
-                        t = k / (n_edge_nodes - 1)
+                    for k in range(1, n_edge - 1):
                         logical = [0] * self.d
-                        logical[axis] = fixed
-                        logical[free_axis] = k
-                        logical_t = tuple(logical)
-                        gidx = int(dof_map[logical_t])
+                        logical[edge_axis] = k
+                        for a, s in zip(others, combo):
+                            logical[a] = 0 if s == 0 else shape[a] - 1
+                        gidx = int(dof_map[tuple(logical)])
                         if not np.any(np.isnan(global_nodes[gidx])):
                             continue
+                        t = k / (n_edge - 1)
                         if param is not None:
                             t0, dt, closed = param
                             tt = t0 + t * dt
                             if closed:
                                 tt %= 1.0
                             p = edge.point_at(tt)
-                            global_nodes[gidx] = np.array([p.x, p.y][: self.d])
+                            global_nodes[gidx] = np.array(list(p)[: self.d])
                         else:
-                            global_nodes[gidx] = (1.0 - t) * c0 + t * c1
+                            global_nodes[gidx] = (
+                                1.0 - t
+                            ) * c0.position + t * c1.position
 
             # Step 3: Project geometry-associated face nodes
             for assoc in self.associations:
@@ -743,6 +737,27 @@ class BlockTopology:
                 entity = assoc.entity
                 fixed = 0 if side == 0 else shape[axis] - 1
                 free_axes = [a for a in range(self.d) if a != axis]
+                # A 3D+ face is a (d-1)-manifold whose interior nodes are NaN
+                # until the volume TFI, so fill it from its already-set edges
+                # here (TFI over the face) before projecting them onto the entity.
+                if len(free_axes) >= 2:
+                    face_shape = tuple(shape[a] for a in free_axes)
+                    fnodes = np.full(face_shape + (self.d,), np.nan)
+                    fgidx = np.empty(face_shape, dtype=int)
+                    for fi in product(*[range(s) for s in face_shape]):
+                        logical = [0] * self.d
+                        logical[axis] = fixed
+                        for j, a in enumerate(free_axes):
+                            logical[a] = fi[j]
+                        g = int(dof_map[tuple(logical)])
+                        fgidx[fi] = g
+                        fnodes[fi] = global_nodes[g]
+                    fb = Block(fnodes)
+                    tfi_fill_interior(fb)
+                    for fi in product(*[range(s) for s in face_shape]):
+                        g = int(fgidx[fi])
+                        if np.any(np.isnan(global_nodes[g])):
+                            global_nodes[g] = fb.nodes[fi]
                 for free_idx in product(*[range(shape[a]) for a in free_axes]):
                     logical = [0] * self.d
                     logical[axis] = fixed

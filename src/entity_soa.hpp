@@ -113,8 +113,8 @@ template <class T> struct SegmentedView {
 template <class T> using SoAView = stdex::mdspan<T, stdex::dextents<std::size_t, 2>>;
 
 /// Max segmented (CSR) fields any EntitySoA<E> uses — sized for
-/// BSplineSurfaceParam (knots_u, knots_v, ctrl, weights).
-inline constexpr int kMaxSoASeg = 4;
+/// BSplineSurfaceParam (knots_u, knots_v, ctrl, weights, trim_verts, trim_loops).
+inline constexpr int kMaxSoASeg = 6;
 
 /// Per-entity SoA storage trait; specialize per entity type (see above).
 template <class E> struct EntitySoA;

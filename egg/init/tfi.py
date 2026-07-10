@@ -22,18 +22,14 @@ __all__ = ["tfi_fill_interior"]
 
 
 def tfi_fill_interior(block: Block) -> None:
-    """Fill all interior nodes of a block using d-dimensional TFI.
+    """Fill a block's non-corner nodes by transfinite interpolation.
 
-    Boundary nodes (corners, edges, faces) must already be set before calling.
-    The block.nodes array is modified in-place.
-
-    Uses the Boolean sum formula:
-        TFI = corner_interp + Σ_axis Σ_side w*(face_val - corner_interp_at_face)
-
-    Parameters
-    ----------
-    block : Block
-        Block whose interior nodes will be filled.
+    Works in any dimension. Nodes are filled by increasing facet dimension
+    (edges, then faces, then the volume), so each facet interpolates from an
+    already-filled boundary. Pre-set boundary nodes (corners, curved edges,
+    surface-projected faces) are kept; only NaN facet nodes are filled, while
+    the top-dimensional interior is always (re)computed. Modifies
+    ``block.nodes`` in place.
     """
     nodes = block.nodes
     d = block.d
@@ -41,72 +37,52 @@ def tfi_fill_interior(block: Block) -> None:
     if d == 0:
         return
 
-    # Only fill nodes strictly interior (not on any boundary)
-    for idx in product(*(range(1, s - 1) for s in shape)):
-        nodes[idx] = _tfi_point(nodes, idx, shape, d)
+    for k in range(1, d + 1):
+        for idx in product(*(range(s) for s in shape)):
+            interior = tuple(ax for ax in range(d) if 0 < idx[ax] < shape[ax] - 1)
+            if len(interior) != k:
+                continue
+            if k < d and not np.any(np.isnan(nodes[idx])):
+                continue
+            nodes[idx] = _tfi_point(nodes, idx, shape, interior)
 
 
-def _tfi_point(
-    nodes: np.ndarray, idx: tuple[int, ...], shape: tuple[int, ...], d: int
-) -> np.ndarray:
-    """Evaluate TFI at a single interior point."""
-    xi = np.array([i / (s - 1) for i, s in zip(idx, shape)], dtype=float)
-
-    # Base: multilinear corner interpolation
-    result = _corner_interp(nodes, xi, shape, d)
-
-    # Face corrections: for each axis, add weighted difference between
-    # the actual face node value and the corner interp evaluated at that face
-    for axis in range(d):
+def _tfi_point(nodes, idx, shape, interior):
+    """Boolean-sum TFI at ``idx`` over the facet spanned by the interior axes."""
+    xi = {ax: idx[ax] / (shape[ax] - 1) for ax in interior}
+    result = _corner_interp(nodes, idx, shape, interior, xi)
+    for ax in interior:
         for side in (0, 1):
-            fixed = 0 if side == 0 else shape[axis] - 1
-
-            # Face node value (from the already-filled boundary array)
+            fixed = 0 if side == 0 else shape[ax] - 1
             face_idx = list(idx)
-            face_idx[axis] = fixed
+            face_idx[ax] = fixed
             face_val = nodes[tuple(face_idx)]
 
-            # Corner interpolation evaluated with this axis fixed at side
-            xi_fixed = xi.copy()
-            xi_fixed[axis] = float(side)
-            corner_val = _corner_interp(nodes, xi_fixed, shape, d)
+            xi_face = dict(xi)
+            xi_face[ax] = float(side)
+            corner_val = _corner_interp(nodes, idx, shape, interior, xi_face)
 
-            w = (1.0 - xi[axis]) if side == 0 else xi[axis]
+            w = (1.0 - xi[ax]) if side == 0 else xi[ax]
             result = result + w * (face_val - corner_val)
-
     return result
 
 
-def _corner_interp(
-    nodes: np.ndarray, xi: np.ndarray, shape: tuple[int, ...], d: int
-) -> np.ndarray:
-    """Multilinear interpolation from the 2**d corner nodes.
+def _corner_interp(nodes, idx, shape, interior, xi):
+    """Multilinear blend of the ``2**len(interior)`` facet corners.
 
-    Parameters
-    ----------
-    nodes : ndarray
-        Shape (n_0, ..., n_{d-1}, spatial_dim).
-    xi : ndarray
-        Parametric coordinates in [0, 1] for each axis.
-    shape : tuple
-        Logical node counts per axis.
-    d : int
-        Spatial dimension.
-
-    Returns
-    -------
-    ndarray of shape (spatial_dim,)
+    Axes not in ``interior`` stay fixed at their value in ``idx``, so this
+    interpolates within the facet rather than the whole block.
     """
     result = np.zeros(nodes.shape[-1])
-    for offset in product((0, 1), repeat=d):
+    for offset in product((0, 1), repeat=len(interior)):
         weight = 1.0
-        corner_idx = [0] * d
-        for axis in range(d):
-            if offset[axis] == 0:
-                weight *= 1.0 - xi[axis]
-                corner_idx[axis] = 0
+        corner_idx = list(idx)
+        for bit, ax in zip(offset, interior):
+            if bit == 0:
+                weight *= 1.0 - xi[ax]
+                corner_idx[ax] = 0
             else:
-                weight *= xi[axis]
-                corner_idx[axis] = shape[axis] - 1
+                weight *= xi[ax]
+                corner_idx[ax] = shape[ax] - 1
         result = result + weight * nodes[tuple(corner_idx)]
     return result

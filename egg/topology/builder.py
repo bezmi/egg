@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from egg.geometry.frontend2d import Edge, Node, Vector3
+from egg.geometry.frontend2d import Edge, Node
 
 from .block_topology import (
     Association,
@@ -70,9 +70,10 @@ class TopologyBuilder:
         :class:`~egg.geometry.frontend2d.Edge`.
         """
         obj = None
-        if isinstance(position, Vector3):
+        if hasattr(position, "x") and hasattr(position, "y"):
             obj = position
-            position = (position.x, position.y, position.z)[: self._d]
+            coords = (position.x, position.y, getattr(position, "z", 0.0))
+            position = coords[: self._d]
         pos = np.asarray(position, dtype=float)
         if pos.shape != (self._d,):
             raise ValueError(
@@ -96,7 +97,7 @@ class TopologyBuilder:
             if corner not in self._corners:
                 raise ValueError(f"unknown corner '{corner}'")
             return corner
-        if isinstance(corner, Vector3):
+        if hasattr(corner, "x") and hasattr(corner, "y"):
             name = self._corner_ids.get(id(corner))
             if name is None:
                 k = len(self._corner_ids)

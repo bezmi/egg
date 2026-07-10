@@ -163,6 +163,39 @@ def section_edges(X0, edges, tol=1e-6):
     return out
 
 
+def surface_edges(edges, on_surface):
+    """Grid edges lying entirely on the cavity surface (both endpoints on it).
+
+    ``on_surface`` is a per-node boolean mask; membership is frozen from the
+    initial lattice, like the section edges, so live updates just re-read the
+    current node coordinates.
+    """
+    return [(u, v) for u, v in edges if on_surface[u] and on_surface[v]]
+
+
+def surface_faces(blocks, on_surface):
+    """Quad faces of every block boundary face lying entirely on the surface.
+
+    Returns an (n, 4) index array. Rendering these as an opaque mesh (rather
+    than chord lines over a backdrop sphere) keeps the wireframe exactly on the
+    surface, so the far side is occluded without lines dipping into a solid.
+    """
+    out = []
+    for ids in blocks:
+        for axis in range(3):
+            for side in (0, ids.shape[axis] - 1):
+                sl = [slice(None)] * 3
+                sl[axis] = side
+                face = ids[tuple(sl)]  # 2D (a, b)
+                if on_surface[face].all():
+                    q = np.stack(
+                        [face[:-1, :-1], face[1:, :-1], face[1:, 1:], face[:-1, 1:]],
+                        axis=-1,
+                    ).reshape(-1, 4)
+                    out.append(q)
+    return np.concatenate(out, 0) if out else np.empty((0, 4), dtype=int)
+
+
 def plot_topology(X, blocks, r0):
     """PyVista view of the declared block topology, one colour per block.
 
@@ -209,10 +242,14 @@ class GridPlots:
 
     The section panes render the (frozen) section edges as 3D line meshes
     viewed along the plane normal with parallel projection; live updates just
-    swap the shared point array in place, so redraws stay cheap.
+    swap the shared point array in place, so redraws stay cheap. The 3D pane
+    shows the sphere-surface mesh as an opaque quad surface with its edges
+    (``surf_faces``), so the far side is occluded and no line dips into a solid.
     """
 
-    def __init__(self, X, sections, edges, plot3d, off_screen=False):
+    def __init__(
+        self, X, sections, surf_edges, plot3d, surf_faces=None, off_screen=False
+    ):
         import pyvista as pv
 
         self._pv = pv
@@ -233,10 +270,25 @@ class GridPlots:
             self.meshes.append(mesh)
         if plot3d:
             self.plotter.subplot(0, n_panes - 1)
-            mesh = self._lines(X, edges)
-            self.plotter.add_mesh(mesh, color="blue", line_width=1)
-            self.plotter.add_text("3D", font_size=10)
+            mesh = (
+                self._surface(X, surf_faces)
+                if surf_faces is not None and len(surf_faces)
+                else self._lines(X, surf_edges)
+            )
+            self.plotter.add_mesh(
+                mesh,
+                color="lightgray",
+                show_edges=True,
+                edge_color="blue",
+                line_width=1,
+            )
+            self.plotter.add_text("sphere surface", font_size=10)
             self.meshes.append(mesh)
+
+    def _surface(self, X, quads):
+        q = np.asarray(quads, dtype=np.int64)
+        cells = np.hstack([np.full((len(q), 1), 4, dtype=np.int64), q]).ravel()
+        return self._pv.PolyData(np.asarray(X, dtype=float).copy(), faces=cells)
 
     def _lines(self, X, edge_list):
         e = np.asarray(edge_list, dtype=np.int64)
@@ -427,6 +479,9 @@ def main_sphere_in_cube(setup, banner):
     ctx = setup.build_context(X, blocks, dof_entities, tags, fixed)
     edges = grid_edges(blocks)
     sections = section_edges(X, edges)
+    on_sphere = tags == TAG_SPHERE
+    surf_edges = surface_edges(edges, on_sphere)  # fallback line pane
+    surf_faces = surface_faces(blocks, on_sphere)  # opaque sphere-surface 3D pane
     n_sphere = int((tags == TAG_SPHERE).sum())
     print(
         f"nodes={X.shape[0]} sphere={n_sphere} "
@@ -450,7 +505,7 @@ def main_sphere_in_cube(setup, banner):
 
     live = None
     if a.plot_live:
-        live = GridPlots(X, sections, edges, a.plot_3d)
+        live = GridPlots(X, sections, surf_edges, a.plot_3d, surf_faces=surf_faces)
         live.open_live()
 
     def on_chunk(_done):
@@ -479,7 +534,7 @@ def main_sphere_in_cube(setup, banner):
     # reported (above) rather than asserted, keeping the fp32 run's plots viewable.
 
     if a.plot_grid:
-        GridPlots(X_out, sections, edges, a.plot_3d).show()
+        GridPlots(X_out, sections, surf_edges, a.plot_3d, surf_faces=surf_faces).show()
     if a.plot_energy:
         _plot_energy(energies, mindets)
 

@@ -31,6 +31,10 @@ egg-webui = "egg._webui_launcher:main"
 webui = [
   "python-fasthtml>=0.12",
 ]
+# CAD import adapter (egg.io.cad): `uv sync --group cad`
+cad = [
+  "build123d>=0.7",
+]
 # Docs build: `uv run --group docs sphinx-build -b html docs docs/_build/html`
 docs = [
   "sphinx>=8.2",
