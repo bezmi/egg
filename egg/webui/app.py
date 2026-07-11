@@ -123,6 +123,10 @@ AXES_SVG = _static("axes.svg")
 
 CSS = _static("app.css")
 
+# Catppuccin theme for the prism editor (token colors + chrome), driven off the
+# same --ctp-* variables as the rest of the UI so it re-themes with the flavor.
+CATPPUCCIN = _static("catppuccin.css")
+
 # Tab key in the editor; viewBox-based pan/zoom on the SVG (kept across
 # HTMX swaps once the user has interacted, reset by the fit button);
 # layer visibility toggles; example loader.
@@ -155,6 +159,7 @@ app, rt = fast_app(
     hdrs=(
         *(Link(rel="stylesheet", href=f"/vendor/{c}") for c in _PCE_CSS),
         Style(CSS),
+        Style(CATPPUCCIN),
         Script(src=_SPLIT_SRC),
         Script(JS),
         Script(EDITOR_JS, type="module"),
@@ -162,6 +167,7 @@ app, rt = fast_app(
 )
 
 mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("text/javascript", ".js")
 # Insert FIRST: fasthtml's built-in root static route matches any path with a
 # known extension (including .js) and would 404 /vendor/*.js before a
 # normally-appended mount is ever consulted.
