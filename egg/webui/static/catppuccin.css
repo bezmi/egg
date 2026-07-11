@@ -91,8 +91,8 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ctp-overlay1) 60%, transparent),
               inset 0 0 0 9in color-mix(in srgb, var(--ctp-overlay1) 40%, transparent); }
 
-/* --- egg's own LSP overlays --- */
-.pce-hover-tip {
+/* diagnostic-message tooltip (hover over an error squiggle) */
+.pce-diag-tip {
   background: var(--ctp-mantle); color: var(--ctp-text);
-  border: 1px solid var(--ctp-surface1);
+  border: 1px solid var(--ctp-red);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); }

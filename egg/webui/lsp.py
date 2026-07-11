@@ -63,18 +63,21 @@ def lsp_available() -> bool:
 def _analysis_settings() -> dict:
     return {
         "autoImportCompletions": True,
+        "completeFunctionParens": True,  # callables complete as `f(…)` snippets
         "diagnosticMode": "openFilesOnly",
         "typeCheckingMode": "basic",
     }
 
 
 def _config_for(section: str | None) -> dict:
-    """Answer a ``workspace/configuration`` item for the given section."""
+    """Answer a ``workspace/configuration`` item for the given section. pyright
+    pulls ``python`` (interpreter + analysis), ``basedpyright`` and
+    ``basedpyright.analysis`` — each wants the value AT that section."""
     if section in (None, "", "python"):
         return {"pythonPath": sys.executable, "analysis": _analysis_settings()}
-    if section == "python.analysis":
+    if section in ("python.analysis", "basedpyright.analysis"):
         return _analysis_settings()
-    if section in ("basedpyright", "basedpyright.analysis"):
+    if section == "basedpyright":
         return {"analysis": _analysis_settings()}
     return {}
 

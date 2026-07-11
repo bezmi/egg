@@ -607,6 +607,8 @@ function setFile(path, savedCode) {
 function setScriptPath(path) {
   document.getElementById('scriptpath').value = path || '';
   localStorage.setItem('egg-webui-path', path || '');
+  // Let the editor re-home the language server on the new file's directory.
+  window.dispatchEvent(new Event('egg-scriptpath'));
 }
 function updateChip(flash) {
   const c = document.getElementById('filechip');

@@ -110,9 +110,9 @@ try {
 
   // ---- based-pyright language features over the /lsp websocket ----
   // completions (async LSP bridged into prism's synchronous source via a cache
-  // + startQuery), diagnostics (squiggle overlay), and hover (type tooltip).
-  // Degrades silently: if the server has no language server, egg/unavailable
-  // arrives and the static /api/completions source above stays in effect.
+  // + startQuery, with snippet support) and diagnostics (errors-only squiggle
+  // overlay). Degrades silently: if the server has no language server,
+  // egg/unavailable arrives and the static /api/completions source stays.
   (() => {
     let sock;
     try {
@@ -132,7 +132,7 @@ try {
       sock.send(JSON.stringify({jsonrpc: '2.0', method, params}));
 
     // Push the current buffer to the server. Called debounced from edits, and
-    // flushed synchronously right before a completion/hover query so the server
+    // flushed synchronously right before a completion query so the server
     // never answers against a stale document.
     let lastSynced = null;
     const syncDoc = () => {
@@ -160,6 +160,33 @@ try {
       return {line, character: off - last};
     };
 
+    // LSP snippet ($1, ${1:name}, $0) -> prism {insert, tabStops}. Tab stops
+    // are byte offsets into the inserted text (even = start, odd = end).
+    const fromSnippet = (text) => {
+      const re = /\$(\d+)|\$\{(\d+):((?:[^\\}]|\\.)*)\}|\$\{(\d+)\}/g;
+      let out = '', stops = [], last = 0, m;
+      while ((m = re.exec(text))) {
+        out += text.slice(last, m.index);
+        const ph = (m[3] || '').replace(/\\(.)/g, '$1');
+        stops.push(out.length, out.length + ph.length);
+        out += ph;
+        last = re.lastIndex;
+      }
+      out += text.slice(last).replace(/\\(.)/g, '$1');
+      return {insert: out, tabStops: stops.length ? stops : undefined};
+    };
+    // LSP CompletionItem -> prism Completion (with snippet support).
+    const toPrism = (it) => {
+      const o = {label: it.label, icon: KIND[it.kind] || 'variable',
+        detail: (it.detail || (it.labelDetails && it.labelDetails.description) || '').slice(0, 64)};
+      const raw = (it.textEdit && it.textEdit.newText) || it.insertText;
+      if (raw) {
+        if (it.insertTextFormat === 2) Object.assign(o, fromSnippet(raw));
+        else o.insert = raw;
+      }
+      return o;
+    };
+
     // Completions: a synchronous prism source backed by a cache. On a miss it
     // fires an async LSP query; when that resolves it fills the cache and
     // reopens the completion window (startQuery), so the same source now hits.
@@ -184,11 +211,7 @@ try {
       const list = Array.isArray(res) ? res : (res.items || []);
       const m = /[A-Za-z_][\w]*$/.exec(ctx.lineBefore);
       const from = ctx.pos - (m ? m[0].length : 0);
-      cache = {pos: ctx.pos, from, options: list.slice(0, 200).map((it) => ({
-        label: it.label,
-        icon: KIND[it.kind] || 'variable',
-        detail: (it.detail || (it.labelDetails && it.labelDetails.description) || '').slice(0, 64),
-      }))};
+      cache = {pos: ctx.pos, from, options: list.slice(0, 200).map(toPrism)};
       const q = editor.extensions.autoComplete;
       if (q && cache.options.length) q.startQuery(ctx.explicit);
     }
@@ -241,61 +264,49 @@ try {
         raf = requestAnimationFrame(renderDiagnostics);
       }).observe(editor.wrapper);
     }
+
+    // Diagnostic hover: show the error message(s) when the pointer is over a
+    // squiggle. Purely local (no LSP round-trip), so it never gets stuck.
     const inRange = (r, p) =>
       (p.line > r.start.line || (p.line === r.start.line && p.character >= r.start.character)) &&
       (p.line < r.end.line || (p.line === r.end.line && p.character <= r.end.character));
-
-    // Hover: pointer -> line/col -> LSP hover, plus any diagnostic message here.
     const tip = document.createElement('div');
-    tip.className = 'pce-hover-tip';
-    tip.style.cssText = 'position:fixed;z-index:30;display:none;max-width:540px;max-height:340px;' +
-      'overflow:auto;padding:6px 9px;border-radius:6px;white-space:pre-wrap;pointer-events:none;' +
+    tip.className = 'pce-diag-tip';
+    tip.style.cssText = 'position:fixed;z-index:30;display:none;max-width:520px;' +
+      'padding:5px 8px;border-radius:6px;white-space:pre-wrap;pointer-events:none;' +
       'font:12px/1.5 ui-monospace,monospace;';
     document.body.appendChild(tip);
     const hideTip = () => { tip.style.display = 'none'; };
-    // Map a viewport point to an LSP position. prism lays a transparent
-    // <textarea> over the content (it owns pointer events), so caretFromPoint
-    // can't reach the tokens — instead locate the line by its rect and the
-    // column by monospace metrics.
+    // Map a viewport point to a line/col. prism overlays a transparent
+    // <textarea> that owns pointer events, so find the line by its rect and the
+    // column by (monospace) metrics rather than caretFromPoint.
     const locate = (x, y) => {
-      const lines = editor.lines;
       const lineText = editor.value.split('\n');
-      for (let i = 1; i < lines.length; i++) {
-        const r = lines[i].getBoundingClientRect();
+      for (let i = 1; i < editor.lines.length; i++) {
+        const r = editor.lines[i].getBoundingClientRect();
         if (y >= r.top && y < r.bottom) {
           const {cw, padL} = metrics();
           const col = Math.round((x - (r.left + padL)) / cw);
-          if (col < 0) return null;
-          return {line: i - 1, character: Math.min(col, (lineText[i - 1] || '').length)};
+          return col < 0 ? null
+            : {line: i - 1, character: Math.min(col, (lineText[i - 1] || '').length)};
         }
       }
       return null;
     };
-    const hoverText = (c) => {
-      const one = (x) => (typeof x === 'string' ? x : (x && x.value) || '');
-      const t = Array.isArray(c) ? c.map(one).join('\n\n') : one(c);
-      return t.replace(/```[\w-]*\n?/g, '').trim();
-    };
     let hoverTimer;
     editor.container.addEventListener('mousemove', (e) => {
       clearTimeout(hoverTimer);
-      if (!ready) { hideTip(); return; }
       const x = e.clientX, y = e.clientY;
-      hoverTimer = setTimeout(async () => {
+      hoverTimer = setTimeout(() => {
         const lc = locate(x, y);
-        if (!lc) { hideTip(); return; }
-        syncDoc();
-        const dmsgs = diagnostics.filter((d) => inRange(d.range, lc)).map((d) => d.message);
-        const r = await rpc('textDocument/hover', {textDocument: {uri: docUri}, position: lc});
-        const hv = r && r.result;
-        const body = [...dmsgs, hv && hv.contents ? hoverText(hv.contents) : '']
-          .filter(Boolean).join('\n\n');
-        if (!body) { hideTip(); return; }
-        tip.textContent = body;
-        tip.style.left = Math.min(x + 12, innerWidth - 550) + 'px';
+        const msgs = lc
+          ? diagnostics.filter((d) => inRange(d.range, lc)).map((d) => d.message) : [];
+        if (!msgs.length) { hideTip(); return; }
+        tip.textContent = msgs.join('\n\n');
+        tip.style.left = Math.min(x + 12, innerWidth - 530) + 'px';
         tip.style.top = (y + 16) + 'px';
         tip.style.display = 'block';
-      }, 180);
+      }, 120);
     });
     editor.container.addEventListener('mouseleave', hideTip);
 
@@ -313,24 +324,48 @@ try {
     };
     sock.onclose = () => { ready = false; };
 
+    // The LSP document is the open file at its on-disk path (#scriptpath, set by
+    // app.js), so pyright resolves sibling imports (`from driver import ...`)
+    // against the file's own directory. Falls back to the server's scratch
+    // workspace for an unsaved/pathless buffer. NB: do NOT advertise the
+    // workspaceFolders capability — with it, pyright waits on per-folder config
+    // and never publishes diagnostics.
+    let scratch = null;
+    const pathToUri = (p) => 'file://' + encodeURI(p).replace(/#/g, '%23');
+    const resolveUri = () => {
+      const el = document.getElementById('scriptpath');
+      const p = el && el.value;
+      return p ? pathToUri(p) : scratch.docUri;
+    };
+
+    function openDoc() {
+      lastSynced = editor.value;
+      version++;
+      notify('textDocument/didOpen', {textDocument:
+        {uri: docUri, languageId: 'python', version, text: lastSynced}});
+    }
+
     async function initLsp(p) {
-      docUri = p.docUri;
+      scratch = {docUri: p.docUri, rootUri: p.rootUri};
+      docUri = resolveUri();
       await rpc('initialize', {
         processId: null,
         rootUri: p.rootUri,
-        workspaceFolders: [{uri: p.rootUri, name: 'egg'}],
-        capabilities: {textDocument: {
-          synchronization: {},
-          publishDiagnostics: {},
-          completion: {completionItem: {labelDetailsSupport: true,
-            documentationFormat: ['markdown', 'plaintext']}, contextSupport: true},
-          hover: {contentFormat: ['markdown', 'plaintext']},
-        }},
+        // configuration: true lets pyright pull our settings (interpreter,
+        // completeFunctionParens). NOT workspaceFolders — that one makes
+        // pyright wait on per-folder config and never publish diagnostics.
+        capabilities: {
+          workspace: {configuration: true},
+          textDocument: {
+            synchronization: {},
+            publishDiagnostics: {},
+            completion: {completionItem: {snippetSupport: true, labelDetailsSupport: true,
+              documentationFormat: ['markdown', 'plaintext']}, contextSupport: true},
+          },
+        },
       });
       notify('initialized', {});
-      lastSynced = editor.value;
-      notify('textDocument/didOpen', {textDocument:
-        {uri: docUri, languageId: 'python', version, text: lastSynced}});
+      openDoc();
       ready = true;
       // LSP source first, static introspected list as fallback.
       ac.registerCompletions(['python'], {sources: [source, listSource]});
@@ -339,6 +374,19 @@ try {
         renderDiagnostics();  // keep existing squiggles aligned as text reflows
         clearTimeout(changeTimer);
         changeTimer = setTimeout(syncDoc, 250);  // push edits for fresh diagnostics
+      });
+      // Re-home the LSP on the new file when the open file changes (app.js
+      // dispatches this from setScriptPath), so its directory resolves imports.
+      window.addEventListener('egg-scriptpath', () => {
+        if (!ready) return;
+        const uri = resolveUri();
+        if (uri === docUri) return;
+        notify('textDocument/didClose', {textDocument: {uri: docUri}});
+        docUri = uri;
+        openDoc();
+        cache = null;
+        diagnostics = [];
+        renderDiagnostics();
       });
     }
   })();
