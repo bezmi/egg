@@ -30,5 +30,6 @@ docs/_doxygen/
 # fasthtml session key (webui prototype, created at runtime)
 .sesskey
 
-# downloaded browser deps (webui/vendor.py)
-webui/static/vendor/
+# web UI assets generated at build time (tools/vendor_webui.py); never committed
+egg/webui/static/vendor/
+egg/webui/docs/

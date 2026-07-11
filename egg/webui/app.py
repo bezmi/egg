@@ -49,7 +49,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
 
-from .vendor import VENDOR_DIR, ensure_vendor
+from ._assets import MISSING_MSG, VENDOR_DIR, vendor_ready
 
 from fasthtml.common import (
     A,
@@ -126,21 +126,20 @@ CSS = _static("app.css")
 # layer visibility toggles; example loader.
 JS = _static("app.js")
 
-# CodeMirror 6 editor upgrade, loaded as ES modules from esm.sh. Entirely
-# optional: if the CDN is unreachable the plain textarea keeps working
-# (syntax highlighting and completion are the only loss). Completions come
-# from /api/completions — introspected from the real egg API — layered on
-# lang-python's builtin global/local completion.
+# prism-code-editor upgrade, loaded as ES modules from the local /vendor
+# mount (never a CDN). Completions come from based-pyright over /lsp, with
+# the introspected /api/completions list as a fallback source.
 EDITOR_JS = _static("editor.js")
 
-# Vendored browser deps (offline serving): download if missing, mount the
-# static dir, and prefer local files with a CDN fallback for split.js.
-_VENDORED = ensure_vendor()
-_SPLIT_SRC = (
-    "/vendor/split.min.js"
-    if _VENDORED
-    else "https://cdn.jsdelivr.net/npm/split.js@1.6.5/dist/split.min.js"
-)
+# All browser assets are served locally from /vendor (no CDN fallback, by
+# design). They are produced offline by tools/vendor_webui.py — at wheel-build
+# time, or via `egg-webui --dev` in a checkout. If they are absent there is no
+# safe way to serve the UI, so fail fast with an actionable message rather than
+# reaching out to the network.
+if not vendor_ready():
+    raise SystemExit(MISSING_MSG)
+
+_SPLIT_SRC = "/vendor/split.min.js"
 
 app, rt = fast_app(
     pico=False,
@@ -154,17 +153,24 @@ app, rt = fast_app(
 )
 
 mimetypes.add_type("text/javascript", ".mjs")
-if VENDOR_DIR.is_dir():
-    # Insert FIRST: fasthtml's built-in root static route matches any path
-    # with a known extension (including .js) and would 404 /vendor/*.js
-    # before a normally-appended mount is ever consulted.
-    app.router.routes.insert(
-        0, Mount("/vendor", app=StaticFiles(directory=VENDOR_DIR), name="vendor")
-    )
+# Insert FIRST: fasthtml's built-in root static route matches any path with a
+# known extension (including .js) and would 404 /vendor/*.js before a
+# normally-appended mount is ever consulted.
+app.router.routes.insert(
+    0, Mount("/vendor", app=StaticFiles(directory=VENDOR_DIR), name="vendor")
+)
 
-# The Sphinx site, when built (egg-webui refreshes it at startup; also
+# The Sphinx site. In an installed wheel it ships under egg/webui/docs
+# (built at wheel time by tools/vendor_webui.py --docs). In a checkout it is
+# whatever `egg-webui` refreshed into docs/_build/html at startup (also
 # `uv run --group docs sphinx-build -b html docs docs/_build/html`).
-DOCS_DIR = _REPO_ROOT / "docs" / "_build" / "html" if _REPO_ROOT else None
+_PACKAGED_DOCS = _STATIC.parent / "docs"
+if _PACKAGED_DOCS.is_dir():
+    DOCS_DIR = _PACKAGED_DOCS
+elif _REPO_ROOT:
+    DOCS_DIR = _REPO_ROOT / "docs" / "_build" / "html"
+else:
+    DOCS_DIR = None
 if DOCS_DIR and DOCS_DIR.is_dir():
     app.router.routes.insert(
         0, Mount("/docs", app=StaticFiles(directory=DOCS_DIR, html=True), name="docs")

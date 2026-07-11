@@ -36,6 +36,31 @@ def _find_repo_root(start: Path) -> Path | None:
     return None
 
 
+def _ensure_assets(repo: Path | None, dev: bool) -> None:
+    """Make sure the vendored browser assets are present before serving.
+
+    In ``--dev`` (source checkout), run the out-of-tree vendoring tool to
+    download them if missing. Otherwise, the assets must already be on disk
+    (shipped in the wheel, or vendored earlier by ``--dev``) — if not, exit
+    with an actionable message rather than reaching out to a CDN at runtime.
+    """
+    from egg.webui._assets import MISSING_MSG, vendor_ready
+
+    if vendor_ready():
+        return
+    if dev and repo is not None:
+        script = repo / "tools" / "vendor_webui.py"
+        print("egg-webui: vendoring browser assets (needs internet)…", flush=True)
+        r = subprocess.run([sys.executable, str(script)])
+        if r.returncode != 0 or not vendor_ready():
+            raise SystemExit(
+                "egg-webui: vendoring failed — cannot start without the "
+                "browser assets (are you online?)"
+            )
+        return
+    raise SystemExit(MISSING_MSG)
+
+
 def _build_docs(repo: Path) -> None:
     """Best-effort docs refresh: the UI serves ``docs/_build/html`` when it
     exists (help → documentation). Missing sphinx (docs group) or doxygen
@@ -74,8 +99,15 @@ def main() -> None:
     p.add_argument(
         "--reload",
         action="store_true",
-        help="dev mode: restart on edits to webui/ or egg/ (drops websocket "
+        help="dev mode: restart on edits to egg/ (drops websocket "
         "connections and any in-flight run)",
+    )
+    p.add_argument(
+        "--dev",
+        action="store_true",
+        help="developer mode (source checkout only): vendor the browser "
+        "assets if missing, and enable --reload. Not available from an "
+        "installed wheel, which already ships the assets.",
     )
     p.add_argument(
         "--no-docs",
@@ -93,6 +125,19 @@ def main() -> None:
 
     if a.watch and not a.script:
         p.error("--watch needs a script to watch (pass its path)")
+
+    # --dev is a source-checkout affordance: it invokes the out-of-tree
+    # vendoring tool (which does not ship in the wheel). Reject it in a
+    # packaged install rather than silently ignoring it.
+    if a.dev:
+        if repo is None:
+            p.error(
+                "--dev is only available from a source checkout; an installed "
+                "wheel already ships the vendored browser assets"
+            )
+        a.reload = True
+
+    _ensure_assets(repo, dev=a.dev)
 
     # Docs are a checkout-only feature (docs/ isn't shipped in the wheel).
     if repo is not None and not a.no_docs:
