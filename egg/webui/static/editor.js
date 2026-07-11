@@ -430,6 +430,95 @@ try {
     });
     editor.container.addEventListener('mouseleave', hideTip);
 
+    // signatureHelp: a parameter-hint popup shown while the cursor sits inside a
+    // call's parens. This is how constructor/dataclass fields surface — pyright
+    // renders a class completion as `class Name()` (no params), but signatureHelp
+    // inside `Name(…)` returns the full field list. Works for functions too.
+    // Keyed off cursor position, so it needs no completion-accept hook.
+    const sigTip = document.createElement('div');
+    sigTip.className = 'pce-sig-tip';
+    sigTip.style.cssText = 'position:fixed;z-index:29;display:none;max-width:640px;' +
+      'padding:5px 9px;border-radius:6px;white-space:pre-wrap;' +
+      'font:12px/1.5 ui-monospace,monospace;';
+    document.body.appendChild(sigTip);
+    const hideSig = () => { sigTip.style.display = 'none'; };
+    // Cheap client-side gate: only ask the server when there's an unclosed '('
+    // before the cursor (bounded look-back), so ordinary cursor moves don't spam
+    // signatureHelp requests. False positives (grouping parens) just yield an
+    // empty result and hide.
+    const insideCall = (value, pos) => {
+      let depth = 0;
+      for (let i = pos - 1, n = Math.max(0, pos - 5000); i >= n; i--) {
+        const c = value[i];
+        if (c === ')' || c === ']' || c === '}') depth++;
+        else if (c === '[' || c === '{') depth = Math.max(0, depth - 1);
+        else if (c === '(') { if (depth) depth--; else return true; }
+      }
+      return false;
+    };
+    const renderSig = (sig, active) => {
+      sigTip.textContent = '';
+      const label = sig.label || '';
+      const p = (sig.parameters || [])[active];
+      let a = 0, b = 0;
+      if (p) {
+        if (Array.isArray(p.label)) [a, b] = p.label;
+        else { const i = label.indexOf(p.label); if (i >= 0) { a = i; b = i + p.label.length; } }
+      }
+      const seg = (text, cls) => {
+        const s = document.createElement('span');
+        s.textContent = text;
+        if (cls) s.className = cls;
+        sigTip.appendChild(s);
+      };
+      if (b > a) { seg(label.slice(0, a)); seg(label.slice(a, b), 'pce-sig-active'); seg(label.slice(b)); }
+      else seg(label);
+    };
+    const placeSig = (pos) => {
+      const {line, character} = offsetToLC(editor.value, pos);
+      const el = editor.lines[line + 1];
+      if (!el) { hideSig(); return; }
+      const r = el.getBoundingClientRect();
+      const {cw, padL} = metrics();
+      const x = r.left + padL + character * cw;
+      sigTip.style.display = 'block';
+      sigTip.style.left = Math.max(4, Math.min(x, innerWidth - sigTip.offsetWidth - 8)) + 'px';
+      const above = r.top - sigTip.offsetHeight - 6;
+      sigTip.style.top = (above >= 4 ? above : r.bottom + 6) + 'px';
+    };
+    let sigTimer, sigReq = -1;
+    const updateSig = () => {
+      if (!ready) { hideSig(); return; }
+      const pos = editor.getSelection()[1];
+      if (!insideCall(editor.value, pos)) { hideSig(); return; }
+      sigReq = pos;
+      syncDoc();  // pyright must see the current buffer
+      rpc('textDocument/signatureHelp', {
+        textDocument: {uri: docUri},
+        position: offsetToLC(editor.value, pos),
+        context: {triggerKind: 1, isRetrigger: false},
+      }).then((r) => {
+        if (editor.getSelection()[1] !== sigReq) return;  // cursor moved; stale
+        const res = r && r.result;
+        const sigs = res && res.signatures;
+        if (!sigs || !sigs.length) { hideSig(); return; }
+        const si = res.activeSignature || 0;
+        const sig = sigs[si] || sigs[0];
+        const active = sig.activeParameter != null ? sig.activeParameter
+          : (res.activeParameter || 0);
+        renderSig(sig, active);
+        placeSig(pos);
+      });
+    };
+    editor.on('selectionChange', () => {
+      clearTimeout(sigTimer);
+      sigTimer = setTimeout(updateSig, 120);
+    });
+    editor.textarea.addEventListener('blur', hideSig);
+    editor.textarea.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') hideSig();
+    });
+
     sock.onmessage = (ev) => {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
@@ -481,6 +570,8 @@ try {
             publishDiagnostics: {},
             completion: {completionItem: {snippetSupport: true, labelDetailsSupport: true,
               documentationFormat: ['markdown', 'plaintext']}, contextSupport: true},
+            signatureHelp: {signatureInformation: {
+              parameterInformation: {labelOffsetSupport: true}, activeParameterSupport: true}},
           },
         },
       });

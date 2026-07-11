@@ -96,3 +96,11 @@
   background: var(--ctp-mantle); color: var(--ctp-text);
   border: 1px solid var(--ctp-red);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); }
+
+/* signature-help tooltip (parameter hints while inside a call's parens) */
+.pce-sig-tip {
+  background: var(--ctp-mantle); color: var(--ctp-subtext0);
+  border: 1px solid var(--ctp-surface2);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); }
+.pce-sig-tip .pce-sig-active {
+  color: var(--ctp-yellow); font-weight: 700; }
