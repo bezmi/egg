@@ -28,7 +28,10 @@ function setTheme(name) {
   eggTheme = name;
   document.documentElement.dataset.theme = name;
   localStorage.setItem('egg-webui-theme', name);
-  window.dispatchEvent(new Event('egg-theme'));  // CodeMirror re-themes
+  // The editor re-themes automatically: catppuccin.css drives it off the live
+  // --ctp-* variables, which switch with data-theme. The event stays for any
+  // other listeners.
+  window.dispatchEvent(new Event('egg-theme'));
 }
 window.addEventListener('DOMContentLoaded', () => {
   const sel = document.getElementById('theme-select');
@@ -38,7 +41,9 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Tab' && e.target.matches('.editor textarea')) {
+  // Tab-to-indent only for the plain-textarea fallback; when prism-code-editor
+  // is active its editorCommands extension owns Tab (and its own textarea).
+  if (e.key === 'Tab' && !window.eggEditor && e.target.matches('.editor textarea')) {
     e.preventDefault();
     const t = e.target, s = t.selectionStart;
     t.setRangeText('    ', s, t.selectionEnd, 'end');
@@ -182,7 +187,8 @@ function setEdFont(px) {
   edFont = Math.min(28, Math.max(8, px));
   document.documentElement.style.setProperty('--egg-edfont', edFont.toFixed(1) + 'px');
   localStorage.setItem('egg-webui-edfont', edFont.toFixed(1));
-  if (window.eggEditor) window.eggEditor.requestMeasure();
+  // prism-code-editor reflows from CSS (font-size on .prism-code-editor), so
+  // a font-zoom needs no explicit remeasure.
 }
 window.addEventListener('DOMContentLoaded', () => setEdFont(edFont));
 document.addEventListener('wheel', (e) => {
@@ -384,31 +390,15 @@ function applyView() {
   eggEditInit();  // edit view: (re)build the wireframe overlay + draw tools
 }
 // Single entry point for programmatic code changes (examples, restore,
-// param-panel rewrites). Routes through the CodeMirror editor when it took
-// over, else the textarea; both paths end in an 'input' event on the
-// textarea, which drives the HTMX render trigger and localStorage
-// persistence. The cursor survives the full-document replace (clamped to
-// the new length) — a param edit must not fling the editor to the top.
+// param-panel rewrites). Routes through the editor when it took over (which
+// mirrors back into the textarea and fires 'input'), else the textarea
+// directly; both paths end in an 'input' event that drives the HTMX render
+// trigger and localStorage persistence. The cursor survives the replace — a
+// param edit must not fling the editor to the top (eggEditorApi.setValue does
+// a minimal-diff edit).
 window.eggSetCode = (code) => {
-  const v = window.eggEditor;
-  if (v) {
-    const old = v.state.doc.toString();
-    if (old === code) return;
-    // Replace only the differing middle, not the whole document. A param
-    // edit rewrites one value's span, so old and code share a long common
-    // prefix and suffix; dispatching just the changed slice lets CodeMirror
-    // map the selection and scroll through a tiny edit instead of re-laying-
-    // out every line (a full replace nondeterministically snaps to the top).
-    let a = 0;
-    const n = Math.min(old.length, code.length);
-    while (a < n && old.charCodeAt(a) === code.charCodeAt(a)) a++;
-    let b = 0;
-    while (b < n - a &&
-           old.charCodeAt(old.length - 1 - b) === code.charCodeAt(code.length - 1 - b))
-      b++;
-    v.dispatch({
-      changes: {from: a, to: old.length - b, insert: code.slice(a, code.length - b)},
-    });
+  if (window.eggEditorApi) {
+    window.eggEditorApi.setValue(code);
   } else {
     const t = document.querySelector('.editor textarea');
     const cur = Math.min(t.selectionStart || 0, code.length);
@@ -482,12 +472,8 @@ document.addEventListener('click', (e) => {
   const chip = e.target.closest('.errline');
   if (!chip) return;
   const line = +chip.dataset.line;
-  const v = window.eggEditor;
-  if (v) {
-    const doc = v.state.doc;
-    const l = doc.line(Math.max(1, Math.min(line, doc.lines)));
-    v.dispatch({selection: {anchor: l.from, head: l.to}, scrollIntoView: true});
-    v.focus();
+  if (window.eggEditorApi) {
+    window.eggEditorApi.gotoLine(line);
     return;
   }
   const t = document.querySelector('.editor textarea');
@@ -583,8 +569,9 @@ const baseOf = (p) => p.slice(p.lastIndexOf('/') + 1);
 const dirOf = (p) => p.slice(0, Math.max(1, p.lastIndexOf('/')));
 const joinP = (d, n) => d + (d.endsWith('/') ? '' : '/') + n;
 const currentCode = () => {
-  const v = window.eggEditor;
-  return v ? v.state.doc.toString() : document.querySelector('.editor textarea').value;
+  return window.eggEditorApi
+    ? window.eggEditorApi.getValue()
+    : document.querySelector('.editor textarea').value;
 };
 function setFile(path, savedCode) {
   curFile = path; lastSaved = savedCode;

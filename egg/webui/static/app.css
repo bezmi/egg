@@ -175,12 +175,15 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
   border-radius: 5px; font: inherit; }
 .panes { flex: 1; display: flex; min-height: 0; }
 /* Static 42/58 fallback; Split.js (when loaded) takes over the sizing. */
+/* egg mark in the header; tinted by the flavor and re-themes for free */
+.egg-logo { color: var(--ctp-yellow); display: block; }
+
 .editor { width: 42%; display: flex; min-width: 0; }
 /* pan-x pan-y: keep one-finger scrolling native but claim two-finger
    pinch (font zoom) for our pointer handlers */
-.editor, .editor textarea, .editor .cm-scroller, .editor .cm-content {
+.editor, .editor > textarea, .editor .prism-code-editor {
   touch-action: pan-x pan-y; }
-.editor textarea, .editor .cm-scroller {
+.editor > textarea, .editor .prism-code-editor {
   font-size: var(--egg-edfont, 13px) !important; }
 .panes.split-active .editor, .panes.split-active .viewer { flex: none; }
 /* Split.js gutter (created at runtime); ::after widens the touch target,
@@ -215,13 +218,15 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
   .panes { flex-direction: column; }
   .editor { width: auto; height: 42%; }
 }
-.editor textarea { flex: 1; border: 0; outline: none; resize: none;
+.editor > textarea { flex: 1; border: 0; outline: none; resize: none;
                    padding: 10px; font: 13px/1.45 ui-monospace, monospace;
                    background: var(--ctp-base); color: var(--ctp-text); tab-size: 4; }
-.editor.cm-active textarea { display: none; }
-.editor .cm-editor { flex: 1; min-width: 0; background: var(--ctp-base); }
-.editor .cm-editor.cm-focused { outline: none; }
-.editor .cm-scroller { font: 13px/1.45 ui-monospace, monospace; }
+/* once prism-code-editor mounts, hide the (mirrored) server textarea; its
+   sibling hidden path input is untouched by the child combinator */
+.editor.pce-active > textarea { display: none; }
+.editor .prism-code-editor { flex: 1; min-width: 0; outline: none;
+                             background: var(--ctp-base);
+                             font: 13px/1.45 ui-monospace, monospace; }
 .viewer { flex: 1; display: flex; flex-direction: column; min-width: 0;
           position: relative; }
 #coords { position: absolute; right: 8px; bottom: 8px; z-index: 4;

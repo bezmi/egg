@@ -59,6 +59,7 @@ from fasthtml.common import (
     Header,
     Input,
     Label,
+    Link,
     NotStr,
     Option,
     Pre,
@@ -141,10 +142,17 @@ if not vendor_ready():
 
 _SPLIT_SRC = "/vendor/split.min.js"
 
+# prism-code-editor stylesheets (served locally from /vendor): the required
+# layout plus the enabled extensions. The catppuccin token/chrome theme lives
+# in app.css (Style(CSS)), loaded after these so it wins.
+_PCE_CSS = ("layout.css", "search.css", "autocomplete.css", "autocomplete-icons.css",
+            "cursor.css")
+
 app, rt = fast_app(
     pico=False,
     exts="ws",
     hdrs=(
+        *(Link(rel="stylesheet", href=f"/vendor/{c}") for c in _PCE_CSS),
         Style(CSS),
         Script(src=_SPLIT_SRC),
         Script(JS),

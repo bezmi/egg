@@ -7,109 +7,103 @@
 // For commercial licensing, contact s.imran@tuta.io
 
 
+// Progressive-enhancement upgrade of the plain <textarea> into a
+// prism-code-editor. All modules are served locally from the /vendor mount
+// (produced by tools/vendor_webui.py) — there is NO CDN fallback by design,
+// and the app refuses to start without these assets, so an import failure
+// here is a genuine bug, not an offline condition.
 try {
-  // Prefer the locally vendored modules (webui/vendor.py); fall back to
-  // the CDN with identical pins. Keep the pins in lockstep with vendor.py:
-  // plain codemirror@6 resolves to a legacy 6.65.x (CM5-era) npm publish.
-  const KEYS = ['codemirror', 'view', 'lang-python', 'autocomplete', 'commands',
-                'state', 'language', 'lezer-highlight'];
-  const CDN = [
-    'https://esm.sh/codemirror@6.0.2',
-    'https://esm.sh/@codemirror/view@6.43.4',
-    'https://esm.sh/@codemirror/lang-python@6.2.1',
-    'https://esm.sh/@codemirror/autocomplete@6.20.3',
-    'https://esm.sh/@codemirror/commands@6.10.4',
-    'https://esm.sh/@codemirror/state@6.7.0',
-    'https://esm.sh/@codemirror/language@6.12.4',
-    'https://esm.sh/@lezer/highlight@1.2.3',
-  ];
-  let mods = null;
-  try {
-    const man = await (await fetch('/vendor/manifest.json')).json();
-    mods = await Promise.all(KEYS.map((k) => import('/vendor/' + man[k])));
-  } catch (err) {
-    console.warn('vendored editor modules unavailable, using CDN:', err);
-    mods = await Promise.all(CDN.map((u) => import(u)));
-  }
-  const [cm, vw, lp, ac, cmds, st, lang, lz] = mods;
+  const man = await (await fetch('/vendor/manifest.json')).json();
+  const load = (k) => import('/vendor/' + man[k]);
+  const [core, cmds, mb, hb, cur, srch, ac, _tips, utils] = await Promise.all(
+    ['core', 'commands', 'match-brackets', 'highlight-brackets', 'cursor',
+     'search', 'autocomplete', 'tooltips', 'utils'].map(load));
+  // Importing the grammar registers 'python' into prism's language registry.
+  await load('prism-python');
+
   const ta = document.querySelector('.editor textarea');
-  const eggItems = await fetch('/api/completions').then(r => r.json()).catch(() => []);
-  // Editor theme built from the live --ctp-* custom properties, so the
-  // catppuccin flavor picked in the view menu styles the code too; a
-  // Compartment lets a flavor switch reconfigure without losing state.
-  const themeComp = new st.Compartment();
-  function cmTheme() {
-    const cs = getComputedStyle(document.documentElement);
-    const v = (n) => cs.getPropertyValue('--ctp-' + n).trim();
-    const t = lz.tags;
-    return [
-      vw.EditorView.theme({
-        '&': {backgroundColor: v('base'), color: v('text')},
-        '.cm-content': {caretColor: v('rosewater')},
-        '.cm-cursor, .cm-dropCursor': {borderLeftColor: v('rosewater')},
-        '.cm-activeLine': {backgroundColor: v('surface0') + '55'},
-        '.cm-activeLineGutter': {backgroundColor: v('surface0')},
-        '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, ::selection':
-          {backgroundColor: v('overlay2') + '4d'},
-        '.cm-selectionMatch': {backgroundColor: v('surface1')},
-        '&.cm-focused .cm-matchingBracket': {backgroundColor: v('surface1')},
-        '.cm-gutters': {backgroundColor: v('mantle'), color: v('overlay0'),
-                        borderRight: '1px solid ' + v('surface0')},
-        '.cm-tooltip': {backgroundColor: v('mantle'), color: v('text'),
-                        border: '1px solid ' + v('surface1')},
-        '.cm-tooltip-autocomplete ul li[aria-selected]':
-          {backgroundColor: v('surface1'), color: v('text')},
-        '.cm-panels': {backgroundColor: v('mantle'), color: v('text')},
-        '.cm-searchMatch': {backgroundColor: v('yellow') + '44'},
-      }, {dark: document.documentElement.dataset.theme !== 'latte'}),
-      lang.syntaxHighlighting(lang.HighlightStyle.define([
-        {tag: t.keyword, color: v('mauve')},
-        {tag: [t.string, t.special(t.string)], color: v('green')},
-        {tag: [t.number, t.bool, t.atom], color: v('peach')},
-        {tag: [t.function(t.variableName), t.function(t.propertyName)],
-         color: v('blue')},
-        {tag: [t.className, t.typeName], color: v('yellow')},
-        {tag: [t.operator, t.operatorKeyword], color: v('sky')},
-        {tag: [t.comment, t.meta], color: v('overlay0'), fontStyle: 'italic'},
-        {tag: [t.propertyName, t.attributeName], color: v('lavender')},
-        {tag: t.self, color: v('red')},
-        {tag: t.invalid, color: v('red')},
-      ])),
-    ];
-  }
-  // Reopen where the user left off (persisted by the updateListener below;
-  // clamped in case the buffer shrank since).
+  const host = ta.parentElement;  // the .editor div (keeps the named textarea)
+
+  // Compose the editor in the light DOM (not the shadow-root setups) so the
+  // page's catppuccin CSS variables reach the tokens. Extensions are exactly
+  // the set the UI enables: editorCommands (editing/indent/auto-close),
+  // editHistory (undo/redo), matchBrackets + highlightBracketPairs,
+  // cursorPosition (also required by autocomplete) + customCursor,
+  // searchWidget + highlightSelectionMatches, and autoComplete.
+  const editor = core.createEditor(
+    host,
+    {language: 'python', value: ta.value, tabSize: 4, insertSpaces: true,
+     lineNumbers: true},
+    cmds.editorCommands(cmds.defaultKeymap),
+    cmds.editHistory(),
+    mb.matchBrackets(),
+    hb.highlightBracketPairs(),
+    cur.cursorPosition(),
+    cur.customCursor(),
+    srch.searchWidget(),
+    srch.highlightSelectionMatches(),
+    ac.autoComplete({filter: ac.fuzzyFilter}),
+  );
+
+  // Completions: the introspected /api/completions list (egg geometry API,
+  // TopologyBuilder methods, PipelineConfig fields). Replaced/augmented by the
+  // based-pyright LSP source in lsp.js. prism fuzzy-filters `options` against
+  // the identifier under the cursor, so we hand back the full list anchored at
+  // the start of that identifier's final segment.
+  const eggItems = await fetch('/api/completions').then((r) => r.json()).catch(() => []);
+  const items = eggItems.map((it) => ({label: it.label, icon: it.type, detail: it.info}));
+  const listSource = (ctx) => {
+    const m = /[A-Za-z_][\w]*$/.exec(ctx.lineBefore);
+    if (!m && !ctx.explicit) return;
+    return {from: ctx.pos - (m ? m[0].length : 0), options: items};
+  };
+  ac.registerCompletions(['python'], {sources: [listSource]});
+
+  // Mirror edits into the server-visible <textarea name=code> and fire the
+  // 'input' event that drives the 500ms HTMX re-render + localStorage.
+  editor.on('update', (value) => {
+    ta.value = value;
+    ta.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  // Persist the cursor (head offset), restored on the next editor (re)load.
+  editor.on('selectionChange', (sel) => {
+    localStorage.setItem('egg-webui-cursor', String(sel[1]));
+  });
+
+  host.classList.add('pce-active');  // hides the now-mirrored textarea (app.css)
+
+  // Reopen where the user left off (clamped in case the buffer shrank).
   const savedCur = Math.min(
-      +(localStorage.getItem('egg-webui-cursor') || 0), ta.value.length);
-  const view = new cm.EditorView({
-    doc: ta.value,
-    selection: {anchor: savedCur},
-    extensions: [
-      cm.basicSetup,
-      vw.keymap.of([cmds.indentWithTab]),
-      lp.python(),
-      lp.pythonLanguage.data.of({autocomplete: ac.completeFromList(eggItems)}),
-      themeComp.of(cmTheme()),
-      cm.EditorView.updateListener.of((u) => {
-        if (u.docChanged) {
-          ta.value = u.state.doc.toString();
-          ta.dispatchEvent(new Event('input', {bubbles: true}));
-        }
-        // Last cursor position, restored on the next editor (re)load.
-        if (u.docChanged || u.selectionSet)
-          localStorage.setItem('egg-webui-cursor',
-                               String(u.state.selection.main.head));
-      }),
-    ],
-  });
-  window.addEventListener('egg-theme', () => {
-    view.dispatch({effects: themeComp.reconfigure(cmTheme())});
-  });
-  ta.parentElement.appendChild(view.dom);
-  ta.parentElement.classList.add('cm-active');
-  if (savedCur > 0)
-    view.dispatch({effects: cm.EditorView.scrollIntoView(savedCur, {y: 'center'})});
-  window.eggEditor = view;
+    +(localStorage.getItem('egg-webui-cursor') || 0), editor.value.length);
+  if (savedCur > 0) utils.setSelection(editor, savedCur);
+
+  window.eggEditor = editor;
+  // Small implementation-agnostic surface app.js drives (see its call sites):
+  // getValue/setValue (minimal-diff replace) and gotoLine (error-chip jump).
+  window.eggEditorApi = {
+    getValue: () => editor.value,
+    setValue: (code) => {
+      const old = editor.value;
+      if (old === code) return;
+      // Replace only the differing middle so a param-panel edit maps the
+      // cursor through a tiny change instead of snapping to the top.
+      let a = 0;
+      const n = Math.min(old.length, code.length);
+      while (a < n && old.charCodeAt(a) === code.charCodeAt(a)) a++;
+      let b = 0;
+      while (b < n - a &&
+             old.charCodeAt(old.length - 1 - b) === code.charCodeAt(code.length - 1 - b))
+        b++;
+      utils.insertText(editor, code.slice(a, code.length - b), a, old.length - b);
+    },
+    gotoLine: (line) => {
+      const lines = editor.value.split('\n');
+      const i = Math.max(1, Math.min(line, lines.length)) - 1;
+      const from = lines.slice(0, i).reduce((s, l) => s + l.length + 1, 0);
+      utils.setSelection(editor, from, from + (lines[i] || '').length);
+      editor.textarea.focus();
+    },
+  };
 } catch (err) {
-  console.warn('CodeMirror unavailable, plain textarea fallback:', err);
+  console.warn('prism-code-editor unavailable, plain textarea fallback:', err);
 }
