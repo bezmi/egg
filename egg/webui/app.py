@@ -1149,6 +1149,10 @@ async def get(view: str = "grid"):
                     code,
                     name="code",
                     spellcheck="false",
+                    # Firefox restores a textarea's value from session history on
+                    # reload (Chrome does not); that stale value desyncs from the
+                    # server-rendered canvas. Same defense as the view <select>.
+                    autocomplete="off",
                     data_persist="0" if _script_arg() is not None else "1",
                     data_file=str(_script_arg() or ""),
                     data_watch="1"

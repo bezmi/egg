@@ -8,9 +8,10 @@
 
 
 // Reload without a flash: if there is a saved script to restore, hide the
-// server-rendered default grid before first paint. Cleared once the restored
-// script re-renders (applyView) or, failing that, a fallback timeout in the
-// DOMContentLoaded restore below. Runs in <head>, before the body parses.
+// server-rendered default grid before first paint. The DOMContentLoaded restore
+// below then discards that default mesh (swapping in a "rendering…" placeholder)
+// so it is never shown; applyView swaps in the real grid when the restore
+// render lands. Runs in <head>, before the body parses.
 try {
   if (localStorage.getItem('egg-webui-code'))
     document.documentElement.classList.add('restoring');
@@ -478,18 +479,47 @@ document.addEventListener('htmx:oobAfterSwap', applyView);
 
 // Editor persistence (only when no file was passed on the CLI).
 const reveal = () => document.documentElement.classList.remove('restoring');
+// Deterministically render `code` into #view (bypasses the textarea's
+// "input changed delay" trigger, whose changed-gate skips the render when the
+// field already holds `code` — as Firefox's form restore leaves it on reload).
+function eggForceRender(code) {
+  if (!window.htmx) return false;
+  const view = document.getElementById('viewmode');
+  htmx.ajax('POST', '/render', {
+    target: '#view', swap: 'innerHTML',
+    values: {code, view: view ? view.value : 'grid',
+             path: document.getElementById('scriptpath')?.value || ''},
+  });
+  return true;
+}
 window.addEventListener('DOMContentLoaded', () => {
   const t = document.querySelector('.editor textarea');
-  const saved = t && t.dataset.persist === '1'
+  if (!t) return;
+  const saved = t.dataset.persist === '1'
       ? localStorage.getItem('egg-webui-code') : null;
-  if (saved && saved !== t.value) {
-    // Keep the canvas hidden (set in <head>) until the restore render lands;
-    // applyView reveals it on the swap, and this is a safety net in case that
-    // render never arrives (worker error, etc.).
-    window.eggSetCode(saved);
-    setTimeout(reveal, 4000);
+  // #canvas was server-rendered from the textarea's ORIGINAL content
+  // (defaultValue). Compare against THAT, not .value: Firefox restores .value
+  // from session history on reload (Chrome doesn't), so .value can already hold
+  // the cached script while the canvas still shows the default grid. The script
+  // we actually want to display is the cached one if present, else the field.
+  const want = saved != null ? saved : t.value;
+  if (want !== t.defaultValue) {
+    // The canvas (built from defaultValue) is stale — drop it for a placeholder
+    // so we never flash/unveil the wrong grid, then render `want`.
+    const cv = document.querySelector('#canvas');
+    if (cv) cv.innerHTML = '<div class="canvas-wait">rendering…</div>';
+    reveal();  // the placeholder is not the wrong grid; nothing left to hide
+    if (want !== t.value) {
+      window.eggSetCode(want);   // fires input → the textarea's render trigger
+    } else {
+      // Firefox already restored the field to `want`; its input render would be
+      // suppressed by the changed-gate, so drive the render explicitly. Still
+      // route through eggSetCode to sync the editor + persist localStorage.
+      window.eggSetCode(want);
+      eggForceRender(want);
+    }
   } else {
-    reveal();  // nothing to restore — show the server-rendered grid now
+    reveal();  // canvas already matches what we want — show it now
   }
 });
 document.addEventListener('input', (e) => {

@@ -270,11 +270,15 @@ body.editing #ed-tools { display: flex; }
           -webkit-tap-highlight-color: transparent; }
 .gutter, #view svg * { -webkit-tap-highlight-color: transparent; }
 .canvas svg { width: 100%; height: 100%; display: block; background: var(--ctp-base); }
-/* Hide the server-rendered default grid until the localStorage-restored
-   script re-renders, so a page reload never flashes the wrong grid. Set on
-   <html> by the head script before first paint, cleared once the restore
-   render swaps in (or a fallback timeout). */
+/* Hide the server-rendered default grid before first paint, so a reload never
+   flashes the wrong grid. Set on <html> by the head script; the DOMContentLoaded
+   restore then discards that grid for a placeholder and clears this class. */
 html.restoring .canvas svg { visibility: hidden; }
+/* Placeholder shown in place of the (discarded) default grid while a restored
+   script is rendering — see the DOMContentLoaded restore in app.js. */
+.canvas-wait { width: 100%; height: 100%; display: flex; align-items: center;
+   justify-content: center; color: var(--ctp-overlay0); font-size: 13px;
+   background: var(--ctp-base); }
 .canvas svg polyline, .canvas svg polygon,
 .canvas svg circle, .canvas svg rect { vector-effect: non-scaling-stroke; }
 /* --- scene styling (all semantic classes; colors from --egg-* vars) --- */
