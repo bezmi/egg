@@ -8,9 +8,10 @@
 
 
 // Reload without a flash: if there is a saved script to restore, hide the
-// server-rendered default grid before first paint. Cleared once the restored
-// script re-renders (applyView) or, failing that, a fallback timeout in the
-// DOMContentLoaded restore below. Runs in <head>, before the body parses.
+// server-rendered default grid before first paint. The DOMContentLoaded restore
+// below then discards that default mesh (swapping in a "rendering…" placeholder)
+// so it is never shown; applyView swaps in the real grid when the restore
+// render lands. Runs in <head>, before the body parses.
 try {
   if (localStorage.getItem('egg-webui-code'))
     document.documentElement.classList.add('restoring');
@@ -24,13 +25,46 @@ if (!THEMES.includes(eggTheme))
   eggTheme = window.matchMedia('(prefers-color-scheme: dark)').matches
     ? 'mocha' : 'latte';
 document.documentElement.dataset.theme = eggTheme;
+// The favicon is the same egg mark as the header logo, recolored to the active
+// flavor's yellow. A favicon SVG can't read the page's data-theme, so we bake
+// the color in and regenerate the data-URI whenever the flavor changes.
+function eggFaviconSvg(color) {
+  const d = 'M50 7C65 7 83 35 83 59 83 81 68 93 50 93 32 93 17 81 17 59 17 35 35 7 50 7Z';
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke="' +
+    color + '" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">' +
+    '<clipPath id="e"><path d="' + d + '"/></clipPath><path d="' + d + '"/>' +
+    '<g clip-path="url(#e)" stroke-width="6"><path d="M40 15V95M60 15V95M10 48H90M10 66H90"/></g></svg>';
+}
+function updateFavicon() {
+  const c = getComputedStyle(document.documentElement)
+    .getPropertyValue('--ctp-yellow').trim() || '#f9e2af';
+  let link = document.getElementById('favicon');
+  if (!link) {
+    link = document.createElement('link');
+    link.id = 'favicon'; link.rel = 'icon'; link.type = 'image/svg+xml';
+    document.head.appendChild(link);
+  }
+  link.href = 'data:image/svg+xml,' + encodeURIComponent(eggFaviconSvg(c));
+}
 function setTheme(name) {
   eggTheme = name;
   document.documentElement.dataset.theme = name;
   localStorage.setItem('egg-webui-theme', name);
-  window.dispatchEvent(new Event('egg-theme'));  // CodeMirror re-themes
+  // The editor and header logo re-theme automatically off the live --ctp-*
+  // variables; only the baked-in favicon needs a manual refresh.
+  updateFavicon();
+  window.dispatchEvent(new Event('egg-theme'));
 }
+updateFavicon();  // tint the initial favicon to the active flavor
 window.addEventListener('DOMContentLoaded', () => {
+  const wrap = document.getElementById('wrap-toggle');
+  if (wrap) {
+    wrap.checked = localStorage.getItem('egg-webui-wrap') === '1';
+    wrap.addEventListener('change', () => {
+      localStorage.setItem('egg-webui-wrap', wrap.checked ? '1' : '0');
+      if (window.eggEditor) window.eggEditor.setOptions({wordWrap: wrap.checked});
+    });
+  }
   const sel = document.getElementById('theme-select');
   if (!sel) return;
   sel.value = eggTheme;
@@ -38,7 +72,9 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Tab' && e.target.matches('.editor textarea')) {
+  // Tab-to-indent only for the plain-textarea fallback; when prism-code-editor
+  // is active its editorCommands extension owns Tab (and its own textarea).
+  if (e.key === 'Tab' && !window.eggEditor && e.target.matches('.editor textarea')) {
     e.preventDefault();
     const t = e.target, s = t.selectionStart;
     t.setRangeText('    ', s, t.selectionEnd, 'end');
@@ -182,7 +218,8 @@ function setEdFont(px) {
   edFont = Math.min(28, Math.max(8, px));
   document.documentElement.style.setProperty('--egg-edfont', edFont.toFixed(1) + 'px');
   localStorage.setItem('egg-webui-edfont', edFont.toFixed(1));
-  if (window.eggEditor) window.eggEditor.requestMeasure();
+  // prism-code-editor reflows from CSS (font-size on .prism-code-editor), so
+  // a font-zoom needs no explicit remeasure.
 }
 window.addEventListener('DOMContentLoaded', () => setEdFont(edFont));
 document.addEventListener('wheel', (e) => {
@@ -382,33 +419,40 @@ function applyView() {
     i.disabled = !!(watching && watching.checked);
   });
   eggEditInit();  // edit view: (re)build the wireframe overlay + draw tools
+  eggSyncFileGuards();  // a run owns the view — don't let a file swap in behind it
+}
+// True while a solve is streaming: the stop button (in #viewbar) is the one
+// control the server enables only during a run.
+const eggRunning = () =>
+  !!document.querySelector('#viewbar .btns button.danger:not(:disabled)');
+// The view stays locked to the running solve (/render returns the run's grid),
+// so opening/following a different file mid-run would silently desync the file
+// pane from the view. Disable those entry points while a run streams — the same
+// way the view switcher and run/reset buttons already disable — and re-enable
+// when it ends (applyView fires on the run-start and terminal-frame swaps).
+function eggSyncFileGuards() {
+  const running = eggRunning();
+  ['file-open', 'file-examples', 'watch-toggle'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = running;
+  });
+  // file-open/-examples have no base title of their own, so it is safe to set;
+  // the watch checkbox keeps its label's own (informative) title.
+  ['file-open', 'file-examples'].forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.title = running ? 'stop the run to open another file' : '';
+  });
 }
 // Single entry point for programmatic code changes (examples, restore,
-// param-panel rewrites). Routes through the CodeMirror editor when it took
-// over, else the textarea; both paths end in an 'input' event on the
-// textarea, which drives the HTMX render trigger and localStorage
-// persistence. The cursor survives the full-document replace (clamped to
-// the new length) — a param edit must not fling the editor to the top.
+// param-panel rewrites). Routes through the editor when it took over (which
+// mirrors back into the textarea and fires 'input'), else the textarea
+// directly; both paths end in an 'input' event that drives the HTMX render
+// trigger and localStorage persistence. The cursor survives the replace — a
+// param edit must not fling the editor to the top (eggEditorApi.setValue does
+// a minimal-diff edit).
 window.eggSetCode = (code) => {
-  const v = window.eggEditor;
-  if (v) {
-    const old = v.state.doc.toString();
-    if (old === code) return;
-    // Replace only the differing middle, not the whole document. A param
-    // edit rewrites one value's span, so old and code share a long common
-    // prefix and suffix; dispatching just the changed slice lets CodeMirror
-    // map the selection and scroll through a tiny edit instead of re-laying-
-    // out every line (a full replace nondeterministically snaps to the top).
-    let a = 0;
-    const n = Math.min(old.length, code.length);
-    while (a < n && old.charCodeAt(a) === code.charCodeAt(a)) a++;
-    let b = 0;
-    while (b < n - a &&
-           old.charCodeAt(old.length - 1 - b) === code.charCodeAt(code.length - 1 - b))
-      b++;
-    v.dispatch({
-      changes: {from: a, to: old.length - b, insert: code.slice(a, code.length - b)},
-    });
+  if (window.eggEditorApi) {
+    window.eggEditorApi.setValue(code);
   } else {
     const t = document.querySelector('.editor textarea');
     const cur = Math.min(t.selectionStart || 0, code.length);
@@ -458,18 +502,47 @@ document.addEventListener('htmx:oobAfterSwap', applyView);
 
 // Editor persistence (only when no file was passed on the CLI).
 const reveal = () => document.documentElement.classList.remove('restoring');
+// Deterministically render `code` into #view (bypasses the textarea's
+// "input changed delay" trigger, whose changed-gate skips the render when the
+// field already holds `code` — as Firefox's form restore leaves it on reload).
+function eggForceRender(code) {
+  if (!window.htmx) return false;
+  const view = document.getElementById('viewmode');
+  htmx.ajax('POST', '/render', {
+    target: '#view', swap: 'innerHTML',
+    values: {code, view: view ? view.value : 'grid',
+             path: document.getElementById('scriptpath')?.value || ''},
+  });
+  return true;
+}
 window.addEventListener('DOMContentLoaded', () => {
   const t = document.querySelector('.editor textarea');
-  const saved = t && t.dataset.persist === '1'
+  if (!t) return;
+  const saved = t.dataset.persist === '1'
       ? localStorage.getItem('egg-webui-code') : null;
-  if (saved && saved !== t.value) {
-    // Keep the canvas hidden (set in <head>) until the restore render lands;
-    // applyView reveals it on the swap, and this is a safety net in case that
-    // render never arrives (worker error, etc.).
-    window.eggSetCode(saved);
-    setTimeout(reveal, 4000);
+  // #canvas was server-rendered from the textarea's ORIGINAL content
+  // (defaultValue). Compare against THAT, not .value: Firefox restores .value
+  // from session history on reload (Chrome doesn't), so .value can already hold
+  // the cached script while the canvas still shows the default grid. The script
+  // we actually want to display is the cached one if present, else the field.
+  const want = saved != null ? saved : t.value;
+  if (want !== t.defaultValue) {
+    // The canvas (built from defaultValue) is stale — drop it for a placeholder
+    // so we never flash/unveil the wrong grid, then render `want`.
+    const cv = document.querySelector('#canvas');
+    if (cv) cv.innerHTML = '<div class="canvas-wait">rendering…</div>';
+    reveal();  // the placeholder is not the wrong grid; nothing left to hide
+    if (want !== t.value) {
+      window.eggSetCode(want);   // fires input → the textarea's render trigger
+    } else {
+      // Firefox already restored the field to `want`; its input render would be
+      // suppressed by the changed-gate, so drive the render explicitly. Still
+      // route through eggSetCode to sync the editor + persist localStorage.
+      window.eggSetCode(want);
+      eggForceRender(want);
+    }
   } else {
-    reveal();  // nothing to restore — show the server-rendered grid now
+    reveal();  // canvas already matches what we want — show it now
   }
 });
 document.addEventListener('input', (e) => {
@@ -482,12 +555,8 @@ document.addEventListener('click', (e) => {
   const chip = e.target.closest('.errline');
   if (!chip) return;
   const line = +chip.dataset.line;
-  const v = window.eggEditor;
-  if (v) {
-    const doc = v.state.doc;
-    const l = doc.line(Math.max(1, Math.min(line, doc.lines)));
-    v.dispatch({selection: {anchor: l.from, head: l.to}, scrollIntoView: true});
-    v.focus();
+  if (window.eggEditorApi) {
+    window.eggEditorApi.gotoLine(line);
     return;
   }
   const t = document.querySelector('.editor textarea');
@@ -583,8 +652,9 @@ const baseOf = (p) => p.slice(p.lastIndexOf('/') + 1);
 const dirOf = (p) => p.slice(0, Math.max(1, p.lastIndexOf('/')));
 const joinP = (d, n) => d + (d.endsWith('/') ? '' : '/') + n;
 const currentCode = () => {
-  const v = window.eggEditor;
-  return v ? v.state.doc.toString() : document.querySelector('.editor textarea').value;
+  return window.eggEditorApi
+    ? window.eggEditorApi.getValue()
+    : document.querySelector('.editor textarea').value;
 };
 function setFile(path, savedCode) {
   curFile = path; lastSaved = savedCode;
@@ -598,6 +668,8 @@ function setFile(path, savedCode) {
 function setScriptPath(path) {
   document.getElementById('scriptpath').value = path || '';
   localStorage.setItem('egg-webui-path', path || '');
+  // Let the editor re-home the language server on the new file's directory.
+  window.dispatchEvent(new Event('egg-scriptpath'));
 }
 function updateChip(flash) {
   const c = document.getElementById('filechip');
@@ -685,6 +757,13 @@ async function doSave(path) {
   setTimeout(() => updateChip(), 1200);
 }
 document.addEventListener('click', (e) => {
+  // A run owns the view; opening/loading a different file mid-run would desync
+  // the file pane from the streaming solve. The buttons are also disabled while
+  // running (eggSyncFileGuards), but guard the action too for the brief window
+  // before that lands.
+  if ((e.target.closest('#file-open') || e.target.closest('#file-examples'))
+      && eggRunning())
+    return;
   if (e.target.closest('#file-open')) fsShow('open');
   const ex = e.target.closest('#file-examples');
   if (ex) { fsDir = ex.dataset.dir; fsShow('open'); }

@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 
-import egg_webui
+from egg import webui as egg_webui
 
 from egg.core.types import MultiBlockGrid
 from egg.geometry.base import GeometryEntity
@@ -677,7 +677,7 @@ def webui_block_suggestion(code: str, path: str | None = None) -> str | None:
         return None
     return (
         f'\n\nif __name__ == "__egg_webui__":  # running inside the egg web UI\n'
-        f"    import egg_webui\n"
+        f"    import egg.webui as egg_webui\n"
         f"    from egg.pipeline import PipelineConfig, generate_steps\n\n"
         f"    topo, ents = {cands[0]}()\n"
         f"    grid = topo.initialize_grid()\n"

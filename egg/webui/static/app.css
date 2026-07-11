@@ -129,7 +129,9 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 .menu-items button { text-align: left; background: none; border: 0;
   padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer;
   border-radius: 4px; white-space: nowrap; color: var(--ctp-text); }
-.menu-items button:hover { background: var(--ctp-surface0); }
+.menu-items button:hover:not(:disabled) { background: var(--ctp-surface0); }
+.menu-items button:disabled { opacity: 0.4; cursor: default; }
+.menu-items label:has(> :disabled) { opacity: 0.4; }
 .menu-items a { display: block; padding: 7px 12px; font-size: 13px;
   color: var(--ctp-text); text-decoration: none; border-radius: 4px;
   white-space: nowrap; }
@@ -175,12 +177,15 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
   border-radius: 5px; font: inherit; }
 .panes { flex: 1; display: flex; min-height: 0; }
 /* Static 42/58 fallback; Split.js (when loaded) takes over the sizing. */
+/* egg mark in the header; tinted by the flavor and re-themes for free */
+.egg-logo { color: var(--ctp-yellow); display: block; }
+
 .editor { width: 42%; display: flex; min-width: 0; }
 /* pan-x pan-y: keep one-finger scrolling native but claim two-finger
    pinch (font zoom) for our pointer handlers */
-.editor, .editor textarea, .editor .cm-scroller, .editor .cm-content {
+.editor, .editor > textarea, .editor .prism-code-editor {
   touch-action: pan-x pan-y; }
-.editor textarea, .editor .cm-scroller {
+.editor > textarea, .editor .prism-code-editor {
   font-size: var(--egg-edfont, 13px) !important; }
 .panes.split-active .editor, .panes.split-active .viewer { flex: none; }
 /* Split.js gutter (created at runtime); ::after widens the touch target,
@@ -215,13 +220,23 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
   .panes { flex-direction: column; }
   .editor { width: auto; height: 42%; }
 }
-.editor textarea { flex: 1; border: 0; outline: none; resize: none;
+.editor > textarea { flex: 1; border: 0; outline: none; resize: none;
                    padding: 10px; font: 13px/1.45 ui-monospace, monospace;
                    background: var(--ctp-base); color: var(--ctp-text); tab-size: 4; }
-.editor.cm-active textarea { display: none; }
-.editor .cm-editor { flex: 1; min-width: 0; background: var(--ctp-base); }
-.editor .cm-editor.cm-focused { outline: none; }
-.editor .cm-scroller { font: 13px/1.45 ui-monospace, monospace; }
+/* once prism-code-editor mounts, hide the (mirrored) server textarea; its
+   sibling hidden path input is untouched by the child combinator */
+.editor.pce-active > textarea { display: none; }
+.editor .prism-code-editor { flex: 1; min-width: 0; outline: none;
+                             background: var(--ctp-base);
+                             font: 13px/1.45 ui-monospace, monospace; }
+/* prism adds a screenful of scroll-past-last-line padding (computed on
+   container resize, so it goes stale on font zoom and leaves empty space).
+   We want the scroll to end at the file, so drop it. */
+.editor .pce-wrapper { padding-bottom: 0 !important; }
+/* When wrapping, no horizontal scroll should exist — but the custom cursor and
+   overlays still sit at the un-wrapped column, leaving a phantom scrollable
+   width. Clip it so wrapped text never scrolls sideways. */
+.editor .prism-code-editor.pce-wrap { overflow-x: clip; }
 .viewer { flex: 1; display: flex; flex-direction: column; min-width: 0;
           position: relative; }
 #coords { position: absolute; right: 8px; bottom: 8px; z-index: 4;
@@ -257,11 +272,15 @@ body.editing #ed-tools { display: flex; }
           -webkit-tap-highlight-color: transparent; }
 .gutter, #view svg * { -webkit-tap-highlight-color: transparent; }
 .canvas svg { width: 100%; height: 100%; display: block; background: var(--ctp-base); }
-/* Hide the server-rendered default grid until the localStorage-restored
-   script re-renders, so a page reload never flashes the wrong grid. Set on
-   <html> by the head script before first paint, cleared once the restore
-   render swaps in (or a fallback timeout). */
+/* Hide the server-rendered default grid before first paint, so a reload never
+   flashes the wrong grid. Set on <html> by the head script; the DOMContentLoaded
+   restore then discards that grid for a placeholder and clears this class. */
 html.restoring .canvas svg { visibility: hidden; }
+/* Placeholder shown in place of the (discarded) default grid while a restored
+   script is rendering — see the DOMContentLoaded restore in app.js. */
+.canvas-wait { width: 100%; height: 100%; display: flex; align-items: center;
+   justify-content: center; color: var(--ctp-overlay0); font-size: 13px;
+   background: var(--ctp-base); }
 .canvas svg polyline, .canvas svg polygon,
 .canvas svg circle, .canvas svg rect { vector-effect: non-scaling-stroke; }
 /* --- scene styling (all semantic classes; colors from --egg-* vars) --- */
@@ -401,6 +420,9 @@ body.editing .layer-blocks, body.editing .layer-corners { opacity: 0.18; }
 .bar { padding: 4px 10px; font-size: 12px; color: var(--ctp-subtext0);
        background: var(--ctp-crust); display: flex; gap: 10px; align-items: center;
        flex-wrap: wrap; }
+/* Chip box: display:contents so its chips remain direct flex children of .bar
+   (layout unchanged) while giving run frames a target to OOB-swap on its own. */
+#viewchips { display: contents; }
 .bar .warn { color: var(--ctp-yellow); }
 .bar .bad { color: var(--ctp-red); font-weight: 600; }
 .bar .errline { cursor: pointer; }

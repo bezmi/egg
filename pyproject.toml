@@ -21,15 +21,25 @@ dependencies = [
   "scipy>=1.17.1",
 ]
 
+[project.optional-dependencies]
+# The web UI ships in the wheel: `pip install egg[webui]` pulls its runtime
+# deps. basedpyright provides the editor's language server (completions,
+# diagnostics, hover); the UI degrades gracefully if it is absent.
+webui = [
+  "python-fasthtml>=0.12",
+  "basedpyright>=1.29",
+]
+
 [project.scripts]
-# serves webui/ from the repo checkout (editable install only)
+# serves the web UI (egg/webui/); works from a checkout or an installed wheel
 egg-webui = "egg._webui_launcher:main"
 
 [dependency-groups]
-# Web UI prototype: `uv sync --group webui` once, then
-# `uv run --no-sync egg-webui`
+# Web UI: `uv sync --group webui` once, then `uv run --no-sync egg-webui`
+# (mirrors the [project.optional-dependencies] webui extra above).
 webui = [
   "python-fasthtml>=0.12",
+  "basedpyright>=1.29",
 ]
 # CAD import adapter (egg.io.cad): `uv sync --group cad`
 cad = [
@@ -59,6 +69,10 @@ build-dir = "build/{wheel_tag}"
 # with a leading "/" so e.g. "build*" doesn't also eat egg/topology/builder.py.
 sdist.exclude = [
   "egg/_cpp/*.so",
+  # the web UI's assets are generated at build time by tools/vendor_webui.py
+  # (into the wheel), never committed or shipped in sdist
+  "egg/webui/static/vendor",
+  "egg/webui/docs",
   "/build",
   "/dist",
   "/wheels",

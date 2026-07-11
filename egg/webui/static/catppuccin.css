@@ -1,0 +1,106 @@
+/* Required Notice: Copyright (c) Shahzeb Imran and Egg contributors
+
+   PolyForm Noncommercial License 2.0.0-pre.2
+   https://github.com/bezmi/egg/blob/main/LICENSE.md
+   Free to use and redistribute for personal and noncommercial purposes.
+   See the license for details.
+   For commercial licensing, contact s.imran@tuta.io */
+
+/* Catppuccin theme for prism-code-editor, driven entirely off the live
+   --ctp-* palette (defined in app.css and switched by :root[data-theme]).
+   Because the tokens reference those variables, the editor re-themes across
+   all four flavors (latte/frappe/macchiato/mocha) with no JavaScript. Loaded
+   after the prism stylesheets so it wins. */
+
+.prism-code-editor {
+  color-scheme: inherit;
+  --pce-bg: var(--ctp-base);
+  --pce-cursor: var(--ctp-rosewater);
+  --pce-selection: var(--ctp-surface2);
+  --pce-selection-match: color-mix(in srgb, var(--ctp-surface1) 70%, transparent);
+  --pce-search-match: color-mix(in srgb, var(--ctp-yellow) 30%, transparent);
+  --pce-line-number: var(--ctp-overlay0);
+  --pce-bg-highlight: color-mix(in srgb, var(--ctp-surface0) 45%, transparent);
+  --pce-widget-bg: var(--ctp-mantle);
+  --pce-widget-color: var(--ctp-text);
+  --pce-widget-color-active: var(--ctp-text);
+  --pce-widget-color-options: var(--ctp-overlay1);
+  --pce-widget-border: var(--ctp-surface0);
+  --pce-widget-bg-input: var(--ctp-base);
+  --pce-widget-bg-hover: color-mix(in srgb, var(--ctp-surface1) 40%, transparent);
+  --pce-widget-bg-active: color-mix(in srgb, var(--ctp-blue) 30%, transparent);
+  --pce-widget-focus: var(--ctp-blue);
+  --pce-widget-bg-error: color-mix(in srgb, var(--ctp-red) 35%, transparent);
+  --pce-widget-error: var(--ctp-red);
+  --pce-bg-fold: var(--ctp-overlay0);
+  /* autocomplete option icons, by kind */
+  --pce-ac-icon-class: var(--ctp-yellow);
+  --pce-ac-icon-constant: var(--ctp-peach);
+  --pce-ac-icon-enum: var(--ctp-peach);
+  --pce-ac-icon-event: var(--ctp-teal);
+  --pce-ac-icon-function: var(--ctp-blue);
+  --pce-ac-icon-interface: var(--ctp-yellow);
+  --pce-ac-icon-keyword: var(--ctp-mauve);
+  --pce-ac-icon-namespace: var(--ctp-mauve);
+  --pce-ac-icon-parameter: var(--ctp-maroon);
+  --pce-ac-icon-property: var(--ctp-sky);
+  --pce-ac-icon-snippet: var(--ctp-green);
+  --pce-ac-icon-text: var(--ctp-text);
+  --pce-ac-icon-unit: var(--ctp-peach);
+  --pce-ac-icon-variable: var(--ctp-text);
+}
+
+.active-line { --pce-line-number: var(--ctp-text); }
+
+/* --- syntax tokens (catppuccin roles) --- */
+[class*="language-"] { color: var(--ctp-text); }
+.token.comment, .token.prolog, .token.cdata {
+  color: var(--ctp-overlay0); font-style: italic; }
+.token.keyword, .token.keyword-null, .token.keyword-this,
+.token.important { color: var(--ctp-mauve); }
+.token.boolean, .token.number, .token.constant, .token.unit,
+.token.decorator, .token.annotation { color: var(--ctp-peach); }
+.token.string, .token.char, .token.attr-value, .token.string-property,
+.token.triple-quoted-string, .token.string-interpolation, .token.regex {
+  color: var(--ctp-green); }
+.token.function { color: var(--ctp-blue); }
+.token.class-name, .token.maybe-class-name, .token.title,
+.token.builtin.class-name { color: var(--ctp-yellow); }
+.token.builtin, .token.property-access, .token.property { color: var(--ctp-sky); }
+.token.operator, .token.arrow, .token.interpolation-punctuation {
+  color: var(--ctp-sky); }
+.token.parameter { color: var(--ctp-maroon); }
+.token.variable { color: var(--ctp-text); }
+.token.punctuation { color: var(--ctp-overlay2); }
+.token.attr-name, .token.tag { color: var(--ctp-lavender); }
+.token.bold, .token.important { font-weight: bold; }
+.token.italic { font-style: italic; }
+
+/* rainbow bracket pairs (matchBrackets + highlightBracketPairs) */
+.token.bracket-level-0, .token.bracket-level-6 { color: var(--ctp-blue); }
+.token.bracket-level-1, .token.bracket-level-7 { color: var(--ctp-green); }
+.token.bracket-level-2, .token.bracket-level-8 { color: var(--ctp-yellow); }
+.token.bracket-level-3, .token.bracket-level-9 { color: var(--ctp-peach); }
+.token.bracket-level-4, .token.bracket-level-10 { color: var(--ctp-pink); }
+.token.bracket-level-5, .token.bracket-level-11 { color: var(--ctp-mauve); }
+.token.bracket-error { color: var(--ctp-red); }
+.active-bracket {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ctp-green) 60%, transparent),
+              inset 0 0 0 9in color-mix(in srgb, var(--ctp-green) 22%, transparent); }
+.word-matches span, .active-tagname {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ctp-overlay1) 60%, transparent),
+              inset 0 0 0 9in color-mix(in srgb, var(--ctp-overlay1) 40%, transparent); }
+
+/* diagnostic-message tooltip (hover over an error squiggle) */
+.pce-diag-tip {
+  background: var(--ctp-mantle); color: var(--ctp-text);
+  border: 1px solid var(--ctp-red);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); }
+
+/* signature-help tooltip (parameter hints while inside a call's parens) */
+.pce-sig-tip {
+  background: var(--ctp-mantle); color: var(--ctp-subtext0);
+  border: 1px solid var(--ctp-surface2);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35); }
+.pce-sig-tip .pce-sig-active {
+  color: var(--ctp-yellow); font-weight: 700; }

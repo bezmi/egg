@@ -6,17 +6,16 @@
 # See the license for details.
 # For commercial licensing, contact s.imran@tuta.io
 
-"""``egg-webui`` console script: serve the web UI from a repo checkout.
+"""``egg-webui`` console script: serve the web UI.
 
-The web UI prototype lives in ``webui/`` next to the ``egg`` package (it
-is not shipped inside the wheel), so this launcher only works with the
-editable/development install — which is the only supported way to run
-the prototype anyway. Usage::
+The web UI lives inside the package at ``egg/webui/`` and ships in the
+wheel, so this launcher works from both an editable checkout and an
+installed wheel. Usage::
 
-    uv run --no-sync egg-webui                      # http://127.0.0.1:5001
-    uv run --no-sync egg-webui my_geometry.py       # open a script
-    uv run --no-sync egg-webui my_geometry.py --watch    # follow it on disk
-    uv run --no-sync egg-webui --host 0.0.0.0 --reload   # dev server
+    egg-webui                      # http://127.0.0.1:5001
+    egg-webui my_geometry.py       # open a script
+    egg-webui my_geometry.py --watch    # follow it on disk
+    egg-webui --host 0.0.0.0 --reload   # dev server
 """
 
 from __future__ import annotations
@@ -26,6 +25,40 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _find_repo_root(start: Path) -> Path | None:
+    """The source-checkout root (holds ``pyproject.toml``/``.git``) above the
+    installed package, or ``None`` when running from a packaged wheel."""
+    for p in (start, *start.parents):
+        if (p / "pyproject.toml").is_file() or (p / ".git").exists():
+            return p
+    return None
+
+
+def _ensure_assets(repo: Path | None, dev: bool) -> None:
+    """Make sure the vendored browser assets are present before serving.
+
+    In ``--dev`` (source checkout), run the out-of-tree vendoring tool to
+    download them if missing. Otherwise, the assets must already be on disk
+    (shipped in the wheel, or vendored earlier by ``--dev``) — if not, exit
+    with an actionable message rather than reaching out to a CDN at runtime.
+    """
+    from egg.webui._assets import MISSING_MSG, vendor_ready
+
+    if vendor_ready():
+        return
+    if dev and repo is not None:
+        script = repo / "tools" / "vendor_webui.py"
+        print("egg-webui: vendoring browser assets (needs internet)…", flush=True)
+        r = subprocess.run([sys.executable, str(script)])
+        if r.returncode != 0 or not vendor_ready():
+            raise SystemExit(
+                "egg-webui: vendoring failed — cannot start without the "
+                "browser assets (are you online?)"
+            )
+        return
+    raise SystemExit(MISSING_MSG)
 
 
 def _build_docs(repo: Path) -> None:
@@ -54,13 +87,8 @@ def _build_docs(repo: Path) -> None:
 
 
 def main() -> None:
-    repo = Path(__file__).resolve().parents[1]
-    webui = repo / "webui"
-    if not (webui / "app.py").is_file():
-        raise SystemExit(
-            "egg-webui: webui/app.py not found — the web UI runs from a "
-            "repo checkout (editable install), not from an installed wheel"
-        )
+    egg_dir = Path(__file__).resolve().parent
+    repo = _find_repo_root(egg_dir)
 
     p = argparse.ArgumentParser(prog="egg-webui", description="serve the egg web UI")
     p.add_argument("script", nargs="?", help="geometry script to open in the editor")
@@ -71,8 +99,15 @@ def main() -> None:
     p.add_argument(
         "--reload",
         action="store_true",
-        help="dev mode: restart on edits to webui/ or egg/ (drops websocket "
+        help="dev mode: restart on edits to egg/ (drops websocket "
         "connections and any in-flight run)",
+    )
+    p.add_argument(
+        "--dev",
+        action="store_true",
+        help="developer mode (source checkout only): vendor the browser "
+        "assets if missing. Not available from an installed wheel, which "
+        "already ships the assets. Combine with --reload for a live server.",
     )
     p.add_argument(
         "--no-docs",
@@ -91,7 +126,21 @@ def main() -> None:
     if a.watch and not a.script:
         p.error("--watch needs a script to watch (pass its path)")
 
-    if not a.no_docs:
+    # --dev is a source-checkout affordance: it invokes the out-of-tree
+    # vendoring tool (which does not ship in the wheel). Reject it in a
+    # packaged install rather than silently ignoring it. It does NOT imply
+    # --reload — reloading re-imports egg, which reruns the editable rebuild
+    # hook; keep that opt-in via --reload so plain `--dev` never rebuilds.
+    if a.dev and repo is None:
+        p.error(
+            "--dev is only available from a source checkout; an installed "
+            "wheel already ships the vendored browser assets"
+        )
+
+    _ensure_assets(repo, dev=a.dev)
+
+    # Docs are a checkout-only feature (docs/ isn't shipped in the wheel).
+    if repo is not None and not a.no_docs:
         _build_docs(repo)
 
     try:
@@ -106,12 +155,14 @@ def main() -> None:
     if a.watch:
         os.environ["EGG_WEBUI_WATCH"] = "1"
     uvicorn.run(
-        "app:app",
-        app_dir=str(webui),
+        "egg.webui.app:app",
         host=a.host,
         port=a.port,
         reload=a.reload,
-        reload_dirs=[str(webui), str(repo / "egg")] if a.reload else None,
+        reload_dirs=[str(egg_dir)] if a.reload else None,
+        # Don't reload on the compiled extension (the editable rebuild hook
+        # touches it on import → a reload loop) or on generated web assets.
+        reload_excludes=["*.so", "static/vendor/*", "docs/*"] if a.reload else None,
     )
 
 

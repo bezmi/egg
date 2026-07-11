@@ -17,7 +17,7 @@ uv run --no-sync egg-webui --host 0.0.0.0 --reload  # dev server: auto-restart
                                                     # on edits to webui/ or egg/
 # (reload drops websocket connections and any in-flight run; open a
 # script with the dev server via the positional arg or EGG_WEBUI_SCRIPT)
-# equivalent without the console script: uv run --no-sync python webui/app.py
+# equivalent without the console script: uv run --no-sync uvicorn egg.webui.app:app
 ```
 
 What gets drawn (harvested from the script's namespace, recursing a few
@@ -104,7 +104,7 @@ dict in the guard") — and hands the result over explicitly:
 
 ```python
 if __name__ == "__egg_webui__":
-    import egg_webui
+    import egg.webui as egg_webui
 
     # CLI defaults, mirroring driver.py — edit freely
     a = egg_webui.params(

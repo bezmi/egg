@@ -90,7 +90,7 @@ def build_geometry(bl_first_height=0.0, bl_growth=1.5, n_fixed=1):
 
 
 if __name__ == "__egg_webui__":  # this example runs ONLY in the egg web UI
-    import egg_webui
+    import egg.webui as egg_webui
 
     from egg import editable
 

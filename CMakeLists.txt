@@ -207,6 +207,37 @@ endif()
 install(TARGETS cpp_core LIBRARY DESTINATION egg/_cpp COMPONENT egg)
 
 # ---------------------------------------------------------------------------
+# Ship the web UI's assets in the wheel so the installed UI works offline and
+# never fetches from a CDN at runtime (a security requirement):
+#   - browser deps (prism-code-editor, its CSS, split.js), and
+#   - the built Sphinx docs (help → documentation), since a package user will
+#     never build the docs themselves.
+# Runs the out-of-tree tool tools/vendor_webui.py (NOT shipped in the wheel) at
+# install time, writing into the staged wheel prefix. Wheel builds ONLY:
+# editable/dev installs vendor on demand via `egg-webui --dev`, so the editable
+# rebuild hook (a bare `cmake --install`) never triggers a network download.
+# The browser-asset vendoring is required (hard-fails the build); the docs
+# build soft-fails inside the tool (skips if the Sphinx/doxygen toolchain is
+# absent). Needs internet at build time; PYBIND11_FINDPYTHON exposes
+# Python_EXECUTABLE.
+# ---------------------------------------------------------------------------
+if(SKBUILD_STATE STREQUAL "wheel")
+  install(CODE "
+    set(_static \"\${CMAKE_INSTALL_PREFIX}/egg/webui/static\")
+    set(_docs \"\${CMAKE_INSTALL_PREFIX}/egg/webui/docs\")
+    message(STATUS \"vendoring web UI assets -> \${_static}/vendor (+ docs)\")
+    execute_process(
+      COMMAND \"${Python_EXECUTABLE}\"
+              \"${CMAKE_CURRENT_SOURCE_DIR}/tools/vendor_webui.py\"
+              \"\${_static}/vendor\" --docs \"\${_docs}\"
+      RESULT_VARIABLE _rc)
+    if(_rc)
+      message(FATAL_ERROR \"web UI asset vendoring failed (rc=\${_rc})\")
+    endif()
+  " COMPONENT egg)
+endif()
+
+# ---------------------------------------------------------------------------
 # Optional: vendor the AdaptiveCpp runtime into the wheel so it installs
 # STANDALONE (no system acpp / no LD_LIBRARY_PATH needed). Uses acpp's own
 # deployment mechanism (doc/deployment.md): `acpp --acpp-deploy=<component>:<dir>`

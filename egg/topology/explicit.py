@@ -764,6 +764,11 @@ class ExplicitTopology:
         errors = [d for d in diags if not d.kind.startswith("warn")]
         if errors:
             raise ValueError(f"ExplicitTopology: {errors[0].msg}")
+        # No error diagnostics ⟹ flatten produced a topology. Assert it so the
+        # (un-annotated) return type narrows to BlockTopology instead of
+        # `... | None`, which otherwise makes `build().initialize_grid()` and
+        # every `topo = builder.build()` look like an attribute-of-None error.
+        assert topo is not None
         return topo
 
     def initialize_grid(self):

@@ -50,7 +50,6 @@ import time
 import traceback
 from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
-from pathlib import Path
 from queue import Empty, SimpleQueue
 
 RENDER_TIMEOUT = 30.0  # s; a script exec'ing longer than this is killed
@@ -62,7 +61,7 @@ _EMPTY_SVG: str | None = None
 # stdout before anything heavy imports, or a stray C-level print would
 # corrupt the pickle channel.
 def _error_result(msg: str) -> "SceneResult":  # noqa: F821
-    from scene import Scene, SceneResult, render_svg
+    from .scene import Scene, SceneResult, render_svg
 
     global _EMPTY_SVG
     if _EMPTY_SVG is None:
@@ -138,11 +137,12 @@ class RenderWorker:
 
     def _ensure(self) -> subprocess.Popen:
         if self._proc is None or self._proc.poll() is not None:
+            # Run as a package module so the child's `from .scene import …`
+            # resolves from the installed egg.webui package.
             self._proc = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve())],
+                [sys.executable, "-m", "egg.webui.render_worker"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,  # the response channel; stderr stays on the console
-                cwd=str(Path(__file__).resolve().parent),
             )
         return self._proc
 
@@ -233,7 +233,7 @@ def main() -> None:
         pickle.dump(msg, chan, protocol=pickle.HIGHEST_PROTOCOL)
         chan.flush()
 
-    from scene import (
+    from .scene import (
         build_scene,
         su2_export_text,
         validate_blocking,

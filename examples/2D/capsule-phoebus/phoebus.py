@@ -185,10 +185,6 @@ def setup(a):
 
 
 def main():
-    import os
-    import sys
-
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from driver import finish, parse_args
 
     a = parse_args()
@@ -199,7 +195,7 @@ def main():
 
 
 if __name__ == "__egg_webui__":  # running inside the egg web UI
-    import egg_webui
+    import egg.webui as egg_webui
 
     # CLI defaults, mirroring driver.py — edit freely
     a = egg_webui.params(

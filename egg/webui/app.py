@@ -10,7 +10,7 @@
 
 Run (after ``uv sync --group webui``)::
 
-    uv run --no-sync python webui/app.py [path/to/script.py]
+    egg-webui [path/to/script.py]
 
 Left pane: a Python script using the egg 2D front-end. Right pane: an SVG
 render of whatever the script defines (curves, points, and — if it builds
@@ -42,13 +42,16 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.parse
 import time
 from pathlib import Path
 
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
-from vendor import VENDOR_DIR, ensure_vendor
+
+from ._assets import MISSING_MSG, VENDOR_DIR, vendor_ready
+from .lsp import DOC_URI, ROOT_URI, LspBridge, lsp_available
 
 from fasthtml.common import (
     A,
@@ -58,6 +61,7 @@ from fasthtml.common import (
     Header,
     Input,
     Label,
+    Link,
     NotStr,
     Option,
     Pre,
@@ -72,8 +76,8 @@ from fasthtml.common import (
     serve,
     to_xml,
 )
-from render_worker import RenderWorker
-from scene import (
+from .render_worker import RenderWorker
+from .scene import (
     SceneResult,
     exec_script,
     grid_to_su2_text,
@@ -91,9 +95,20 @@ from scene import (
 
 from egg.pipeline import PipelineConfig
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-EXAMPLES_DIR = _REPO_ROOT / "examples" / "2D"
-DEFAULT_SCRIPT = EXAMPLES_DIR / "egg" / "egg.py"
+
+def _find_repo_root(start: Path) -> Path | None:
+    """The source-checkout root (holds ``pyproject.toml``/``.git``) above the
+    installed ``egg`` package, or ``None`` when running from a packaged wheel.
+    Checkout-only features (examples browser, docs) key off this."""
+    for p in (start, *start.parents):
+        if (p / "pyproject.toml").is_file() or (p / ".git").exists():
+            return p
+    return None
+
+
+_REPO_ROOT = _find_repo_root(Path(__file__).resolve())
+EXAMPLES_DIR = _REPO_ROOT / "examples" / "2D" if _REPO_ROOT else None
+DEFAULT_SCRIPT = EXAMPLES_DIR / "egg" / "egg.py" if EXAMPLES_DIR else None
 
 # The page's CSS / JS / static SVG live under static/ (loaded here, embedded
 # inline in the head); keep large front-end assets out of this module.
@@ -104,37 +119,73 @@ def _static(name: str) -> str:
     return (_STATIC / name).read_text()
 
 
+# egg mark: an egg outline with a 3x3 "#" grid clipped inside it. Used inline
+# in the header (currentColor, tinted by --ctp-* so it re-themes) and as the
+# favicon (app.js recolors that per flavor). Keep the shape in one place.
+_EGG_D = "M50 7C65 7 83 35 83 59 83 81 68 93 50 93 32 93 17 81 17 59 17 35 35 7 50 7Z"
+
+
+def _egg_svg(stroke: str, attrs: str = "") -> str:
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" '
+        f'stroke="{stroke}" stroke-width="7" stroke-linecap="round" '
+        f'stroke-linejoin="round"{attrs}>'
+        f'<clipPath id="egg-clip"><path d="{_EGG_D}"/></clipPath>'
+        f'<path d="{_EGG_D}"/>'
+        f'<g clip-path="url(#egg-clip)" stroke-width="6">'
+        f'<path d="M40 15V95M60 15V95M10 48H90M10 66H90"/></g></svg>'
+    )
+
+
+EGG_LOGO = _egg_svg(
+    "currentColor", ' class="egg-logo" width="26" height="26" role="img" aria-label="egg"'
+)
+# Default favicon (mocha yellow); app.js re-tints it to the active flavor.
+FAVICON = "data:image/svg+xml," + urllib.parse.quote(_egg_svg("#f9e2af"))
+
 # Static axis orientation gizmo (2D pan/zoom never rotates the frame).
 AXES_SVG = _static("axes.svg")
 
 CSS = _static("app.css")
+
+# Catppuccin theme for the prism editor (token colors + chrome), driven off the
+# same --ctp-* variables as the rest of the UI so it re-themes with the flavor.
+CATPPUCCIN = _static("catppuccin.css")
 
 # Tab key in the editor; viewBox-based pan/zoom on the SVG (kept across
 # HTMX swaps once the user has interacted, reset by the fit button);
 # layer visibility toggles; example loader.
 JS = _static("app.js")
 
-# CodeMirror 6 editor upgrade, loaded as ES modules from esm.sh. Entirely
-# optional: if the CDN is unreachable the plain textarea keeps working
-# (syntax highlighting and completion are the only loss). Completions come
-# from /api/completions — introspected from the real egg API — layered on
-# lang-python's builtin global/local completion.
+# prism-code-editor upgrade, loaded as ES modules from the local /vendor
+# mount (never a CDN). Completions come from based-pyright over /lsp, with
+# the introspected /api/completions list as a fallback source.
 EDITOR_JS = _static("editor.js")
 
-# Vendored browser deps (offline serving): download if missing, mount the
-# static dir, and prefer local files with a CDN fallback for split.js.
-_VENDORED = ensure_vendor()
-_SPLIT_SRC = (
-    "/vendor/split.min.js"
-    if _VENDORED
-    else "https://cdn.jsdelivr.net/npm/split.js@1.6.5/dist/split.min.js"
-)
+# All browser assets are served locally from /vendor (no CDN fallback, by
+# design). They are produced offline by tools/vendor_webui.py — at wheel-build
+# time, or via `egg-webui --dev` in a checkout. If they are absent there is no
+# safe way to serve the UI, so fail fast with an actionable message rather than
+# reaching out to the network.
+if not vendor_ready():
+    raise SystemExit(MISSING_MSG)
+
+_SPLIT_SRC = "/vendor/split.min.js"
+
+# prism-code-editor stylesheets (served locally from /vendor): the required
+# layout plus the enabled extensions. The catppuccin token/chrome theme lives
+# in app.css (Style(CSS)), loaded after these so it wins.
+_PCE_CSS = ("layout.css", "search.css", "autocomplete.css", "autocomplete-icons.css",
+            "cursor.css")
 
 app, rt = fast_app(
     pico=False,
     exts="ws",
     hdrs=(
+        Link(rel="icon", type="image/svg+xml", href=FAVICON, id="favicon"),
+        *(Link(rel="stylesheet", href=f"/vendor/{c}") for c in _PCE_CSS),
         Style(CSS),
+        Style(CATPPUCCIN),
         Script(src=_SPLIT_SRC),
         Script(JS),
         Script(EDITOR_JS, type="module"),
@@ -142,18 +193,26 @@ app, rt = fast_app(
 )
 
 mimetypes.add_type("text/javascript", ".mjs")
-if VENDOR_DIR.is_dir():
-    # Insert FIRST: fasthtml's built-in root static route matches any path
-    # with a known extension (including .js) and would 404 /vendor/*.js
-    # before a normally-appended mount is ever consulted.
-    app.router.routes.insert(
-        0, Mount("/vendor", app=StaticFiles(directory=VENDOR_DIR), name="vendor")
-    )
+mimetypes.add_type("text/javascript", ".js")
+# Insert FIRST: fasthtml's built-in root static route matches any path with a
+# known extension (including .js) and would 404 /vendor/*.js before a
+# normally-appended mount is ever consulted.
+app.router.routes.insert(
+    0, Mount("/vendor", app=StaticFiles(directory=VENDOR_DIR), name="vendor")
+)
 
-# The Sphinx site, when built (egg-webui refreshes it at startup; also
+# The Sphinx site. In an installed wheel it ships under egg/webui/docs
+# (built at wheel time by tools/vendor_webui.py --docs). In a checkout it is
+# whatever `egg-webui` refreshed into docs/_build/html at startup (also
 # `uv run --group docs sphinx-build -b html docs docs/_build/html`).
-DOCS_DIR = _REPO_ROOT / "docs" / "_build" / "html"
-if DOCS_DIR.is_dir():
+_PACKAGED_DOCS = _STATIC.parent / "docs"
+if _PACKAGED_DOCS.is_dir():
+    DOCS_DIR = _PACKAGED_DOCS
+elif _REPO_ROOT:
+    DOCS_DIR = _REPO_ROOT / "docs" / "_build" / "html"
+else:
+    DOCS_DIR = None
+if DOCS_DIR and DOCS_DIR.is_dir():
     app.router.routes.insert(
         0, Mount("/docs", app=StaticFiles(directory=DOCS_DIR, html=True), name="docs")
     )
@@ -204,6 +263,51 @@ async def _on_disconn(ws):
 @app.ws("/ws", conn=_on_conn, disconn=_on_disconn)
 async def ws(msg: str):
     pass  # server-push only
+
+
+# --- language server bridge (based-pyright over /lsp) ---
+# One bridge (one basedpyright subprocess) per editor connection. The browser
+# drives the LSP flow; the reader thread forwards server frames back over the
+# same socket. Kept separate from /ws, which is bound to run-frame HTML
+# fan-out. Degrades gracefully: if the language server isn't installed we tell
+# the client and the editor keeps working without language features.
+_lsp_bridges: dict[int, LspBridge] = {}
+
+
+async def _lsp_conn(ws):
+    loop = asyncio.get_running_loop()
+
+    def to_client(msg: dict) -> None:
+        asyncio.run_coroutine_threadsafe(ws.send_text(json.dumps(msg)), loop)
+
+    if not lsp_available():
+        await ws.send_text(json.dumps({"jsonrpc": "2.0", "method": "egg/unavailable"}))
+        return
+    _lsp_bridges[id(ws)] = LspBridge(to_client)
+    # Tell the browser which workspace/document URIs to use for its LSP flow.
+    await ws.send_text(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "egg/ready",
+                "params": {"rootUri": ROOT_URI, "docUri": DOC_URI},
+            }
+        )
+    )
+
+
+async def _lsp_disconn(ws):
+    bridge = _lsp_bridges.pop(id(ws), None)
+    if bridge:
+        bridge.close()
+
+
+@app.ws("/lsp", conn=_lsp_conn, disconn=_lsp_disconn)
+async def lsp_ws(ws, data):
+    # fasthtml JSON-parses the incoming frame; `data` is the JSON-RPC message.
+    bridge = _lsp_bridges.get(id(ws))
+    if bridge and data:
+        bridge.from_client(data)
 
 
 def _broadcast(html: str) -> None:
@@ -262,8 +366,14 @@ def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid"):
                 cls="danger",
                 hx_post="/stop",
                 hx_swap="none",
+                # Serialize presses so a fast double-click escalates in order:
+                # the first request sets the stop flag, the second (queued
+                # behind it) then sees it and hard-kills. Without this the two
+                # presses can race, both take the "first press" branch, and
+                # nothing kills.
+                hx_sync="this:queue all",
                 disabled=(not running) or None,
-                title="stop (Ctrl+Enter)",
+                title="stop (Ctrl+Enter); double-click to force kill",
             ),
             Button(
                 NotStr(_REFRESH_SVG),
@@ -280,7 +390,12 @@ def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid"):
         else []
     )
     return Div(
-        *chips,
+        # Chips live in their own #viewchips box (display:contents, so the flex
+        # layout is unchanged). Run frames OOB-swap ONLY #viewchips, never the
+        # whole bar — the control buttons keep a stable DOM node, so a stop
+        # click always lands on an htmx-bound button instead of one that the
+        # last frame just replaced (the old whole-bar swap dropped stop clicks).
+        Div(*chips, id="viewchips"),
         Div(
             Select(
                 Option("grid view", value="grid", selected=(mode == "grid")),
@@ -306,6 +421,13 @@ def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid"):
         cls="bar",
         hx_swap_oob="true" if oob else None,
     )
+
+
+def view_chips(*chips, oob: bool = False):
+    """Just the status-chip box inside the view bar. Run frames swap this (not
+    the whole bar) so the run/stop/reset controls keep a stable, htmx-bound
+    DOM node across the ~16 fps frame stream."""
+    return Div(*chips, id="viewchips", hx_swap_oob="true" if oob else None)
 
 
 def _mindet_chip(md: float | None):
@@ -494,7 +616,9 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
 # --- the server only renders the frames it streams back and fans them out ---
 
 
-WORKER_PY = Path(__file__).resolve().parent / "worker.py"
+# Run the solver worker as a package module so its `from .scene import …`
+# resolves from the installed package (the webui now lives at egg/webui/).
+WORKER_MODULE = "egg.webui.worker"
 
 FRAME_INTERVAL = 0.06  # s; skip intermediate frames arriving faster than this
 QUALITY_INTERVAL = 1.0  # s; quality stats recompute at most this often mid-run
@@ -505,7 +629,15 @@ def _frame(
 ) -> None:
     refresh_grid_layer(h.scene, h.grid)
     svg = _run["svg"] = render_svg(h.scene, bounds=bounds)
-    msg = to_xml(view_bar(*chips, running=running, oob=True)) + to_xml(
+    # Mid-run frames refresh only the chips so the control buttons stay put; the
+    # terminal frame (running=False) swaps the whole bar to re-enable run / grey
+    # out stop.
+    bar = (
+        view_chips(*chips, oob=True)
+        if running
+        else view_bar(*chips, running=False, oob=True)
+    )
+    msg = to_xml(bar) + to_xml(
         Div(NotStr(svg), id="canvas", cls="canvas", hx_swap_oob="true")
     )
     if quality:
@@ -666,10 +798,9 @@ def run_route(code: str, path: str = ""):
     with os.fdopen(fd, "w") as f:
         f.write(code)
     proc = subprocess.Popen(
-        [sys.executable, str(WORKER_PY), tmp, path],
+        [sys.executable, "-m", WORKER_MODULE, tmp, path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,  # the frame channel; stderr stays on the console
-        cwd=str(WORKER_PY.parent),
     )
     t = threading.Thread(target=_run_reader, args=(code, path, proc), daemon=True)
     _run.update(proc=proc, reader=t, stop=False, tmp=tmp, log=[])
@@ -785,7 +916,7 @@ async def export_su2_route(code: str, path: str = ""):
 @rt("/api/files")
 def api_files(dir: str = ""):
     """List one directory: subdirs + .py files (hidden/__pycache__ skipped)."""
-    d = (Path(dir).expanduser() if dir else _REPO_ROOT).resolve()
+    d = (Path(dir).expanduser() if dir else (_REPO_ROOT or Path.home())).resolve()
     if not d.is_dir():
         return JSONResponse({"error": f"not a directory: {d}"}, status_code=400)
     try:
@@ -917,11 +1048,13 @@ async def get(view: str = "grid"):
     return (
         Title("egg webui"),
         Header(
-            Span("egg", style="font-weight:600"),
+            NotStr(EGG_LOGO),
             _menu(
                 "file",
                 Button("open…", id="file-open"),
-                Button("examples…", id="file-examples", data_dir=str(EXAMPLES_DIR)),
+                Button(
+                    "examples…", id="file-examples", data_dir=str(EXAMPLES_DIR or "")
+                ),
                 Button("save", id="file-save"),
                 Button("save as…", id="file-saveas"),
                 Label(
@@ -980,6 +1113,12 @@ async def get(view: str = "grid"):
                 ),
                 Div(cls="menu-sep"),
                 Label(
+                    Input(type="checkbox", id="wrap-toggle"),
+                    "wrap long lines",
+                    title="wrap editor lines that don't fit the panel width",
+                ),
+                Div(cls="menu-sep"),
+                Label(
                     "theme",
                     Select(
                         # catppuccin flavors, dark → light; JS restores the
@@ -995,7 +1134,7 @@ async def get(view: str = "grid"):
             _menu(
                 "help",
                 A("documentation", href="/docs/", target="_blank")
-                if DOCS_DIR.is_dir()
+                if DOCS_DIR and DOCS_DIR.is_dir()
                 else Span(
                     "docs not built — uv sync --group docs, then restart egg-webui",
                     cls="menu-note",
@@ -1010,6 +1149,10 @@ async def get(view: str = "grid"):
                     code,
                     name="code",
                     spellcheck="false",
+                    # Firefox restores a textarea's value from session history on
+                    # reload (Chrome does not); that stale value desyncs from the
+                    # server-rendered canvas. Same defense as the view <select>.
+                    autocomplete="off",
                     data_persist="0" if _script_arg() is not None else "1",
                     data_file=str(_script_arg() or ""),
                     data_watch="1"
@@ -1161,11 +1304,12 @@ def _script_arg() -> Path | None:
 
 def _initial_code() -> str:
     p = _script_arg() or DEFAULT_SCRIPT
-    return p.read_text()
+    return p.read_text() if p else ""
 
 
 def _initial_path() -> str:
-    return str(_script_arg() or DEFAULT_SCRIPT)
+    p = _script_arg() or DEFAULT_SCRIPT
+    return str(p) if p else ""
 
 
 if __name__ == "__main__":
