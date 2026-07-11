@@ -153,6 +153,22 @@ try {
       20: 'enum', 21: 'constant', 22: 'class', 23: 'event', 24: 'keyword',
       25: 'parameter'};
 
+    // Callable kinds that take a `(…)` call: method, function, constructor,
+    // class. basedpyright/pyright never emit `f(…)` snippets themselves
+    // (`completeFunctionParens` is a closed-source Pylance feature — absent from
+    // the open-source server), so we synthesize the parens client-side, exactly
+    // as Pylance does in-editor. See toPrism + the parensOk guards below.
+    const CALLABLE_KINDS = new Set([2, 3, 4, 7]);
+    // Contexts where appending `()` is wrong: an import/decorator reference or a
+    // type annotation names the callable without calling it.
+    const forbidsParens = (lineBefore, nextChar) =>
+      nextChar === '(' ||                                   // already a call
+      /^\s*(from\b.*\bimport\b|import\b)/.test(lineBefore) ||  // import target
+      /^\s*@[\w.]*$/.test(lineBefore) ||                    // bare decorator ref
+      /->\s*[\w.\[\], ]*$/.test(lineBefore) ||              // return annotation
+      /^\s*[A-Za-z_]\w*\s*:\s*[\w.\[\], ]*$/.test(lineBefore) ||  // var annotation
+      /\bdef\b.*\(.*:\s*[\w.\[\], ]*$/.test(lineBefore);    // def param annotation
+
     const offsetToLC = (value, off) => {
       let line = 0, last = 0;
       for (let i = 0; i < off; i++)
@@ -175,16 +191,117 @@ try {
       out += text.slice(last).replace(/\\(.)/g, '$1');
       return {insert: out, tabStops: stops.length ? stops : undefined};
     };
-    // LSP CompletionItem -> prism Completion (with snippet support).
-    const toPrism = (it) => {
+    // Parse the parameter list out of pyright's resolved signature doc (a
+    // ```python\ndef name(\n  p1: T,\n  kw: T = default\n) -> R\n``` block) into
+    // a snippet `base(${1:p1}, kw=${2:default})$0` — required params become
+    // placeholders, defaulted params become keyword args at their default.
+    // Bracket-aware so nested types/defaults (dict[str, int], (1, 2)) don't split
+    // wrong. Returns {insert, tabStops} (via fromSnippet), or null if no signature.
+    const matchDelim = (s, open, chars) => {  // index of the delimiter closing s[open]
+      let depth = 0;
+      for (let i = open; i < s.length; i++) {
+        if (chars.open.includes(s[i])) depth++;
+        else if (chars.close.includes(s[i])) { if (--depth === 0) return i; }
+      }
+      return -1;
+    };
+    const BR = {open: '([{', close: ')]}'};
+    const paramSnippet = (base, resolved) => {
+      const doc = resolved && resolved.documentation;
+      const md = doc && (doc.value != null ? doc.value : doc);
+      if (typeof md !== 'string') return null;
+      const cb = /```(?:python)?\n([\s\S]*?)```/.exec(md);
+      const sig = cb ? cb[1] : md;
+      const open = sig.indexOf('(');
+      if (open < 0) return null;
+      const close = matchDelim(sig, open, BR);
+      if (close < 0) return null;
+      const inner = sig.slice(open + 1, close);
+      const toks = [];
+      let depth = 0, start = 0;
+      for (let i = 0; i <= inner.length; i++) {
+        const c = inner[i];
+        if (i === inner.length || (c === ',' && depth === 0)) {
+          const t = inner.slice(start, i).trim();
+          if (t) toks.push(t);
+          start = i + 1;
+        } else if (BR.open.includes(c)) depth++;
+        else if (BR.close.includes(c)) depth--;
+      }
+      const params = [];
+      for (let tok of toks) {
+        tok = tok.replace(/\s+/g, ' ').trim();
+        if (tok === '/' || tok === '*' || tok.startsWith('*')) continue;  // markers / *args
+        const nm = /^([A-Za-z_]\w*)/.exec(tok);
+        if (!nm || nm[1] === 'self' || nm[1] === 'cls') continue;
+        let eq = -1, d = 0;
+        for (let i = nm[1].length; i < tok.length; i++) {
+          const c = tok[i];
+          if (BR.open.includes(c)) d++;
+          else if (BR.close.includes(c)) d--;
+          else if (c === '=' && d === 0 && tok[i + 1] !== '=' &&
+                   !'=!<>'.includes(tok[i - 1])) { eq = i; break; }
+        }
+        params.push(eq >= 0 ? {name: nm[1], def: tok.slice(eq + 1).trim()} : {name: nm[1]});
+      }
+      if (!params.length) return {insert: base + '()', tabStops: [base.length + 2]};
+      const esc = (s) => s.replace(/\\/g, '\\\\').replace(/\}/g, '\\}');
+      const body = params.map((p, i) => p.def != null
+        ? `${p.name}=\${${i + 1}:${esc(p.def)}}` : `\${${i + 1}:${p.name}}`).join(', ');
+      return fromSnippet(base + '(' + body + ')$0');
+    };
+
+    // LSP CompletionItem -> prism Completion (with snippet support). Callables
+    // get a client-side `f(<cursor>)` (see CALLABLE_KINDS note) unless the server
+    // already supplied a snippet; upgradeParams later fills the arg placeholders.
+    const toPrism = (it, parensOk) => {
       const o = {label: it.label, icon: KIND[it.kind] || 'variable',
         detail: (it.detail || (it.labelDetails && it.labelDetails.description) || '').slice(0, 64)};
       const raw = (it.textEdit && it.textEdit.newText) || it.insertText;
+      let server = false;
       if (raw) {
-        if (it.insertTextFormat === 2) Object.assign(o, fromSnippet(raw));
+        if (it.insertTextFormat === 2) { Object.assign(o, fromSnippet(raw)); server = true; }
         else o.insert = raw;
       }
+      if (parensOk && !server && CALLABLE_KINDS.has(it.kind)) {
+        const base = o.insert != null ? o.insert : o.label;
+        if (!base.includes('(')) {
+          o.insert = base + '()';
+          o.tabStops = [base.length + 1];  // cursor between the parens
+          o._raw = it;                     // upgradeParams resolves this for params
+        }
+      }
       return o;
+    };
+    // Resolve callable completions and rewrite each option's insert to a full
+    // arg/kwarg placeholder snippet, in place — accepting after the (local,
+    // sub-100ms) resolve yields `f(${1:arg}, kw=${2:default})`; an instant accept
+    // falls back to the `f()` from toPrism. Bounded so a huge list can't fan out.
+    const resolveCache = new Map();
+    const resolveItem = (raw) => {
+      const key = raw.label + '\0' + (raw.kind || 0) + '\0' +
+        (raw.data ? JSON.stringify(raw.data) : '');
+      let p = resolveCache.get(key);
+      if (!p) { p = rpc('completionItem/resolve', raw).then((r) => r && r.result); resolveCache.set(key, p); }
+      return p;
+    };
+    const upgradeParams = (options) => {
+      let budget = 60;
+      for (const opt of options) {
+        if (!opt._raw || budget <= 0) continue;
+        // Classes: pyright renders a class completion's signature as `class
+        // Name()` — it never expands the (dataclass-)synthesized __init__ fields,
+        // so there is nothing to fill. Leave toPrism's `Name(<cursor>)` as-is
+        // (cursor between the parens) rather than parsing zero params and jumping
+        // the cursor past `)`. Constructor fields surface via signatureHelp.
+        if (opt._raw.kind === 7) continue;
+        budget--;
+        const base = opt.label;
+        resolveItem(opt._raw).then((res) => {
+          const snip = paramSnippet(base, res);
+          if (snip) { opt.insert = snip.insert; opt.tabStops = snip.tabStops; }
+        });
+      }
     };
 
     // Completions: a synchronous prism source backed by a cache. On a miss it
@@ -211,7 +328,10 @@ try {
       const list = Array.isArray(res) ? res : (res.items || []);
       const m = /[A-Za-z_][\w]*$/.exec(ctx.lineBefore);
       const from = ctx.pos - (m ? m[0].length : 0);
-      cache = {pos: ctx.pos, from, options: list.slice(0, 200).map(toPrism)};
+      const parensOk = !forbidsParens(ctx.lineBefore, editor.value[ctx.pos] || '');
+      cache = {pos: ctx.pos, from,
+        options: list.slice(0, 200).map((it) => toPrism(it, parensOk))};
+      if (parensOk) upgradeParams(cache.options);
       const q = editor.extensions.autoComplete;
       if (q && cache.options.length) q.startQuery(ctx.explicit);
     }
@@ -351,9 +471,9 @@ try {
       await rpc('initialize', {
         processId: null,
         rootUri: p.rootUri,
-        // configuration: true lets pyright pull our settings (interpreter,
-        // completeFunctionParens). NOT workspaceFolders — that one makes
-        // pyright wait on per-folder config and never publish diagnostics.
+        // configuration: true lets pyright pull our settings (interpreter path,
+        // analysis mode). NOT workspaceFolders — that one makes pyright wait on
+        // per-folder config and never publish diagnostics.
         capabilities: {
           workspace: {configuration: true},
           textDocument: {

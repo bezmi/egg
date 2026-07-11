@@ -61,9 +61,12 @@ def lsp_available() -> bool:
 
 
 def _analysis_settings() -> dict:
+    # NB: `completeFunctionParens` is intentionally absent — it is a closed-source
+    # Pylance setting that open-source pyright/basedpyright does not implement, so
+    # the server never emits `f(…)` snippets. The editor synthesizes function
+    # parens (and arg/kwarg placeholders) client-side instead; see editor.js.
     return {
         "autoImportCompletions": True,
-        "completeFunctionParens": True,  # callables complete as `f(…)` snippets
         "diagnosticMode": "openFilesOnly",
         "typeCheckingMode": "basic",
     }
