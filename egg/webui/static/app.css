@@ -231,6 +231,10 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
    container resize, so it goes stale on font zoom and leaves empty space).
    We want the scroll to end at the file, so drop it. */
 .editor .pce-wrapper { padding-bottom: 0 !important; }
+/* When wrapping, no horizontal scroll should exist — but the custom cursor and
+   overlays still sit at the un-wrapped column, leaving a phantom scrollable
+   width. Clip it so wrapped text never scrolls sideways. */
+.editor .prism-code-editor.pce-wrap { overflow-x: clip; }
 .viewer { flex: 1; display: flex; flex-direction: column; min-width: 0;
           position: relative; }
 #coords { position: absolute; right: 8px; bottom: 8px; z-index: 4;

@@ -36,7 +36,7 @@ try {
   const editor = core.createEditor(
     host,
     {language: 'python', value: ta.value, tabSize: 4, insertSpaces: true,
-     lineNumbers: true},
+     lineNumbers: true, wordWrap: localStorage.getItem('egg-webui-wrap') === '1'},
     cmds.editorCommands(cmds.defaultKeymap),
     cmds.editHistory(),
     mb.matchBrackets(),

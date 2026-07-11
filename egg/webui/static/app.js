@@ -56,6 +56,14 @@ function setTheme(name) {
 }
 updateFavicon();  // tint the initial favicon to the active flavor
 window.addEventListener('DOMContentLoaded', () => {
+  const wrap = document.getElementById('wrap-toggle');
+  if (wrap) {
+    wrap.checked = localStorage.getItem('egg-webui-wrap') === '1';
+    wrap.addEventListener('change', () => {
+      localStorage.setItem('egg-webui-wrap', wrap.checked ? '1' : '0');
+      if (window.eggEditor) window.eggEditor.setOptions({wordWrap: wrap.checked});
+    });
+  }
   const sel = document.getElementById('theme-select');
   if (!sel) return;
   sel.value = eggTheme;

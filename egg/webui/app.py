@@ -1087,6 +1087,12 @@ async def get(view: str = "grid"):
                 ),
                 Div(cls="menu-sep"),
                 Label(
+                    Input(type="checkbox", id="wrap-toggle"),
+                    "wrap long lines",
+                    title="wrap editor lines that don't fit the panel width",
+                ),
+                Div(cls="menu-sep"),
+                Label(
                     "theme",
                     Select(
                         # catppuccin flavors, dark → light; JS restores the
