@@ -24,15 +24,37 @@ if (!THEMES.includes(eggTheme))
   eggTheme = window.matchMedia('(prefers-color-scheme: dark)').matches
     ? 'mocha' : 'latte';
 document.documentElement.dataset.theme = eggTheme;
+// The favicon is the same egg mark as the header logo, recolored to the active
+// flavor's yellow. A favicon SVG can't read the page's data-theme, so we bake
+// the color in and regenerate the data-URI whenever the flavor changes.
+function eggFaviconSvg(color) {
+  const d = 'M50 7C65 7 83 35 83 59 83 81 68 93 50 93 32 93 17 81 17 59 17 35 35 7 50 7Z';
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" stroke="' +
+    color + '" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">' +
+    '<clipPath id="e"><path d="' + d + '"/></clipPath><path d="' + d + '"/>' +
+    '<g clip-path="url(#e)" stroke-width="6"><path d="M40 15V95M60 15V95M10 48H90M10 66H90"/></g></svg>';
+}
+function updateFavicon() {
+  const c = getComputedStyle(document.documentElement)
+    .getPropertyValue('--ctp-yellow').trim() || '#f9e2af';
+  let link = document.getElementById('favicon');
+  if (!link) {
+    link = document.createElement('link');
+    link.id = 'favicon'; link.rel = 'icon'; link.type = 'image/svg+xml';
+    document.head.appendChild(link);
+  }
+  link.href = 'data:image/svg+xml,' + encodeURIComponent(eggFaviconSvg(c));
+}
 function setTheme(name) {
   eggTheme = name;
   document.documentElement.dataset.theme = name;
   localStorage.setItem('egg-webui-theme', name);
-  // The editor re-themes automatically: catppuccin.css drives it off the live
-  // --ctp-* variables, which switch with data-theme. The event stays for any
-  // other listeners.
+  // The editor and header logo re-theme automatically off the live --ctp-*
+  // variables; only the baked-in favicon needs a manual refresh.
+  updateFavicon();
   window.dispatchEvent(new Event('egg-theme'));
 }
+updateFavicon();  // tint the initial favicon to the active flavor
 window.addEventListener('DOMContentLoaded', () => {
   const sel = document.getElementById('theme-select');
   if (!sel) return;

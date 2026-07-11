@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.parse
 import time
 from pathlib import Path
 
@@ -118,6 +119,30 @@ def _static(name: str) -> str:
     return (_STATIC / name).read_text()
 
 
+# egg mark: an egg outline with a 3x3 "#" grid clipped inside it. Used inline
+# in the header (currentColor, tinted by --ctp-* so it re-themes) and as the
+# favicon (app.js recolors that per flavor). Keep the shape in one place.
+_EGG_D = "M50 7C65 7 83 35 83 59 83 81 68 93 50 93 32 93 17 81 17 59 17 35 35 7 50 7Z"
+
+
+def _egg_svg(stroke: str, attrs: str = "") -> str:
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none" '
+        f'stroke="{stroke}" stroke-width="7" stroke-linecap="round" '
+        f'stroke-linejoin="round"{attrs}>'
+        f'<clipPath id="egg-clip"><path d="{_EGG_D}"/></clipPath>'
+        f'<path d="{_EGG_D}"/>'
+        f'<g clip-path="url(#egg-clip)" stroke-width="6">'
+        f'<path d="M40 15V95M60 15V95M10 48H90M10 66H90"/></g></svg>'
+    )
+
+
+EGG_LOGO = _egg_svg(
+    "currentColor", ' class="egg-logo" width="26" height="26" role="img" aria-label="egg"'
+)
+# Default favicon (mocha yellow); app.js re-tints it to the active flavor.
+FAVICON = "data:image/svg+xml," + urllib.parse.quote(_egg_svg("#f9e2af"))
+
 # Static axis orientation gizmo (2D pan/zoom never rotates the frame).
 AXES_SVG = _static("axes.svg")
 
@@ -157,6 +182,7 @@ app, rt = fast_app(
     pico=False,
     exts="ws",
     hdrs=(
+        Link(rel="icon", type="image/svg+xml", href=FAVICON, id="favicon"),
         *(Link(rel="stylesheet", href=f"/vendor/{c}") for c in _PCE_CSS),
         Style(CSS),
         Style(CATPPUCCIN),
@@ -996,7 +1022,7 @@ async def get(view: str = "grid"):
     return (
         Title("egg webui"),
         Header(
-            Span("egg", style="font-weight:600"),
+            NotStr(EGG_LOGO),
             _menu(
                 "file",
                 Button("open…", id="file-open"),
