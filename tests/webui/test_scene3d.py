@@ -8,15 +8,9 @@
 
 """The 3D webui scene payload (webui/scene3d.py)."""
 
-import sys
-from pathlib import Path
-
 import numpy as np
 
-REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "webui"))
-
-import scene3d  # noqa: E402  (webui/scene3d.py, path-injected above)
+from egg.webui import scene3d
 
 from egg.geometry.frontend3d import Bezier3, Edge  # noqa: E402
 from egg.topology.explicit import ExplicitTopology  # noqa: E402

@@ -8,11 +8,11 @@
 
 """Ambient API for scripts running inside the egg web UI.
 
-Scripts exec with ``__name__ == "__egg_webui__"`` and the UI's directory
-on ``sys.path``, so inside the guard a script can do::
+Scripts exec with ``__name__ == "__egg_webui__"`` and ``egg`` importable,
+so inside the guard a script can do::
 
     if __name__ == "__egg_webui__":
-        import egg_webui
+        import egg.webui as egg_webui
 
         egg_webui.run(grid, generate_steps(grid, config=cfg,
                                            untangle_direct=False))

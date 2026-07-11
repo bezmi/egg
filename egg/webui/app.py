@@ -10,7 +10,7 @@
 
 Run (after ``uv sync --group webui``)::
 
-    uv run --no-sync python webui/app.py [path/to/script.py]
+    egg-webui [path/to/script.py]
 
 Left pane: a Python script using the egg 2D front-end. Right pane: an SVG
 render of whatever the script defines (curves, points, and — if it builds
@@ -48,7 +48,8 @@ from pathlib import Path
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
-from vendor import VENDOR_DIR, ensure_vendor
+
+from .vendor import VENDOR_DIR, ensure_vendor
 
 from fasthtml.common import (
     A,
@@ -72,8 +73,8 @@ from fasthtml.common import (
     serve,
     to_xml,
 )
-from render_worker import RenderWorker
-from scene import (
+from .render_worker import RenderWorker
+from .scene import (
     SceneResult,
     exec_script,
     grid_to_su2_text,
@@ -91,9 +92,20 @@ from scene import (
 
 from egg.pipeline import PipelineConfig
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-EXAMPLES_DIR = _REPO_ROOT / "examples" / "2D"
-DEFAULT_SCRIPT = EXAMPLES_DIR / "egg" / "egg.py"
+
+def _find_repo_root(start: Path) -> Path | None:
+    """The source-checkout root (holds ``pyproject.toml``/``.git``) above the
+    installed ``egg`` package, or ``None`` when running from a packaged wheel.
+    Checkout-only features (examples browser, docs) key off this."""
+    for p in (start, *start.parents):
+        if (p / "pyproject.toml").is_file() or (p / ".git").exists():
+            return p
+    return None
+
+
+_REPO_ROOT = _find_repo_root(Path(__file__).resolve())
+EXAMPLES_DIR = _REPO_ROOT / "examples" / "2D" if _REPO_ROOT else None
+DEFAULT_SCRIPT = EXAMPLES_DIR / "egg" / "egg.py" if EXAMPLES_DIR else None
 
 # The page's CSS / JS / static SVG live under static/ (loaded here, embedded
 # inline in the head); keep large front-end assets out of this module.
@@ -152,8 +164,8 @@ if VENDOR_DIR.is_dir():
 
 # The Sphinx site, when built (egg-webui refreshes it at startup; also
 # `uv run --group docs sphinx-build -b html docs docs/_build/html`).
-DOCS_DIR = _REPO_ROOT / "docs" / "_build" / "html"
-if DOCS_DIR.is_dir():
+DOCS_DIR = _REPO_ROOT / "docs" / "_build" / "html" if _REPO_ROOT else None
+if DOCS_DIR and DOCS_DIR.is_dir():
     app.router.routes.insert(
         0, Mount("/docs", app=StaticFiles(directory=DOCS_DIR, html=True), name="docs")
     )
@@ -494,7 +506,9 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
 # --- the server only renders the frames it streams back and fans them out ---
 
 
-WORKER_PY = Path(__file__).resolve().parent / "worker.py"
+# Run the solver worker as a package module so its `from .scene import …`
+# resolves from the installed package (the webui now lives at egg/webui/).
+WORKER_MODULE = "egg.webui.worker"
 
 FRAME_INTERVAL = 0.06  # s; skip intermediate frames arriving faster than this
 QUALITY_INTERVAL = 1.0  # s; quality stats recompute at most this often mid-run
@@ -666,10 +680,9 @@ def run_route(code: str, path: str = ""):
     with os.fdopen(fd, "w") as f:
         f.write(code)
     proc = subprocess.Popen(
-        [sys.executable, str(WORKER_PY), tmp, path],
+        [sys.executable, "-m", WORKER_MODULE, tmp, path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,  # the frame channel; stderr stays on the console
-        cwd=str(WORKER_PY.parent),
     )
     t = threading.Thread(target=_run_reader, args=(code, path, proc), daemon=True)
     _run.update(proc=proc, reader=t, stop=False, tmp=tmp, log=[])
@@ -785,7 +798,7 @@ async def export_su2_route(code: str, path: str = ""):
 @rt("/api/files")
 def api_files(dir: str = ""):
     """List one directory: subdirs + .py files (hidden/__pycache__ skipped)."""
-    d = (Path(dir).expanduser() if dir else _REPO_ROOT).resolve()
+    d = (Path(dir).expanduser() if dir else (_REPO_ROOT or Path.home())).resolve()
     if not d.is_dir():
         return JSONResponse({"error": f"not a directory: {d}"}, status_code=400)
     try:
@@ -921,7 +934,9 @@ async def get(view: str = "grid"):
             _menu(
                 "file",
                 Button("open…", id="file-open"),
-                Button("examples…", id="file-examples", data_dir=str(EXAMPLES_DIR)),
+                Button(
+                    "examples…", id="file-examples", data_dir=str(EXAMPLES_DIR or "")
+                ),
                 Button("save", id="file-save"),
                 Button("save as…", id="file-saveas"),
                 Label(
@@ -995,7 +1010,7 @@ async def get(view: str = "grid"):
             _menu(
                 "help",
                 A("documentation", href="/docs/", target="_blank")
-                if DOCS_DIR.is_dir()
+                if DOCS_DIR and DOCS_DIR.is_dir()
                 else Span(
                     "docs not built — uv sync --group docs, then restart egg-webui",
                     cls="menu-note",
@@ -1161,11 +1176,12 @@ def _script_arg() -> Path | None:
 
 def _initial_code() -> str:
     p = _script_arg() or DEFAULT_SCRIPT
-    return p.read_text()
+    return p.read_text() if p else ""
 
 
 def _initial_path() -> str:
-    return str(_script_arg() or DEFAULT_SCRIPT)
+    p = _script_arg() or DEFAULT_SCRIPT
+    return str(p) if p else ""
 
 
 if __name__ == "__main__":

@@ -304,7 +304,7 @@ def main():
 
 
 if __name__ == "__egg_webui__":  # running inside the egg web UI
-    import egg_webui
+    import egg.webui as egg_webui
 
     # CLI defaults, mirroring driver.py — edit freely
     a = egg_webui.params(

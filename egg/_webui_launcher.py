@@ -6,17 +6,16 @@
 # See the license for details.
 # For commercial licensing, contact s.imran@tuta.io
 
-"""``egg-webui`` console script: serve the web UI from a repo checkout.
+"""``egg-webui`` console script: serve the web UI.
 
-The web UI prototype lives in ``webui/`` next to the ``egg`` package (it
-is not shipped inside the wheel), so this launcher only works with the
-editable/development install — which is the only supported way to run
-the prototype anyway. Usage::
+The web UI lives inside the package at ``egg/webui/`` and ships in the
+wheel, so this launcher works from both an editable checkout and an
+installed wheel. Usage::
 
-    uv run --no-sync egg-webui                      # http://127.0.0.1:5001
-    uv run --no-sync egg-webui my_geometry.py       # open a script
-    uv run --no-sync egg-webui my_geometry.py --watch    # follow it on disk
-    uv run --no-sync egg-webui --host 0.0.0.0 --reload   # dev server
+    egg-webui                      # http://127.0.0.1:5001
+    egg-webui my_geometry.py       # open a script
+    egg-webui my_geometry.py --watch    # follow it on disk
+    egg-webui --host 0.0.0.0 --reload   # dev server
 """
 
 from __future__ import annotations
@@ -26,6 +25,15 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _find_repo_root(start: Path) -> Path | None:
+    """The source-checkout root (holds ``pyproject.toml``/``.git``) above the
+    installed package, or ``None`` when running from a packaged wheel."""
+    for p in (start, *start.parents):
+        if (p / "pyproject.toml").is_file() or (p / ".git").exists():
+            return p
+    return None
 
 
 def _build_docs(repo: Path) -> None:
@@ -54,13 +62,8 @@ def _build_docs(repo: Path) -> None:
 
 
 def main() -> None:
-    repo = Path(__file__).resolve().parents[1]
-    webui = repo / "webui"
-    if not (webui / "app.py").is_file():
-        raise SystemExit(
-            "egg-webui: webui/app.py not found — the web UI runs from a "
-            "repo checkout (editable install), not from an installed wheel"
-        )
+    egg_dir = Path(__file__).resolve().parent
+    repo = _find_repo_root(egg_dir)
 
     p = argparse.ArgumentParser(prog="egg-webui", description="serve the egg web UI")
     p.add_argument("script", nargs="?", help="geometry script to open in the editor")
@@ -91,7 +94,8 @@ def main() -> None:
     if a.watch and not a.script:
         p.error("--watch needs a script to watch (pass its path)")
 
-    if not a.no_docs:
+    # Docs are a checkout-only feature (docs/ isn't shipped in the wheel).
+    if repo is not None and not a.no_docs:
         _build_docs(repo)
 
     try:
@@ -106,12 +110,11 @@ def main() -> None:
     if a.watch:
         os.environ["EGG_WEBUI_WATCH"] = "1"
     uvicorn.run(
-        "app:app",
-        app_dir=str(webui),
+        "egg.webui.app:app",
         host=a.host,
         port=a.port,
         reload=a.reload,
-        reload_dirs=[str(webui), str(repo / "egg")] if a.reload else None,
+        reload_dirs=[str(egg_dir)] if a.reload else None,
     )
 
 

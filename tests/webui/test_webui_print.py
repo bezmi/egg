@@ -15,15 +15,11 @@ worker folding it into a render's captured stdout end to end.
 """
 
 import sys
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "webui"))
-
-import egg._webui_print as wp  # noqa: E402  (core bridge, sink lives here)
-from egg import webui_print  # noqa: E402  (the re-exported public name)
+import egg._webui_print as wp  # (core bridge, sink lives here)
+from egg import webui_print  # (the re-exported public name)
 
 
 @pytest.fixture(autouse=True)
@@ -59,7 +55,7 @@ def test_ignores_file_and_flush_kwargs():
 
 
 def test_egg_webui_print_alias_shares_the_sink():
-    import egg_webui
+    import egg.webui as egg_webui
 
     seen = []
     wp._set_sink(seen.append)
@@ -70,13 +66,13 @@ def test_egg_webui_print_alias_shares_the_sink():
 def test_render_worker_folds_webui_print_into_stdout():
     """End to end: egg_webui.print during a render lands in the render's
     captured stdout (the view's stdout panel), the same text a run streams."""
-    from render_worker import RenderWorker
+    from egg.webui.render_worker import RenderWorker
 
     w = RenderWorker()
     try:
         code = (
             "from egg.geometry import Line, Vector3\n"
-            "import egg_webui\n"
+            "import egg.webui as egg_webui\n"
             "egg_webui.print('render log line', 42)\n"
             "ln = Line(Vector3(0.0, 0.0), Vector3(1.0, 1.0))\n"
         )

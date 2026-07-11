@@ -66,7 +66,8 @@ def main() -> None:
 
     try:
         import numpy as np
-        from scene import exec_script
+
+        from .scene import exec_script
 
         from egg._webui_print import _set_sink
 

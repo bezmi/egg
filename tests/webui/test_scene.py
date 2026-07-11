@@ -15,18 +15,15 @@ and SVG well-formedness. No web stack: ``scene.py`` is deliberately
 importable without fasthtml, which is what makes this suite possible.
 """
 
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from egg.webui import scene
+
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "webui"))
-
-import scene  # noqa: E402  (webui/scene.py, path-injected above)
-
 EXAMPLES_2D = REPO / "examples" / "2D"
 
 # Every shipped 2D example: (path, expects a control cage?)
@@ -489,7 +486,7 @@ def test_set_guard_param_roundtrips_through_exec():
 
 def test_editable_marks_are_params_with_context_names():
     code = (
-        "import egg_webui\n"
+        "import egg.webui as egg_webui\n"
         "N = egg_webui.editable(3, label='rings')\n"
         "W = editable(0.5)\n"
         'if __name__ == "__egg_webui__":\n'
@@ -515,7 +512,7 @@ def test_editable_marks_are_params_with_context_names():
 
 def test_editable_rewrite_preserves_the_call_and_checks_choices():
     code = (
-        "import egg_webui\n"
+        "import egg.webui as egg_webui\n"
         "m = egg_webui.editable('shape_size', choices=['shape', 'shape_size'])\n"
     )
     new = scene.set_guard_param(code, "m", "shape")
@@ -532,7 +529,7 @@ def test_editable_duplicate_names_get_suffixes():
 
 
 def test_editable_runtime_is_identity():
-    import egg_webui
+    import egg.webui as egg_webui
 
     assert egg_webui.editable(3, choices=[1, 3], label="n") == 3
     assert egg_webui.editable("a") == "a"

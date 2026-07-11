@@ -277,7 +277,7 @@ handed a pipeline to the UI. Scripts execute with
 .. code-block:: python
 
    if __name__ == "__egg_webui__":
-       import egg_webui
+       import egg.webui as egg_webui
 
        # CLI defaults, mirroring driver.py; edit freely
        a = egg_webui.params(

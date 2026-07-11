@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-# serves webui/ from the repo checkout (editable install only)
+# serves the web UI (egg/webui/); works from a checkout or an installed wheel
 egg-webui = "egg._webui_launcher:main"
 
 [dependency-groups]
