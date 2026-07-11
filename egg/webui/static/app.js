@@ -419,6 +419,29 @@ function applyView() {
     i.disabled = !!(watching && watching.checked);
   });
   eggEditInit();  // edit view: (re)build the wireframe overlay + draw tools
+  eggSyncFileGuards();  // a run owns the view — don't let a file swap in behind it
+}
+// True while a solve is streaming: the stop button (in #viewbar) is the one
+// control the server enables only during a run.
+const eggRunning = () =>
+  !!document.querySelector('#viewbar .btns button.danger:not(:disabled)');
+// The view stays locked to the running solve (/render returns the run's grid),
+// so opening/following a different file mid-run would silently desync the file
+// pane from the view. Disable those entry points while a run streams — the same
+// way the view switcher and run/reset buttons already disable — and re-enable
+// when it ends (applyView fires on the run-start and terminal-frame swaps).
+function eggSyncFileGuards() {
+  const running = eggRunning();
+  ['file-open', 'file-examples', 'watch-toggle'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = running;
+  });
+  // file-open/-examples have no base title of their own, so it is safe to set;
+  // the watch checkbox keeps its label's own (informative) title.
+  ['file-open', 'file-examples'].forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.title = running ? 'stop the run to open another file' : '';
+  });
 }
 // Single entry point for programmatic code changes (examples, restore,
 // param-panel rewrites). Routes through the editor when it took over (which
@@ -734,6 +757,13 @@ async function doSave(path) {
   setTimeout(() => updateChip(), 1200);
 }
 document.addEventListener('click', (e) => {
+  // A run owns the view; opening/loading a different file mid-run would desync
+  // the file pane from the streaming solve. The buttons are also disabled while
+  // running (eggSyncFileGuards), but guard the action too for the brief window
+  // before that lands.
+  if ((e.target.closest('#file-open') || e.target.closest('#file-examples'))
+      && eggRunning())
+    return;
   if (e.target.closest('#file-open')) fsShow('open');
   const ex = e.target.closest('#file-examples');
   if (ex) { fsDir = ex.dataset.dir; fsShow('open'); }
