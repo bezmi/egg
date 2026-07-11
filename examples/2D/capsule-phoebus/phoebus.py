@@ -185,10 +185,6 @@ def setup(a):
 
 
 def main():
-    import os
-    import sys
-
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from driver import finish, parse_args
 
     a = parse_args()

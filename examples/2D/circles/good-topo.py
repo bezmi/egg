@@ -31,11 +31,6 @@ skipped automatically.
 The command-line surface lives in ``driver.py``; run ``--help`` for options.
 """
 
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from driver import finish, parse_single_args
 from egg.pipeline import generate_steps
 from topologies import setup_single

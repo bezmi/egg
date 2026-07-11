@@ -182,10 +182,8 @@ def build_context(X, blocks, dof_entities, tags, fixed):
 
 
 if __name__ == "__main__":
-    import os
     import sys
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from driver import main_sphere_in_cube
 
     main_sphere_in_cube(
