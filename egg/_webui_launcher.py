@@ -106,8 +106,8 @@ def main() -> None:
         "--dev",
         action="store_true",
         help="developer mode (source checkout only): vendor the browser "
-        "assets if missing, and enable --reload. Not available from an "
-        "installed wheel, which already ships the assets.",
+        "assets if missing. Not available from an installed wheel, which "
+        "already ships the assets. Combine with --reload for a live server.",
     )
     p.add_argument(
         "--no-docs",
@@ -128,14 +128,14 @@ def main() -> None:
 
     # --dev is a source-checkout affordance: it invokes the out-of-tree
     # vendoring tool (which does not ship in the wheel). Reject it in a
-    # packaged install rather than silently ignoring it.
-    if a.dev:
-        if repo is None:
-            p.error(
-                "--dev is only available from a source checkout; an installed "
-                "wheel already ships the vendored browser assets"
-            )
-        a.reload = True
+    # packaged install rather than silently ignoring it. It does NOT imply
+    # --reload — reloading re-imports egg, which reruns the editable rebuild
+    # hook; keep that opt-in via --reload so plain `--dev` never rebuilds.
+    if a.dev and repo is None:
+        p.error(
+            "--dev is only available from a source checkout; an installed "
+            "wheel already ships the vendored browser assets"
+        )
 
     _ensure_assets(repo, dev=a.dev)
 
@@ -160,6 +160,9 @@ def main() -> None:
         port=a.port,
         reload=a.reload,
         reload_dirs=[str(egg_dir)] if a.reload else None,
+        # Don't reload on the compiled extension (the editable rebuild hook
+        # touches it on import → a reload loop) or on generated web assets.
+        reload_excludes=["*.so", "static/vendor/*", "docs/*"] if a.reload else None,
     )
 
 
