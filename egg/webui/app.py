@@ -50,6 +50,7 @@ from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
 
 from ._assets import MISSING_MSG, VENDOR_DIR, vendor_ready
+from .lsp import DOC_URI, ROOT_URI, LspBridge, lsp_available
 
 from fasthtml.common import (
     A,
@@ -230,6 +231,51 @@ async def _on_disconn(ws):
 @app.ws("/ws", conn=_on_conn, disconn=_on_disconn)
 async def ws(msg: str):
     pass  # server-push only
+
+
+# --- language server bridge (based-pyright over /lsp) ---
+# One bridge (one basedpyright subprocess) per editor connection. The browser
+# drives the LSP flow; the reader thread forwards server frames back over the
+# same socket. Kept separate from /ws, which is bound to run-frame HTML
+# fan-out. Degrades gracefully: if the language server isn't installed we tell
+# the client and the editor keeps working without language features.
+_lsp_bridges: dict[int, LspBridge] = {}
+
+
+async def _lsp_conn(ws):
+    loop = asyncio.get_running_loop()
+
+    def to_client(msg: dict) -> None:
+        asyncio.run_coroutine_threadsafe(ws.send_text(json.dumps(msg)), loop)
+
+    if not lsp_available():
+        await ws.send_text(json.dumps({"jsonrpc": "2.0", "method": "egg/unavailable"}))
+        return
+    _lsp_bridges[id(ws)] = LspBridge(to_client)
+    # Tell the browser which workspace/document URIs to use for its LSP flow.
+    await ws.send_text(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "egg/ready",
+                "params": {"rootUri": ROOT_URI, "docUri": DOC_URI},
+            }
+        )
+    )
+
+
+async def _lsp_disconn(ws):
+    bridge = _lsp_bridges.pop(id(ws), None)
+    if bridge:
+        bridge.close()
+
+
+@app.ws("/lsp", conn=_lsp_conn, disconn=_lsp_disconn)
+async def lsp_ws(ws, data):
+    # fasthtml JSON-parses the incoming frame; `data` is the JSON-RPC message.
+    bridge = _lsp_bridges.get(id(ws))
+    if bridge and data:
+        bridge.from_client(data)
 
 
 def _broadcast(html: str) -> None:

@@ -23,11 +23,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # The web UI ships in the wheel: `pip install egg[webui]` pulls its runtime
-# deps. based-pyright provides the editor's language server (completions,
+# deps. basedpyright provides the editor's language server (completions,
 # diagnostics, hover); the UI degrades gracefully if it is absent.
 webui = [
   "python-fasthtml>=0.12",
-  "based-pyright>=1.29",
+  "basedpyright>=1.29",
 ]
 
 [project.scripts]
@@ -39,7 +39,7 @@ egg-webui = "egg._webui_launcher:main"
 # (mirrors the [project.optional-dependencies] webui extra above).
 webui = [
   "python-fasthtml>=0.12",
-  "based-pyright>=1.29",
+  "basedpyright>=1.29",
 ]
 # CAD import adapter (egg.io.cad): `uv sync --group cad`
 cad = [
