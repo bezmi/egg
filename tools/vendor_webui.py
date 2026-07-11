@@ -23,14 +23,17 @@ refuses to start if the browser assets are missing.
 Two jobs:
 
 - **vendor** the `prism-code-editor@5.2.0` ES-module graph (editor core +
-  the enabled extensions + the Python Prism grammar) from esm.sh, plus its
-  CSS and split.js. The esm.sh module graph is *mirrored* under the output
-  dir preserving path structure, and the absolute ``/pkg@ver/...``
-  specifiers are rewritten to ``/vendor/...`` (the server mount); relative
-  ``./x.mjs`` sibling imports resolve as-is against the mirrored tree. Each
-  distinct module maps to exactly one file, so there is a single editor
-  core instance (the multi-instance breakage that killed the old CodeMirror
-  integration cannot recur).
+  the enabled extensions + the Python grammar and language behavior), plus
+  its CSS and split.js, from the package's published ESM **dist** on
+  jsDelivr. The dist tree is *mirrored* under the output dir preserving
+  structure, and EVERY import specifier (relative or absolute) is rewritten
+  to a ``/vendor/...`` URL (the server mount). The dist files import shared,
+  content-hashed chunks (e.g. the tokenizer's ``languages`` registry) with
+  relative paths, so mirroring dedups them to one file each — the grammar
+  registers into the same registry the editor tokenizes against, and there
+  is a single editor core instance. (We use the dist, NOT esm.sh, because
+  esm.sh serves each subpath as a standalone bundle with a *private*
+  registry, which silently disables syntax highlighting.)
 - **build the docs** (Sphinx) so an installed package serves them offline
   (help → documentation). Users of the wheel never build docs themselves.
 
@@ -52,26 +55,26 @@ import sys
 import urllib.request
 from pathlib import Path
 
-ESM_BASE = "https://esm.sh"
 NPM_CDN = "https://cdn.jsdelivr.net/npm"
-
 PRISM = "prism-code-editor@5.2.0"
+PKG_BASE = f"{NPM_CDN}/{PRISM}"  # published-dist base for both JS and CSS
 
-# esm.sh entry points, one per logical name the client imports. Everything is
-# pinned to the SAME prism-code-editor version so the graph collapses the
-# shared internals (editor core, utils) to a single file — one editor core
-# instance, no duplicate-module identity bugs.
+# Published-dist entry points (from the package's exports map), one per logical
+# name the client imports. They import shared hashed chunks by relative path, so
+# the mirror below collapses those to a single file each — one editor core, one
+# tokenizer `languages` registry shared by the grammar.
 JS_ENTRIES = {
-    "core": f"/{PRISM}",  # createEditor + core
-    "commands": f"/{PRISM}/commands",  # defaultCommands, editHistory, addEditorHotkey
-    "match-brackets": f"/{PRISM}/match-brackets",
-    "highlight-brackets": f"/{PRISM}/highlight-brackets",
-    "cursor": f"/{PRISM}/cursor",  # cursorPosition, customCursor
-    "search": f"/{PRISM}/search",  # searchWidget, highlightSelectionMatches
-    "autocomplete": f"/{PRISM}/autocomplete",
-    "tooltips": f"/{PRISM}/tooltips",  # addTooltip (hover)
-    "utils": f"/{PRISM}/utils",
-    "prism-python": f"/{PRISM}/prism/languages/python",
+    "core": "/dist/index.js",  # createEditor + core
+    "commands": "/dist/extensions/commands/index.js",  # editorCommands, editHistory
+    "match-brackets": "/dist/extensions/matchBrackets/index.js",
+    "highlight-brackets": "/dist/extensions/matchBrackets/highlight.js",
+    "cursor": "/dist/extensions/cursor/index.js",  # cursorPosition, customCursor
+    "search": "/dist/extensions/search/index.js",  # searchWidget, selectionMatches
+    "autocomplete": "/dist/extensions/autocomplete/index.js",
+    "tooltips": "/dist/tooltips.js",  # addTooltip (hover)
+    "utils": "/dist/utils/index.js",
+    "prism-python": "/dist/prism/languages/python.js",  # token grammar
+    "lang-python": "/dist/languages/python.js",  # comments + auto-indent behavior
 }
 
 # Raw CSS served directly from /vendor/<name> and linked in the page head.
@@ -103,11 +106,10 @@ def _fetch(url: str) -> bytes:
 
 
 def _local_rel(path: str) -> str:
-    """Vendor-relative filename for an absolute esm.sh path. esm.sh entry
-    subpaths are extensionless (``/pkg/autocomplete``); give them a ``.mjs``
-    so the browser serves them with the right MIME and imports resolve."""
+    """Vendor-relative filename for an absolute package path. Keep the file's
+    own extension; only extensionless specifiers get ``.js``."""
     rel = path.lstrip("/")
-    return rel if rel.endswith(".mjs") else rel + ".mjs"
+    return rel if "." in posixpath.basename(rel) else rel + ".js"
 
 
 def _vendor_js(dest: Path, verbose: bool) -> dict[str, str]:
@@ -122,7 +124,7 @@ def _vendor_js(dest: Path, verbose: bool) -> dict[str, str]:
         if path in seen:
             continue
         seen.add(path)
-        text = _fetch(ESM_BASE + path).decode()
+        text = _fetch(PKG_BASE + path).decode()
         base = posixpath.dirname(path)
         for spec in {m.group(1) for m in _SPEC_RE.finditer(text)}:
             if spec.startswith("/"):
@@ -154,7 +156,7 @@ def vendor(dest: Path | None = None, verbose: bool = True) -> dict[str, str]:
     manifest = _vendor_js(dest, verbose)
 
     for name in CSS_FILES:
-        (dest / name).write_bytes(_fetch(f"{NPM_CDN}/{PRISM}/dist/{name}"))
+        (dest / name).write_bytes(_fetch(f"{PKG_BASE}/dist/{name}"))
         if verbose:
             print(f"  css -> {name}")
 
