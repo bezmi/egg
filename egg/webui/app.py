@@ -366,8 +366,14 @@ def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid"):
                 cls="danger",
                 hx_post="/stop",
                 hx_swap="none",
+                # Serialize presses so a fast double-click escalates in order:
+                # the first request sets the stop flag, the second (queued
+                # behind it) then sees it and hard-kills. Without this the two
+                # presses can race, both take the "first press" branch, and
+                # nothing kills.
+                hx_sync="this:queue all",
                 disabled=(not running) or None,
-                title="stop (Ctrl+Enter)",
+                title="stop (Ctrl+Enter); double-click to force kill",
             ),
             Button(
                 NotStr(_REFRESH_SVG),
@@ -384,7 +390,12 @@ def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid"):
         else []
     )
     return Div(
-        *chips,
+        # Chips live in their own #viewchips box (display:contents, so the flex
+        # layout is unchanged). Run frames OOB-swap ONLY #viewchips, never the
+        # whole bar — the control buttons keep a stable DOM node, so a stop
+        # click always lands on an htmx-bound button instead of one that the
+        # last frame just replaced (the old whole-bar swap dropped stop clicks).
+        Div(*chips, id="viewchips"),
         Div(
             Select(
                 Option("grid view", value="grid", selected=(mode == "grid")),
@@ -410,6 +421,13 @@ def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid"):
         cls="bar",
         hx_swap_oob="true" if oob else None,
     )
+
+
+def view_chips(*chips, oob: bool = False):
+    """Just the status-chip box inside the view bar. Run frames swap this (not
+    the whole bar) so the run/stop/reset controls keep a stable, htmx-bound
+    DOM node across the ~16 fps frame stream."""
+    return Div(*chips, id="viewchips", hx_swap_oob="true" if oob else None)
 
 
 def _mindet_chip(md: float | None):
@@ -611,7 +629,15 @@ def _frame(
 ) -> None:
     refresh_grid_layer(h.scene, h.grid)
     svg = _run["svg"] = render_svg(h.scene, bounds=bounds)
-    msg = to_xml(view_bar(*chips, running=running, oob=True)) + to_xml(
+    # Mid-run frames refresh only the chips so the control buttons stay put; the
+    # terminal frame (running=False) swaps the whole bar to re-enable run / grey
+    # out stop.
+    bar = (
+        view_chips(*chips, oob=True)
+        if running
+        else view_bar(*chips, running=False, oob=True)
+    )
+    msg = to_xml(bar) + to_xml(
         Div(NotStr(svg), id="canvas", cls="canvas", hx_swap_oob="true")
     )
     if quality:

@@ -414,6 +414,9 @@ body.editing .layer-blocks, body.editing .layer-corners { opacity: 0.18; }
 .bar { padding: 4px 10px; font-size: 12px; color: var(--ctp-subtext0);
        background: var(--ctp-crust); display: flex; gap: 10px; align-items: center;
        flex-wrap: wrap; }
+/* Chip box: display:contents so its chips remain direct flex children of .bar
+   (layout unchanged) while giving run frames a target to OOB-swap on its own. */
+#viewchips { display: contents; }
 .bar .warn { color: var(--ctp-yellow); }
 .bar .bad { color: var(--ctp-red); font-weight: 600; }
 .bar .errline { cursor: pointer; }
