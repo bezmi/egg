@@ -72,6 +72,9 @@ class Scene:
     # Vector3s a curve was constructed from, drawn as CAD-style control
     # points joined by dashed tangent lines in the toggleable ctrl layer.
     ctrl_cages: list[tuple[str, np.ndarray, list[str]]] = field(default_factory=list)
+    # solved control-net overlay: (block name, (nu, nv, 2) control lattice),
+    # drawn as dashed lattice polylines + markers in the toggleable net layer.
+    net_blocks: list[tuple[str, np.ndarray]] = field(default_factory=list)
     grid_blocks: list[np.ndarray] = field(default_factory=list)
     grid_block_names: list[str] = field(default_factory=list)
     # block name -> fill-class index; a greedy graph-coloring over shared-face
@@ -820,6 +823,7 @@ def harvest(ns: dict, init_grid: bool = True) -> Harvest:
                 "before run()."
             )
     refresh_grid_layer(scene, h.grid)
+    refresh_net_layer(scene, h.grid)
     _harvest_topology(scene, h.topo)
     if h.topo is not None:
         scene.block_colors = _color_blocks(h.topo)
@@ -921,6 +925,51 @@ def _harvest_topology(scene: Scene, topo) -> None:
         a, b = (pos[c] for c in spec.face_corner_names(fa.axis, fa.side, 2))
         label = f"{fa.block_name} <-> {conn.face_b.block_name}"
         scene.topo_connections.append((label, np.array([a, b])))
+
+
+def control_net_state(grid) -> list[np.ndarray] | None:
+    """Per-block control lattices of the grid's live control net (2D only).
+
+    The streamable form of the net overlay: the run worker ships this with
+    each step frame so the lattice animates alongside the grid while the
+    control phase moves it (``None`` when there is no 2D net yet).
+    """
+    topo = getattr(grid, "control_net", None) if grid is not None else None
+    if topo is None or getattr(topo, "d", 0) != 2:
+        return None
+    C = np.asarray(topo.R @ topo.q, dtype=float)
+    return [
+        C[topo.block_offsets[bi] : topo.block_offsets[bi + 1]]
+        .reshape(tuple(topo.ctrl_shapes[bi]) + (topo.d,))
+        .copy()
+        for bi in range(len(topo.ctrl_shapes))
+    ]
+
+
+def refresh_net_layer(
+    scene: Scene, grid: MultiBlockGrid | None, blocks: list[np.ndarray] | None = None
+) -> None:
+    """(Re)build the control-net overlay from the grid's control net.
+
+    Populated when the grid carries a ``control_net`` (a solved
+    :class:`~egg.smoothing.control_topology.ControlTopology`, either from a
+    ``tmop_smoother="control_point"`` run or loaded from a saved ``.npz``).
+    ``blocks`` supplies the per-block lattices directly (the run reader's
+    streamed :func:`control_net_state` — the server-side grid carries no net
+    mid-run). 2D scenes only — the 3D view has its own renderer.
+    """
+    scene.net_blocks = []
+    if blocks is None:
+        blocks = control_net_state(grid)
+        if blocks is None:
+            return
+    if not blocks or np.asarray(blocks[0]).shape[-1] != 2:
+        return
+    specs = getattr(getattr(grid, "topology", None), "block_specs", {})
+    names = list(specs) if len(specs) == len(blocks) else []
+    for bi, C in enumerate(blocks):
+        name = names[bi] if names else f"block {bi}"
+        scene.net_blocks.append((name, np.asarray(C, dtype=float)[..., :2]))
 
 
 def refresh_grid_layer(scene: Scene, grid: MultiBlockGrid | None) -> None:
@@ -1421,6 +1470,30 @@ def render_svg(
                     f'class="{cls}">{title}</circle>'
                 )
     out.append("</g>")
+
+    # Solved control-net overlay (toggleable net layer): the B-spline control
+    # lattice per block as dashed polylines with point markers.
+    if mode == "grid" and scene.net_blocks:
+        out.append('<g class="layer-net">')
+        for name, C in scene.net_blocks:
+            for i in range(C.shape[0]):
+                out.append(
+                    f'<polyline points="{poly(C[i])}" class="net-line">'
+                    f"<title>{_esc(name)} control net</title></polyline>"
+                )
+            for j in range(C.shape[1]):
+                out.append(
+                    f'<polyline points="{poly(C[:, j])}" class="net-line">'
+                    f"<title>{_esc(name)} control net</title></polyline>"
+                )
+            for (i, j), _ in np.ndenumerate(C[..., 0]):
+                cx, cy = T(C[i, j])
+                out.append(
+                    f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="2.5" '
+                    f'class="net-pt"><title>{_esc(name)} C[{i},{j}] '
+                    f"({C[i, j, 0]:g}, {C[i, j, 1]:g})</title></circle>"
+                )
+        out.append("</g>")
 
     if mode in ("topo", "edit"):
         # Topology lines ON TOP of the (dimmed) geometry, styled like

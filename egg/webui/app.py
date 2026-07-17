@@ -33,6 +33,7 @@ for runs): local single-user tool, not a deployable service.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import mimetypes
 import os
@@ -46,7 +47,8 @@ import urllib.parse
 import time
 from pathlib import Path
 
-from starlette.responses import JSONResponse, PlainTextResponse
+import numpy as np
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
 
@@ -86,6 +88,7 @@ from .scene import (
     harvest,
     editable_block,
     refresh_grid_layer,
+    refresh_net_layer,
     render_sparkline,
     render_svg,
     scene_bounds,
@@ -138,7 +141,8 @@ def _egg_svg(stroke: str, attrs: str = "") -> str:
 
 
 EGG_LOGO = _egg_svg(
-    "currentColor", ' class="egg-logo" width="26" height="26" role="img" aria-label="egg"'
+    "currentColor",
+    ' class="egg-logo" width="26" height="26" role="img" aria-label="egg"',
 )
 # Default favicon (mocha yellow); app.js re-tints it to the active flavor.
 FAVICON = "data:image/svg+xml," + urllib.parse.quote(_egg_svg("#f9e2af"))
@@ -175,8 +179,13 @@ _SPLIT_SRC = "/vendor/split.min.js"
 # prism-code-editor stylesheets (served locally from /vendor): the required
 # layout plus the enabled extensions. The catppuccin token/chrome theme lives
 # in app.css (Style(CSS)), loaded after these so it wins.
-_PCE_CSS = ("layout.css", "search.css", "autocomplete.css", "autocomplete-icons.css",
-            "cursor.css")
+_PCE_CSS = (
+    "layout.css",
+    "search.css",
+    "autocomplete.css",
+    "autocomplete-icons.css",
+    "cursor.css",
+)
 
 app, rt = fast_app(
     pico=False,
@@ -236,7 +245,7 @@ _run: dict = {
 # Last completed smoothing run: {"code": str, "harvest": Harvest, "hist":
 # convergence series}. The SU2 export uses it so "what you see is what you
 # export" after a run; "hist" draws faded under the next run's chart.
-_last: dict = {"code": None, "harvest": None, "hist": None}
+_last: dict = {"code": None, "harvest": None, "hist": None, "net": None}
 
 # Editor renders exec the script in this persistent worker process, not in
 # the server: the event loop only awaits, a script stuck in a loop is
@@ -689,9 +698,11 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
         bounds = scene_bounds(h.scene)
         hist: dict[str, list[float]] = {"energy": [], "min det": []}
         prev_hist = _last["hist"]  # previous run, faded under the chart
+        net_bytes: bytes | None = None
         last_emit = 0.0
         last_q = 0.0  # quality stats debounce off the frame hot path
         last_phase = None
+        chips: list = []
         while not done:
             try:
                 msg = pickle.load(proc.stdout)
@@ -712,8 +723,39 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                     if len(log) > LOG_MAX:
                         del log[: len(log) - LOG_MAX]
                     _broadcast(to_xml(_log_panel("".join(log), oob=True)))
+                case "net_state":
+                    # Streamed per-step control lattice: update the overlay so
+                    # the net animates with the grid (the paired step frame
+                    # renders right after this message).
+                    refresh_net_layer(h.scene, h.grid, blocks=msg[1])
+                case "net":
+                    # The worker's solved control net (persisted npz bytes):
+                    # keep for the export and attach to the server-side grid.
+                    # It arrives after the final step frame, so re-emit one
+                    # frame carrying the net overlay.
+                    net_bytes = msg[1]
+                    try:
+                        from egg.io import load_control_net
+
+                        h.grid.control_net = load_control_net(
+                            h.grid, io.BytesIO(net_bytes)
+                        )
+                        refresh_net_layer(h.scene, h.grid)
+                    except Exception:
+                        pass  # export still works from the raw bytes
+                    else:
+                        _frame(
+                            h,
+                            chips,
+                            running=False,
+                            bounds=bounds,
+                            hist=hist,
+                            prev_hist=prev_hist,
+                            quality=False,
+                        )
                 case "done":
                     _last["code"], _last["harvest"] = code, h
+                    _last["net"] = net_bytes
                     if any(len(v) >= 2 for v in hist.values()):
                         _last["hist"] = {k: list(v) for k, v in hist.items()}
                     done = True
@@ -730,7 +772,11 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                     stopped = _run["stop"]
                     chips = [Span(phase, cls="phase")]
                     chips += [
-                        Span(_fmt_chip(k, v)) for k, v in info.items() if k != "min_det"
+                        Span(_fmt_chip(k, v))
+                        for k, v in info.items()
+                        # scalar chips only (diagnostics vectors like the
+                        # control phase's frame_jumps stay off the bar)
+                        if k != "min_det" and not isinstance(v, (list, tuple))
                     ]
                     if (c := _mindet_chip(info.get("min_det"))) is not None:
                         chips.append(c)
@@ -909,6 +955,89 @@ async def export_su2_route(code: str, path: str = ""):
     )
 
 
+@rt("/export/net", methods=["post"])
+async def export_net_route(code: str, path: str = ""):
+    """Download the control net the last run of this script solved (the
+    worker ships the persisted npz alongside the final frame)."""
+    if _last["harvest"] is None or _last["code"] != code:
+        return PlainTextResponse(
+            "no solved control net for this script — run it first "
+            '(tmop_smoother="control_point")',
+            status_code=400,
+        )
+    if not _last["net"]:
+        return PlainTextResponse(
+            "the last run produced no control net — it needs "
+            'tmop_smoother="control_point"',
+            status_code=400,
+        )
+    return Response(
+        _last["net"],
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": 'attachment; filename="control_net.npz"'},
+    )
+
+
+@rt("/import/net", methods=["post"])
+async def import_net_route(request):
+    """Load a saved control net onto the script's grid and show the result.
+
+    The script must build the same grid (topology, resolutions, constraints)
+    the net was solved on — :func:`egg.io.load_control_net` rejects
+    mismatches. The evaluated grid replaces the view and becomes the resident
+    state (SU2/net export see it)."""
+    form = await request.form()
+    code = form.get("code", "")
+    path = form.get("path", "") or None
+    up = form.get("file")
+    if up is None:
+        return PlainTextResponse("no file uploaded", status_code=400)
+    data = await up.read()
+
+    def work():
+        from egg.io import load_control_net
+
+        ns, out, err = exec_script(code, path)
+        if err is not None:
+            raise ValueError("script error — fix it first")
+        h = harvest(ns, init_grid=True)
+        reg = ns.get("__egg_webui_run__")
+        if reg is not None:
+            h.grid = reg[0]
+        if h.grid is None:
+            raise ValueError("the script builds no grid")
+        topo = load_control_net(h.grid, io.BytesIO(data))
+        topo.write_to_grid()
+        h.grid.control_net = topo
+        refresh_grid_layer(h.scene, h.grid)
+        refresh_net_layer(h.scene, h.grid)
+        svg = render_svg(h.scene, mode="grid")
+        stats = {
+            "blocks": len(h.scene.grid_blocks),
+            "net controls": sum(
+                int(np.prod(c.shape[:-1])) for _n, c in h.scene.net_blocks
+            ),
+        }
+        r = SceneResult(
+            svg,
+            stats,
+            h.scene.warnings,
+            out,
+            None,
+            h.scene.min_det,
+            0,
+            grid_quality(h.scene.grid_blocks),
+        )
+        return h, r
+
+    try:
+        h, r = await asyncio.to_thread(work)
+    except Exception as exc:
+        return PlainTextResponse(f"import failed: {exc}", status_code=400)
+    _last["code"], _last["harvest"], _last["net"] = code, h, data
+    return view_fragment(r, code, mode="grid")
+
+
 # --- open/save: the server's filesystem IS the user's filesystem (local
 # --- single-user tool — the script already execs with full privileges) ---
 
@@ -1066,6 +1195,20 @@ async def get(view: str = "grid"):
                 Div(cls="menu-sep"),
                 Button("export svg", id="file-dl-svg"),
                 Button("export su2", id="file-dl-su2"),
+                Div(cls="menu-sep"),
+                Button(
+                    "import control net…",
+                    id="file-import-net",
+                    title="load a saved control net (.npz) onto this script's "
+                    "grid and evaluate it — the grid must match the one the "
+                    "net was solved on",
+                ),
+                Button(
+                    "export control net",
+                    id="file-dl-net",
+                    title="download the control net solved by the last "
+                    'tmop_smoother="control_point" run of this script',
+                ),
             ),
             _menu(
                 "view",
@@ -1089,6 +1232,12 @@ async def get(view: str = "grid"):
                     title="construction points with their dashed control cage "
                     "(spline through-points, Bézier control points, arc "
                     "endpoints and centres)",
+                ),
+                Label(
+                    Input(type="checkbox", cls="layer-toggle", data_layer="net"),
+                    "control net",
+                    title="the solved B-spline control lattice of a "
+                    'tmop_smoother="control_point" run (or an imported net)',
                 ),
                 Div(cls="menu-sep"),
                 Label(

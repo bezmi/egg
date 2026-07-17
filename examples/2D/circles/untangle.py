@@ -63,7 +63,7 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         sweeps_per_delta=200,
         tmop_sweeps=1000,
         chunk=100,
-        smoother="jacobi",
+        smoother="jacobi",  # or "fas" / "control_point" (control-net solver)
         omega=0.8,
         device="cpu",
     )

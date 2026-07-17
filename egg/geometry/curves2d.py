@@ -159,6 +159,14 @@ class _TrimmedCurve(GeometryEntity):
         pts = np.asarray(pts, dtype=float)
         return self.eval_many(self._clamp_many(self.invert_many(pts)))
 
+    def tangent_space_many(self, Q: np.ndarray) -> np.ndarray:
+        """Normalized C'(t) at the clamped inverse of each row. Shape (n, 2, 1)."""
+        ts = self._clamp_many(self.invert_many(np.asarray(Q, dtype=float)))
+        d = self.deriv_many(ts)
+        norms = np.linalg.norm(d, axis=1, keepdims=True)
+        d = np.where(norms < 1e-15, np.array([1.0, 0.0]), d / np.maximum(norms, 1e-300))
+        return d[:, :, None]
+
     def tangent_space(self, q: np.ndarray) -> np.ndarray:
         """Normalized C'(t) at the clamped inverse of q. Shape (2, 1)."""
         t = self._clamp(self.invert(np.asarray(q, dtype=float)))
@@ -524,19 +532,41 @@ class CompositePath(GeometryEntity):
         """Closest point over all segments."""
         return self._nearest(p).project(p)
 
+    @staticmethod
+    def _seg_project_many(seg, pts: np.ndarray) -> np.ndarray:
+        if hasattr(seg, "project_many"):
+            return np.asarray(seg.project_many(pts))
+        return np.stack([seg.project(p) for p in pts])
+
+    @staticmethod
+    def _seg_tangent_space_many(seg, pts: np.ndarray) -> np.ndarray:
+        if hasattr(seg, "tangent_space_many"):
+            return np.asarray(seg.tangent_space_many(pts))
+        return np.stack([np.asarray(seg.tangent_space(p)) for p in pts])
+
     def project_many(self, pts: np.ndarray) -> np.ndarray:
         """Closest point over all segments for each row of ``pts``: every
         segment projects the whole batch (vectorized where the segment
-        supports it), then the nearest foot wins per row — the same
-        contest :meth:`_nearest` runs per point."""
+        supports it, scalar fallback otherwise), then the nearest foot wins
+        per row — the same contest :meth:`_nearest` runs per point."""
         pts = np.asarray(pts, dtype=float)
-        feet = np.stack([seg.project_many(pts) for seg in self.segments])
+        feet = np.stack([self._seg_project_many(seg, pts) for seg in self.segments])
         d2 = ((feet - pts[None, :, :]) ** 2).sum(axis=2)
         return feet[np.argmin(d2, axis=0), np.arange(pts.shape[0])]
 
     def tangent_space(self, q: np.ndarray) -> np.ndarray:
         """Tangent space of the segment nearest to q."""
         return self._nearest(q).tangent_space(q)
+
+    def tangent_space_many(self, Q: np.ndarray) -> np.ndarray:
+        """Tangent space of the nearest segment for each row of ``Q``
+        (same per-row segment contest as :meth:`project_many`)."""
+        Q = np.asarray(Q, dtype=float)
+        feet = np.stack([self._seg_project_many(seg, Q) for seg in self.segments])
+        d2 = ((feet - Q[None, :, :]) ** 2).sum(axis=2)
+        which = np.argmin(d2, axis=0)
+        tans = np.stack([self._seg_tangent_space_many(seg, Q) for seg in self.segments])
+        return tans[which, np.arange(Q.shape[0])]
 
     def normal(self, q: np.ndarray) -> np.ndarray:
         """Normal of the segment nearest to q."""

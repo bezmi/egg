@@ -56,7 +56,7 @@ def parse_args(argv=None):
     p.add_argument("--tmop-sweeps", type=int, default=40)
     p.add_argument(
         "--smoother",
-        choices=["jacobi", "fas"],
+        choices=["jacobi", "fas", "control_point"],
         default="jacobi",
         help="TMOP-phase smoother: plain block-Jacobi sweeps or FAS (nonlinear "
         "geometric multigrid) V-cycles; with fas, --tmop-sweeps/--chunk count "

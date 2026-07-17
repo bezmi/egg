@@ -102,6 +102,14 @@ def main(argv=None):
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
     p.add_argument("--sweeps", type=int, default=300)
     p.add_argument("--chunk", type=int, default=100)
+    p.add_argument(
+        "--smoother",
+        choices=["jacobi", "fas", "control_point"],
+        default="jacobi",
+        help="TMOP-phase smoother: block-Jacobi sweeps, FAS V-cycles, or the "
+        "control-net reduced Gauss-Newton solver (sliding sphere/plane "
+        "walls, exact C1 seams, edge-fan fallback)",
+    )
     a = p.parse_args(argv)
 
     topo = cubed_sphere(a.n, a.nt, r0=a.r0).build()
@@ -111,9 +119,14 @@ def main(argv=None):
         f"singular fans={len(topo.singularities)}"
     )
 
-    cfg = PipelineConfig(device=a.device, tmop_sweeps=a.sweeps, tmop_chunk=a.chunk)
+    cfg = PipelineConfig(
+        device=a.device,
+        tmop_sweeps=a.sweeps,
+        tmop_chunk=a.chunk,
+        tmop_smoother=a.smoother,
+    )
     for phase, info in generate_steps(grid, config=cfg, untangle_direct=True):
-        if phase in ("init", "untangle", "final"):
+        if phase in ("init", "untangle", "control", "final"):
             bits = " ".join(
                 f"{k}={v:.4e}" if isinstance(v, float) else f"{k}={v}"
                 for k, v in info.items()

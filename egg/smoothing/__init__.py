@@ -8,6 +8,7 @@
 
 """Grid smoothing: TMOP targets and boundary-layer clustering."""
 
+from egg.smoothing.control_fit import ControlFitError, fit_control_net
 from egg.smoothing.respace import (
     enforce_boundary_layer_spacing,
     first_layer_heights,
@@ -16,8 +17,10 @@ from egg.smoothing.respace import (
 from egg.smoothing.targets import build_topology_target
 
 __all__ = [
+    "ControlFitError",
     "build_topology_target",
     "enforce_boundary_layer_spacing",
     "first_layer_heights",
+    "fit_control_net",
     "respace_first_layers",
 ]

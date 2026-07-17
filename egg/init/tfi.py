@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from itertools import product
+from itertools import combinations, product
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -30,6 +30,11 @@ def tfi_fill_interior(block: Block) -> None:
     surface-projected faces) are kept; only NaN facet nodes are filled, while
     the top-dimensional interior is always (re)computed. Modifies
     ``block.nodes`` in place.
+
+    Each facet fills as one vectorized Boolean sum
+    (``sum_ax lerp_ax - (k-1) * cornerblend``, identical to the per-node
+    ``_tfi_point`` it replaces in the hot path — grid initialization time is
+    dominated by this fill at scale).
     """
     nodes = block.nodes
     d = block.d
@@ -38,13 +43,47 @@ def tfi_fill_interior(block: Block) -> None:
         return
 
     for k in range(1, d + 1):
-        for idx in product(*(range(s) for s in shape)):
-            interior = tuple(ax for ax in range(d) if 0 < idx[ax] < shape[ax] - 1)
-            if len(interior) != k:
-                continue
-            if k < d and not np.any(np.isnan(nodes[idx])):
-                continue
-            nodes[idx] = _tfi_point(nodes, idx, shape, interior)
+        for interior_axes in combinations(range(d), k):
+            fixed_axes = [a for a in range(d) if a not in interior_axes]
+            for ends in product(*[(0, shape[a] - 1) for a in fixed_axes]):
+                sl: list = [slice(None)] * d
+                for a, e in zip(fixed_axes, ends):
+                    sl[a] = e
+                sub = nodes[tuple(sl)]  # view: k facet axes + coords
+                core = tuple(slice(1, -1) for _ in range(k))
+                if k < d:
+                    nan_nodes = np.isnan(sub[core]).any(axis=-1)
+                    if not nan_nodes.any():
+                        continue
+                filled = _boolean_sum(sub)
+                if k < d:
+                    m = np.zeros(sub.shape[:-1], dtype=bool)
+                    m[core] = nan_nodes
+                    sub[m] = filled[m]
+                else:
+                    sub[core] = filled[core]
+
+
+def _boolean_sum(sub: np.ndarray) -> np.ndarray:
+    """Vectorized Boolean-sum fill of a facet from its own boundary."""
+    dims = sub.ndim - 1
+    xi = [np.linspace(0.0, 1.0, n) for n in sub.shape[:-1]]
+
+    def lerp_axis(F, ax):
+        sh = [1] * (dims + 1)
+        sh[ax] = sub.shape[ax]
+        t = xi[ax].reshape(sh)
+        f0 = np.take(F, [0], axis=ax)
+        f1 = np.take(F, [-1], axis=ax)
+        return (1.0 - t) * f0 + t * f1
+
+    p_sum = lerp_axis(sub, 0)
+    for ax in range(1, dims):
+        p_sum = p_sum + lerp_axis(sub, ax)
+    corner = sub
+    for ax in range(dims):
+        corner = lerp_axis(corner, ax)
+    return p_sum - (dims - 1) * corner
 
 
 def _tfi_point(nodes, idx, shape, interior):

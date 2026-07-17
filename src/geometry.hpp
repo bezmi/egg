@@ -1116,8 +1116,7 @@ struct BSplineSurfaceParam {
     /// @f$ F = ((S-p)\cdot S_u, (S-p)\cdot S_v) @f$ with the exact Jacobian
     /// (needs the second partials), clamping each iterate to the domain. A
     /// near-singular Jacobian (e.g. at a degenerate corner) stops early.
-    [[nodiscard]] Param<2> invert(const PtN<3>& p) const
-    { return invert_seeded(p, {}, false); }
+    [[nodiscard]] Param<2> invert(const PtN<3>& p) const { return invert_seeded(p, {}, false); }
 
     /// Newton iteration on the nearest-foot stationarity
     /// @f$ F = ((S-p)\cdot S_u, (S-p)\cdot S_v) = 0 @f$ from start @p q,
@@ -1197,8 +1196,7 @@ struct BSplineSurfaceParam {
                                           real u1,
                                           real v0,
                                           real v1,
-                                          std::array<VecN<3>, 2>* frame_out = nullptr)
-      const
+                                          std::array<VecN<3>, 2>* frame_out = nullptr) const
     {
         q[0] = std::clamp(q[0], u0, u1);
         q[1] = std::clamp(q[1], v0, v1);
@@ -1222,8 +1220,7 @@ struct BSplineSurfaceParam {
                 }
                 du = -(((a22 * f1) - (j12 * f2)) / det);
                 dv = -((((-j12) * f1) + (a11 * f2)) / det);
-                const Param<2> qn {std::clamp(q[0] + du, u0, u1),
-                                   std::clamp(q[1] + dv, v0, v1)};
+                const Param<2> qn {std::clamp(q[0] + du, u0, u1), std::clamp(q[1] + dv, v0, v1)};
                 const VecN<3> dn = eval(qn) - p;
                 const real rn = dot(dn, dn);
                 if (rn < r) {
@@ -1257,11 +1254,10 @@ struct BSplineSurfaceParam {
     ///     `newton_foot<false>` (GN nd=1). That keeps the heavy de Boor nd=2 rows
     ///     and the grid out of the warm kernel entirely — the scratch lever.
     template <bool Warm = false>
-    [[nodiscard]] Param<2>
-      invert_seeded(const PtN<3>& p,
-                    Param<2> seed,
-                    bool has_seed,
-                    std::array<VecN<3>, 2>* frame_out = nullptr) const
+    [[nodiscard]] Param<2> invert_seeded(const PtN<3>& p,
+                                         Param<2> seed,
+                                         bool has_seed,
+                                         std::array<VecN<3>, 2>* frame_out = nullptr) const
     {
         const real u0 = knots_u[pu], u1 = knots_u[nu];
         const real v0 = knots_v[pv], v1 = knots_v[nv];
@@ -1309,9 +1305,13 @@ struct BSplineSurfaceParam {
             for (int s = 0; s < kStarts; ++s) {
                 if (bestd[s] == std::numeric_limits<real>::infinity()) { continue; }
                 std::array<VecN<3>, 2> fbuf;
-                const Param<2> foot =
-                  newton_foot_lm(p, bestq[s], u0, u1, v0, v1,
-                                 frame_out != nullptr ? &fbuf : nullptr);
+                const Param<2> foot = newton_foot_lm(p,
+                                                     bestq[s],
+                                                     u0,
+                                                     u1,
+                                                     v0,
+                                                     v1,
+                                                     frame_out != nullptr ? &fbuf : nullptr);
                 const VecN<3> d = eval(foot) - p;
                 const real dd = dot(d, d);
                 if (dd < best_final) {
@@ -1507,8 +1507,10 @@ template <> struct decode_entity_fn<TrimmedEntity<Line3Param>> {
 template <> struct decode_entity_fn<TrimmedEntity<BSplineSurfaceParam>> {
     [[nodiscard]] static TrimmedEntity<BSplineSurfaceParam> apply(const real* p, const real* arena)
     {
-        // Blob: [pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w];
-        // knots/control net/weights live in the arena.
+        // Blob: [pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w,
+        // trim_v_off, trim_l_off, n_trim_loop_entries]; knots/control
+        // net/weights (and the UV trim polygon, when present) live in the
+        // arena. Zero trim fields (older/zero-padded blobs) mean untrimmed.
         const int pu = static_cast<int>(p[0]);
         const int pv = static_cast<int>(p[1]);
         const int nu = static_cast<int>(p[2]);
@@ -1519,6 +1521,15 @@ template <> struct decode_entity_fn<TrimmedEntity<BSplineSurfaceParam>> {
         const auto w_off = static_cast<std::size_t>(p[7]);
         const bool has_w = p[8] != 0.0_r;
         const auto n_net = static_cast<std::size_t>(nu) * static_cast<std::size_t>(nv);
+        const auto n_loop_entries = static_cast<std::size_t>(p[11]);
+        Trim<2> trim {};
+        if (n_loop_entries >= 2) {
+            const auto v_off = static_cast<std::size_t>(p[9]);
+            const auto l_off = static_cast<std::size_t>(p[10]);
+            const std::span<const real> loops {arena + l_off, n_loop_entries};
+            const auto n_verts = static_cast<std::size_t>(loops[n_loop_entries - 1]);
+            trim = {.verts = {arena + v_off, 2 * n_verts}, .loops = loops};
+        }
         return TrimmedEntity<BSplineSurfaceParam> {
           .param = {.pu = pu,
                     .pv = pv,
@@ -1529,7 +1540,7 @@ template <> struct decode_entity_fn<TrimmedEntity<BSplineSurfaceParam>> {
                     .ctrl = {arena + ctrl_off, 3 * n_net},
                     .weights = has_w ? std::span<const real> {arena + w_off, n_net}
                                      : std::span<const real> {}},
-          .trim = {}};
+          .trim = trim};
     }
 };
 

@@ -170,6 +170,50 @@ inline sycl::event broadcast_shared(sycl::queue& q, real* buf, const BlockTopolo
 /// @ref broadcast_shared. The per-item index selects the offset table:
 /// all-halo and all-share work-groups run straight paths, at most one
 /// work-group straddles the boundary.
+/// Non-owning snapshot of a BlockTopologyDevice's copy tables. The USM
+/// allocations live as long as the owning topology's buffers, so the view
+/// stays valid across moves of the owning object (session add-ons that only
+/// need the refresh hold this instead of a reference).
+struct HaloViewPtrs {
+    std::size_t n_halo = 0;
+    std::size_t n_share = 0;
+    const std::size_t* halo_src = nullptr;
+    const std::size_t* halo_dst = nullptr;
+    const std::size_t* share_src = nullptr;
+    const std::size_t* share_dst = nullptr;
+};
+
+template <int D> inline HaloViewPtrs make_halo_view(const BlockTopologyDevice<D>& topo)
+{
+    return {topo.num_entries(),
+            topo.num_share(),
+            topo.src_off(),
+            topo.dst_off(),
+            topo.share_src_off(),
+            topo.share_dst_off()};
+}
+
+/// fused_halo_broadcast over a HaloViewPtrs snapshot.
+template <int D>
+inline sycl::event fused_halo_broadcast(sycl::queue& q, real* buf, const HaloViewPtrs& v)
+{
+    const std::size_t total = v.n_halo + v.n_share;
+    if (total == 0) { return {}; }
+    const std::size_t n_halo = v.n_halo;
+    const std::size_t* halo_src = v.halo_src;
+    const std::size_t* halo_dst = v.halo_dst;
+    const std::size_t* share_src = v.share_src;
+    const std::size_t* share_dst = v.share_dst;
+    return q.parallel_for(sycl::range<1>(total), [=](sycl::id<1> idx) {
+        const std::size_t e = idx[0];
+        const bool is_halo = (e < n_halo);
+        const std::size_t off = is_halo ? 0 : (e - n_halo);
+        const std::size_t s = is_halo ? halo_src[e] : share_src[off];
+        const std::size_t d = is_halo ? halo_dst[e] : share_dst[off];
+        for (int k = 0; k < D; ++k) { buf[d + k] = buf[s + k]; }
+    });
+}
+
 template <int D>
 inline sycl::event
   fused_halo_broadcast(sycl::queue& q, real* buf, const BlockTopologyDevice<D>& topo)

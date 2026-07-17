@@ -52,7 +52,7 @@ def _add_common_args(p, *, tmop_sweeps, sweeps_per_delta, chunk, pin_sweeps):
     p.add_argument("--tmop-sweeps", type=int, default=tmop_sweeps)
     p.add_argument(
         "--smoother",
-        choices=["jacobi", "fas"],
+        choices=["jacobi", "fas", "control_point"],
         default="jacobi",
         help="TMOP-phase smoother: plain block-Jacobi sweeps or FAS (nonlinear "
         "geometric multigrid) V-cycles; with fas, --tmop-sweeps/--chunk count "
