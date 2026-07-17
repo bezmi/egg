@@ -16,6 +16,7 @@
 
 namespace py = pybind11;
 
+#include "control_solve.hpp"
 #include "geometry.hpp"
 #include "metric.hpp"
 #include "patch.hpp"
@@ -26,6 +27,7 @@ namespace py = pybind11;
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -241,9 +243,7 @@ template <int D> void validate_context(const egg::SweepContextHostT<D>& host)
         eqs(es.W_inv.size(), ns * egg::dim::wInv(D), "W_inv");
     }
     // Weight is optional; one shared value or one per sample.
-    if (!es.weight.empty() && es.weight.size() != 1) {
-        eqs(es.weight.size(), ns, "weight");
-    }
+    if (!es.weight.empty() && es.weight.size() != 1) { eqs(es.weight.size(), ns, "weight"); }
     check_index(es.gc, "gc", "energy_stencil");
     for (int k = 0; k < D; ++k) {
         check_index(es.gn[k], ("gn" + std::to_string(k)).c_str(), "energy_stencil");
@@ -436,6 +436,223 @@ std::vector<std::array<std::size_t, D>> extract_index_rows(const py::dict& d,
         for (int k = 0; k < D; ++k) { out[r][k] = static_cast<std::size_t>(p[(r * D) + k]); }
     }
     return out;
+}
+
+// Unpack + validate the control-net wire (a single block for now). Index bounds
+// are checked here so a malformed net can never reach the kernels as OOB.
+template <int D> egg::ControlNetHostT<D> unpack_control(const py::dict& c)
+{
+    egg::ControlNetHostT<D> host;
+    host.block = c["block"].cast<int>();
+    const auto cs =
+      c["ctrl_shape"].cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
+    if (cs.size() != D) { throw std::invalid_argument("control: ctrl_shape must have D entries"); }
+    int n_ctrl = 1;
+    for (int k = 0; k < D; ++k) {
+        host.ctrl_shape[static_cast<std::size_t>(k)] = cs.data()[k];
+        if (cs.data()[k] < 2) {
+            throw std::invalid_argument("control: each ctrl_shape entry must be >= 2");
+        }
+        n_ctrl *= cs.data()[k];
+    }
+    host.k_supp = c["k_supp"].cast<int>();
+    if (host.k_supp < 1) { throw std::invalid_argument("control: k_supp must be >= 1"); }
+    for (int k = 0; k < D; ++k) {
+        const auto ks = static_cast<std::size_t>(k);
+        host.off[ks] = extract_int(c, "off" + std::to_string(k));
+        host.wt[ks] = extract_real(c, "wt" + std::to_string(k));
+        if (host.wt[ks].size() != host.off[ks].size() * static_cast<std::size_t>(host.k_supp)) {
+            throw std::invalid_argument("control: wt" + std::to_string(k) +
+                                        " size != off size * k_supp");
+        }
+        for (int o : host.off[ks]) {
+            if (o < 0 || o + host.k_supp > host.ctrl_shape[ks]) {
+                throw std::invalid_argument("control: off" + std::to_string(k) +
+                                            " support window out of the control lattice");
+            }
+        }
+    }
+    host.C0 = extract_real(c, "C0");
+    if (host.C0.size() != static_cast<std::size_t>(n_ctrl) * static_cast<std::size_t>(D)) {
+        throw std::invalid_argument("control: C0 size != prod(ctrl_shape) * D");
+    }
+    host.free_idx = extract_int(c, "free_idx");
+    for (int f : host.free_idx) {
+        if (f < 0 || f >= n_ctrl) { throw std::invalid_argument("control: free_idx out of range"); }
+    }
+    host.b = extract_real(c, "b");
+    std::size_t n_nodes = 1;
+    for (int k = 0; k < D; ++k) { n_nodes *= host.off[static_cast<std::size_t>(k)].size(); }
+    if (host.b.size() != n_nodes * static_cast<std::size_t>(D)) {
+        throw std::invalid_argument("control: b size != prod(node_shape) * D");
+    }
+
+    // Walls (optional): sliding boundary controls + orthogonality dial.
+    if (c.contains("walls")) {
+        if (!c.contains("X0")) { throw std::invalid_argument("control: walls require X0"); }
+        host.X0 = extract_real(c, "X0");
+        if (host.X0.size() != n_nodes * static_cast<std::size_t>(D)) {
+            throw std::invalid_argument("control: X0 size != prod(node_shape) * D");
+        }
+        auto walls_list = c["walls"].cast<py::list>();
+        for (auto w_item : walls_list) {
+            auto wd = w_item.cast<py::dict>();
+            egg::ControlWallHost w;
+            w.axis = wd["axis"].cast<int>();
+            w.side = wd["side"].cast<int>();
+            w.mode = wd["mode"].cast<int>();
+            if (w.axis < 0 || w.axis >= D || (w.side != 0 && w.side != 1) || w.mode < 0 ||
+                w.mode > 2) {
+                throw std::invalid_argument("control: wall axis/side/mode out of range");
+            }
+            w.weight = extract_real(wd, "weight");
+            w.p0 = extract_int(wd, "p0");
+            w.p1 = extract_int(wd, "p1");
+            if (w.p0.size() != w.p1.size() || w.weight.size() != w.p0.size()) {
+                throw std::invalid_argument("control: wall p0/p1/weight length mismatch");
+            }
+            for (std::size_t j = 0; j < w.p0.size(); ++j) {
+                if (w.p0[j] < 0 || w.p0[j] >= n_ctrl || w.p1[j] < 0 || w.p1[j] >= n_ctrl) {
+                    throw std::invalid_argument("control: wall control id out of range");
+                }
+            }
+            w.tag = wd["tag"].cast<int>();
+            w.params = extract_real(wd, "params");
+            host.walls.push_back(std::move(w));
+        }
+    }
+    return host;
+}
+
+// Unpack + validate the multi-block control wire: per-block nets over one
+// stacked control vector, the global reduction CSR dC = R·dq, and optional
+// homogeneous penalty rows. Selected by the "blocks" key on the control dict.
+template <int D> egg::ControlTopoHostT<D> unpack_control_topo(const py::dict& c)
+{
+    egg::ControlTopoHostT<D> host;
+    auto blocks = c["blocks"].cast<py::list>();
+    std::size_t n_stack = 0;
+    for (auto item : blocks) {
+        auto bd = item.cast<py::dict>();
+        egg::ControlNetHostT<D> net;
+        net.block = bd["block"].cast<int>();
+        const auto cs =
+          bd["ctrl_shape"].cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
+        if (cs.size() != D) {
+            throw std::invalid_argument("control topo: ctrl_shape must have D entries");
+        }
+        int n_ctrl = 1;
+        for (int k = 0; k < D; ++k) {
+            net.ctrl_shape[static_cast<std::size_t>(k)] = cs.data()[k];
+            if (cs.data()[k] < 2) {
+                throw std::invalid_argument("control topo: each ctrl_shape entry must be >= 2");
+            }
+            n_ctrl *= cs.data()[k];
+        }
+        net.k_supp = bd["k_supp"].cast<int>();
+        if (net.k_supp < 1) { throw std::invalid_argument("control topo: k_supp must be >= 1"); }
+        std::size_t n_nodes = 1;
+        for (int k = 0; k < D; ++k) {
+            const auto ks = static_cast<std::size_t>(k);
+            net.off[ks] = extract_int(bd, "off" + std::to_string(k));
+            net.wt[ks] = extract_real(bd, "wt" + std::to_string(k));
+            if (net.wt[ks].size() != net.off[ks].size() * static_cast<std::size_t>(net.k_supp)) {
+                throw std::invalid_argument("control topo: wt" + std::to_string(k) +
+                                            " size != off size * k_supp");
+            }
+            for (int o : net.off[ks]) {
+                if (o < 0 || o + net.k_supp > net.ctrl_shape[ks]) {
+                    throw std::invalid_argument("control topo: off" + std::to_string(k) +
+                                                " support window out of the control lattice");
+                }
+            }
+            n_nodes *= net.off[ks].size();
+        }
+        net.b = extract_real(bd, "b");
+        if (net.b.size() != n_nodes * static_cast<std::size_t>(D)) {
+            throw std::invalid_argument("control topo: b size != prod(node_shape) * D");
+        }
+        if (bd.contains("X0")) {
+            net.X0 = extract_real(bd, "X0");
+            if (net.X0.size() != n_nodes * static_cast<std::size_t>(D)) {
+                throw std::invalid_argument("control topo: X0 size != prod(node_shape) * D");
+            }
+        }
+        n_stack += static_cast<std::size_t>(n_ctrl);
+        host.nets.push_back(std::move(net));
+    }
+    host.C0 = extract_real(c, "C0");
+    if (host.C0.size() != n_stack * static_cast<std::size_t>(D)) {
+        throw std::invalid_argument("control topo: C0 size != total controls * D");
+    }
+    host.nq = c["nq"].cast<std::size_t>();
+    host.r_off = extract_int(c, "r_off");
+    host.r_col = extract_int(c, "r_col");
+    host.r_coef = extract_real(c, "r_coef");
+    if (host.r_off.size() != (n_stack * static_cast<std::size_t>(D)) + 1 ||
+        host.r_col.size() != host.r_coef.size() ||
+        static_cast<std::size_t>(host.r_off.back()) != host.r_col.size()) {
+        throw std::invalid_argument("control topo: malformed reduction CSR");
+    }
+    if (c.contains("p_off")) {
+        host.p_off = extract_int(c, "p_off");
+        host.p_col = extract_int(c, "p_col");
+        host.p_coef = extract_real(c, "p_coef");
+        host.p_w = extract_real(c, "p_w");
+        if (host.p_col.size() != host.p_coef.size() ||
+            (host.p_off.empty()
+               ? !host.p_col.empty()
+               : static_cast<std::size_t>(host.p_off.back()) != host.p_col.size()) ||
+            (!host.p_off.empty() && host.p_w.size() != host.p_off.size() - 1)) {
+            throw std::invalid_argument("control topo: malformed penalty CSR");
+        }
+    }
+    // Sliding-wall frame wire (optional): entity arena, sliding roots with
+    // CSR value-rewrite lists, CAD wall faces, per-net seam-face flags.
+    if (c.contains("slide")) {
+        if (c.contains("arena")) { host.arena = extract_real(c, "arena"); }
+        for (auto item : c["slide"].cast<py::list>()) {
+            auto sd = item.cast<py::dict>();
+            egg::ControlSlideRootHost s;
+            s.rep_row = sd["rep_row"].cast<int>();
+            s.members = extract_int(sd, "members");
+            s.member_coef = extract_real(sd, "member_coef");
+            s.tag = sd["tag"].cast<int>();
+            s.params = extract_real(sd, "params");
+            s.r_entry = extract_int(sd, "r_entry");
+            s.comp = extract_int(sd, "comp");
+            s.kt = extract_int(sd, "kt");
+            s.base = extract_real(sd, "base");
+            host.slide.push_back(std::move(s));
+        }
+        for (auto item : c["wall_faces"].cast<py::list>()) {
+            auto wd = item.cast<py::dict>();
+            egg::ControlWallFaceHost w;
+            w.block = wd["block"].cast<int>();
+            w.axis = wd["axis"].cast<int>();
+            w.side = wd["side"].cast<int>();
+            w.tag = wd["tag"].cast<int>();
+            w.params = extract_real(wd, "params");
+            host.wall_faces.push_back(std::move(w));
+        }
+        for (auto item : c["seam_face"].cast<py::list>()) {
+            auto arr = item.cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
+            std::vector<std::uint8_t> flags(static_cast<std::size_t>(arr.size()));
+            for (py::ssize_t i = 0; i < arr.size(); ++i) {
+                flags[static_cast<std::size_t>(i)] = arr.data()[i] != 0;
+            }
+            if (flags.size() != static_cast<std::size_t>(2 * D)) {
+                throw std::invalid_argument("control topo: seam_face flags must have 2*D entries");
+            }
+            host.seam_face.push_back(std::move(flags));
+        }
+        for (const auto& net : host.nets) {
+            if (net.X0.empty()) {
+                throw std::invalid_argument("control topo: the slide wire requires per-block X0");
+            }
+        }
+    }
+    return host;
 }
 
 // The result of re-homing a global SweepContextHostT onto a halo-padded
@@ -810,20 +1027,26 @@ int require_supported_dim(int d)
 }
 
 // A device-resident structured session: the executor (owning the packed X +
-// halo topology) and the gather-back remap for one dimension.
+// halo topology), the gather-back remap, and the optional control-net solver
+// for one dimension.
 template <int D> struct StructuredSession {
     egg::StructuredExecutorT<D> exec;
     StructuredRemap<D> rm;
+    std::unique_ptr<egg::ControlSessionT<D>> control;
+    std::unique_ptr<egg::ControlTopoSessionT<D>> control_topo;
 };
 
 // Build a device-resident structured session: re-home the global context onto
-// the halo-padded store once, upload it, and keep it resident.
+// the halo-padded store once, upload it, and keep it resident. When a control
+// wire is supplied, the control-net solver is built alongside (it shares the
+// executor's queue, stencil, and packed X buffer).
 template <int D>
 StructuredSession<D> make_structured_session(const py::dict& ctx_arrays,
                                              const py::dict& structured,
                                              const double* X,
                                              std::size_t num_nodes,
-                                             const std::string& device)
+                                             const std::string& device,
+                                             const py::object& control)
 {
     sycl::queue q = select_queue(device);
     auto host = unpack_context<D>(ctx_arrays, X, num_nodes);
@@ -845,7 +1068,85 @@ StructuredSession<D> make_structured_session(const py::dict& ctx_arrays,
                                       rm.share_src_off,
                                       rm.share_dst_off};
     egg::StructuredExecutorT<D> exec(q, host, std::move(topo), std::move(halo_host));
-    return StructuredSession<D> {std::move(exec), std::move(rm)};
+    std::unique_ptr<egg::ControlSessionT<D>> ctrl;
+    std::unique_ptr<egg::ControlTopoSessionT<D>> ctrl_topo;
+    if (!control.is_none() && control.cast<py::dict>().contains("blocks")) {
+        const auto cdict = control.cast<py::dict>();
+        const auto chost = unpack_control_topo<D>(cdict);
+        for (const auto& net : chost.nets) {
+            if (net.block < 0 || std::cmp_greater_equal(net.block, rm.layout.num_blocks())) {
+                throw std::invalid_argument("control topo: block index out of range");
+            }
+            const auto ishape = rm.layout.interior_shape(static_cast<std::size_t>(net.block));
+            for (int k = 0; k < D; ++k) {
+                if (net.off[static_cast<std::size_t>(k)].size() !=
+                    ishape[static_cast<std::size_t>(k)]) {
+                    throw std::invalid_argument(
+                      "control topo: off" + std::to_string(k) +
+                      " length != the block's interior node count on that axis");
+                }
+            }
+        }
+        // Alias pairs (node units): every halo ghost fill, shared-node
+        // broadcast, and singular-fan mirror — the copy relations whose
+        // adjoint the control gradient needs.
+        std::vector<std::pair<int, int>> alias_pairs;
+        {
+            const auto src_block = extract_int(structured, "halo_src_block");
+            const auto src_padded = extract_index_rows<D>(structured, "halo_src_padded");
+            const auto dst_block = extract_int(structured, "halo_dst_block");
+            const auto dst_padded = extract_index_rows<D>(structured, "halo_dst_padded");
+            for (std::size_t e = 0; e < src_block.size(); ++e) {
+                const auto so = rm.layout.padded_node_offset(static_cast<std::size_t>(src_block[e]),
+                                                             src_padded[e]);
+                const auto dof =
+                  rm.layout.padded_node_offset(static_cast<std::size_t>(dst_block[e]),
+                                               dst_padded[e]);
+                alias_pairs.emplace_back(static_cast<int>(so / D), static_cast<int>(dof / D));
+            }
+            for (std::size_t e = 0; e < rm.share_src_off.size(); ++e) {
+                alias_pairs.emplace_back(static_cast<int>(rm.share_src_off[e] / D),
+                                         static_cast<int>(rm.share_dst_off[e] / D));
+            }
+            for (std::size_t e = 0; e < rm.fan_src_off.size(); ++e) {
+                alias_pairs.emplace_back(static_cast<int>(rm.fan_src_off[e] / D),
+                                         static_cast<int>(rm.fan_dst_off[e] / D));
+            }
+        }
+        ctrl_topo =
+          std::make_unique<egg::ControlTopoSessionT<D>>(exec.queue(),
+                                                        rm.layout,
+                                                        host.energy_stencil,
+                                                        exec.ctx().stencil_view(),
+                                                        chost,
+                                                        exec.ctx().X(),
+                                                        egg::make_halo_view<D>(exec.topology()),
+                                                        alias_pairs);
+    } else if (!control.is_none()) {
+        const auto chost = unpack_control<D>(control.cast<py::dict>());
+        if (chost.block < 0 || std::cmp_greater_equal(chost.block, rm.layout.num_blocks())) {
+            throw std::invalid_argument("control: block index out of range");
+        }
+        const auto ishape = rm.layout.interior_shape(static_cast<std::size_t>(chost.block));
+        for (int k = 0; k < D; ++k) {
+            if (chost.off[static_cast<std::size_t>(k)].size() !=
+                ishape[static_cast<std::size_t>(k)]) {
+                throw std::invalid_argument(
+                  "control: off" + std::to_string(k) +
+                  " length != the block's interior node count on that axis");
+            }
+        }
+        ctrl = std::make_unique<egg::ControlSessionT<D>>(exec.queue(),
+                                                         rm.layout,
+                                                         host.energy_stencil,
+                                                         exec.ctx().stencil_view(),
+                                                         chost,
+                                                         exec.ctx().X());
+    }
+    return StructuredSession<D> {std::move(exec),
+                                 std::move(rm),
+                                 std::move(ctrl),
+                                 std::move(ctrl_topo)};
 }
 
 // Persistent device-resident structured block-Jacobi session. The context is
@@ -860,14 +1161,16 @@ class CppStructuredSweepSession
       const py::dict& structured,
       const py::array_t<double, py::array::c_style | py::array::forcecast>& X0,
       const std::string& device,
-      int dim) :
+      int dim,
+      const py::object& control) :
         dim_(require_supported_dim(dim)), num_nodes_(checked_num_nodes(X0, dim_)),
-        sess_(dim_ == 2 ? SessVariant {std::in_place_type<StructuredSession<2>>,
-                                       make_structured_session<2>(
-                                         ctx_arrays, structured, X0.data(), num_nodes_, device)}
-                        : SessVariant {std::in_place_type<StructuredSession<3>>,
-                                       make_structured_session<3>(
-                                         ctx_arrays, structured, X0.data(), num_nodes_, device)})
+        sess_(dim_ == 2
+                ? SessVariant {std::in_place_type<StructuredSession<2>>,
+                               make_structured_session<2>(
+                                 ctx_arrays, structured, X0.data(), num_nodes_, device, control)}
+                : SessVariant {std::in_place_type<StructuredSession<3>>,
+                               make_structured_session<3>(
+                                 ctx_arrays, structured, X0.data(), num_nodes_, device, control)})
     {
     }
 
@@ -963,6 +1266,160 @@ class CppStructuredSweepSession
           sess_);
     }
 
+    // Run the control-net reduced Gauss-Newton outer loop on the resident
+    // control state (requires the session to have been built with a control
+    // wire). Shape phases only. Returns a report dict mirroring
+    // egg.smoothing.control_ref.run_control_ref.
+    py::dict run_control(int n_outer,
+                         const std::string& phase,
+                         double grad_tol,
+                         double alpha_min,
+                         double lm0,
+                         int pcg_max_iter,
+                         double pcg_rtol,
+                         bool pcg_forcing,
+                         bool model_db)
+    {
+        if (phase == "untangle") {
+            throw std::invalid_argument(
+              "run_control: the control mode smooths the shape phase only; untangle "
+              "stays nodal (run/run_untangle), the net is fitted afterwards");
+        }
+        return std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              if (!s.control && !s.control_topo) {
+                  throw std::invalid_argument(
+                    "run_control: session was built without a control wire");
+              }
+              egg::ControlOptions opts;
+              opts.n_outer = n_outer;
+              opts.grad_tol = static_cast<egg::real>(grad_tol);
+              opts.alpha_min = static_cast<egg::real>(alpha_min);
+              opts.lm0 = static_cast<egg::real>(lm0);
+              opts.pcg_max_iter = pcg_max_iter;
+              opts.pcg_rtol = static_cast<egg::real>(pcg_rtol);
+              opts.pcg_forcing = pcg_forcing;
+              opts.model_db = model_db;
+              const egg::ObjectiveKindT<D> objective = egg::make_objective<D>(phase, 0.0);
+              const egg::ControlReport rep = std::visit(
+                [&](auto obj) {
+                    return s.control_topo ? s.control_topo->run(obj, opts)
+                                          : s.control->run(obj, opts);
+                },
+                objective);
+              py::dict out;
+              out["energies"] =
+                to_f64(rep.energies.data(), static_cast<py::ssize_t>(rep.energies.size()));
+              out["mindets"] =
+                to_f64(rep.mindets.data(), static_cast<py::ssize_t>(rep.mindets.size()));
+              out["alphas"] =
+                to_f64(rep.alphas.data(), static_cast<py::ssize_t>(rep.alphas.size()));
+              out["pcg_iters"] =
+                to_f64(rep.pcg_iters.data(), static_cast<py::ssize_t>(rep.pcg_iters.size()));
+              out["pcg_relres"] =
+                to_f64(rep.pcg_relres.data(), static_cast<py::ssize_t>(rep.pcg_relres.size()));
+              out["frame_jumps"] =
+                to_f64(rep.frame_jumps.data(), static_cast<py::ssize_t>(rep.frame_jumps.size()));
+              out["iters"] = rep.iters;
+              out["converged"] = rep.converged;
+              return out;
+          },
+          sess_);
+    }
+
+    // Download the full control lattice (stacked over blocks in the
+    // multi-block wire), shape (n_ctrl * dim,) flat.
+    py::array_t<double> get_C()
+    {
+        return std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              if (s.control_topo) {
+                  std::vector<egg::real> c(s.control_topo->c_size());
+                  s.control_topo->get_c(c.data());
+                  return to_f64(c.data(), static_cast<py::ssize_t>(c.size()));
+              }
+              if (!s.control) { throw std::invalid_argument("get_C: session has no control wire"); }
+              std::vector<egg::real> c(s.control->c_size());
+              s.control->get_c(c.data());
+              return to_f64(c.data(), static_cast<py::ssize_t>(c.size()));
+          },
+          sess_);
+    }
+
+    // Upload a full control lattice and re-evaluate the net into the packed X.
+    void set_C(const py::array_t<double, py::array::c_style | py::array::forcecast>& c)
+    {
+        std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              if (s.control_topo) {
+                  s.control_topo->set_c(narrow(c));
+                  return;
+              }
+              if (!s.control) { throw std::invalid_argument("set_C: session has no control wire"); }
+              s.control->set_c(narrow(c));
+          },
+          sess_);
+    }
+
+    // Replace the multi-block reduction CSR (frozen-frame updates from Python:
+    // seam-ortho hard columns, sliding wall frames).
+    void set_control_reduction(
+      std::size_t nq,
+      const py::array_t<int, py::array::c_style | py::array::forcecast>& off,
+      const py::array_t<int, py::array::c_style | py::array::forcecast>& col,
+      const py::array_t<double, py::array::c_style | py::array::forcecast>& coef)
+    {
+        std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              if (!s.control_topo) {
+                  throw std::invalid_argument(
+                    "set_control_reduction: session has no multi-block control wire");
+              }
+              s.control_topo->set_reduction(nq,
+                                            std::vector<int>(off.data(), off.data() + off.size()),
+                                            std::vector<int>(col.data(), col.data() + col.size()),
+                                            narrow(coef));
+          },
+          sess_);
+    }
+
+    // Replace the multi-block penalty rows (per-iteration re-weighted frames).
+    void set_control_penalty(
+      const py::array_t<int, py::array::c_style | py::array::forcecast>& off,
+      const py::array_t<int, py::array::c_style | py::array::forcecast>& col,
+      const py::array_t<double, py::array::c_style | py::array::forcecast>& coef,
+      const py::array_t<double, py::array::c_style | py::array::forcecast>& w)
+    {
+        std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              if (!s.control_topo) {
+                  throw std::invalid_argument(
+                    "set_control_penalty: session has no multi-block control wire");
+              }
+              s.control_topo->set_penalty(std::vector<int>(off.data(), off.data() + off.size()),
+                                          std::vector<int>(col.data(), col.data() + col.size()),
+                                          narrow(coef),
+                                          narrow(w));
+          },
+          sess_);
+    }
+
+    // Replace one block's Boolean-sum offset (host b re-extension) and
+    // re-evaluate the resident net into the packed X.
+    void set_control_b(int block_index,
+                       const py::array_t<double, py::array::c_style | py::array::forcecast>& b)
+    {
+        std::visit(
+          [&]<int D>(StructuredSession<D>& s) {
+              if (!s.control_topo) {
+                  throw std::invalid_argument(
+                    "set_control_b: session has no multi-block control wire");
+              }
+              s.control_topo->set_b(block_index, narrow(b));
+          },
+          sess_);
+    }
+
   private:
     using SessVariant = std::variant<StructuredSession<2>, StructuredSession<3>>;
     int dim_;
@@ -1003,13 +1460,15 @@ PYBIND11_MODULE(cpp_core, m)
                     py::dict,
                     py::array_t<double, py::array::c_style | py::array::forcecast>,
                     const std::string&,
-                    int>(),
+                    int,
+                    const py::object&>(),
            py::arg("ctx_arrays"),
            py::arg("structured"),
            py::arg("X"),
            py::kw_only(),
            py::arg("device") = "auto",
-           py::arg("dim") = 2)
+           py::arg("dim") = 2,
+           py::arg("control") = py::none())
       .def("run",
            &CppStructuredSweepSession::run,
            py::arg("n_sweeps"),
@@ -1050,7 +1509,67 @@ PYBIND11_MODULE(cpp_core, m)
            "node-count tuples; empty when no coarse level can be built.")
       .def("get_X",
            &CppStructuredSweepSession::get_X,
-           "Download X gathered back to global node order, shape (N*dim,).");
+           "Download X gathered back to global node order, shape (N*dim,).")
+      .def("run_control",
+           &CppStructuredSweepSession::run_control,
+           py::arg("n_outer"),
+           py::kw_only(),
+           py::arg("phase") = "barrier",
+           py::arg("grad_tol") = 1e-8,
+           py::arg("alpha_min") = 1e-4,
+           py::arg("lm0") = 0.0,
+           py::arg("pcg_max_iter") = 200,
+           py::arg("pcg_rtol") = 1e-10,
+           py::arg("pcg_forcing") = true,
+           py::arg("model_db") = true,
+           "Run up to n_outer control-net reduced Gauss-Newton iterations on the\n"
+           "resident control state (session must be built with a control wire).\n"
+           "Each iteration: reduced gradient G = M_f^T g, Jacobi-preconditioned\n"
+           "matrix-free PCG on (A + lambda I) dC = -G with the per-sample full GN\n"
+           "Hessian action, corr = M dC, and a backtracking line search on the\n"
+           "global fine energy under the standard accept rule; rejection bumps the\n"
+           "Levenberg damping. pcg_forcing (default) applies an inexact-Newton\n"
+           "forcing term — the effective PCG tolerance is\n"
+           "max(pcg_rtol, min(0.5, sqrt(max|G|/max|G|_0))) — so early steps solve\n"
+           "loosely; disable it for exact-solve parity runs.\n"
+           "Shape phases only (phase=\"untangle\" raises).\n"
+           "model_db (default) composes the frozen-frame Boolean-sum\n"
+           "linearization db/dC into the GN Jacobian on in-session sliding-wall\n"
+           "runs — without it a tangential wall-control slide looks like free\n"
+           "normal fine-node motion and the per-frame b re-extension ratchets.\n"
+           "Returns {energies, mindets, alphas, frame_jumps, iters, converged} —\n"
+           "the semantics mirror egg.smoothing.control_ref.run_control_ref;\n"
+           "frame_jumps is the energy injected by each frame rebuild.")
+      .def("get_C",
+           &CppStructuredSweepSession::get_C,
+           "Download the full control lattice, flat (n_ctrl*dim,).")
+      .def("set_C",
+           &CppStructuredSweepSession::set_C,
+           py::arg("C"),
+           "Upload a full control lattice (flat, n_ctrl*dim) and re-evaluate the\n"
+           "net (+ b) into the resident packed X.")
+      .def("set_control_reduction",
+           &CppStructuredSweepSession::set_control_reduction,
+           py::arg("nq"),
+           py::arg("off"),
+           py::arg("col"),
+           py::arg("coef"),
+           "Replace the multi-block reduction CSR dC = R dq (frozen-frame\n"
+           "updates from Python; rows index stacked control components).")
+      .def("set_control_penalty",
+           &CppStructuredSweepSession::set_control_penalty,
+           py::arg("off"),
+           py::arg("col"),
+           py::arg("coef"),
+           py::arg("w"),
+           "Replace the multi-block penalty rows (homogeneous quadratic\n"
+           "0.5*sum w_j (P_j C)^2 over stacked control components).")
+      .def("set_control_b",
+           &CppStructuredSweepSession::set_control_b,
+           py::arg("block"),
+           py::arg("b"),
+           "Replace one block's Boolean-sum offset and re-evaluate the net\n"
+           "into the resident packed X.");
 
     m.def(
       "cpp_structured_sweep",

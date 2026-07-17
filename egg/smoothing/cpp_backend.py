@@ -472,6 +472,10 @@ class CppStructuredSweepSession:
         Initial node positions (global node order).
     device : str, optional
         ``"auto"`` (default), ``"cpu"``, or ``"gpu"``.
+    control : dict, optional
+        Control-net wire from
+        :func:`egg.smoothing.control_backend.build_control_wire`; enables
+        :meth:`run_control` / :meth:`get_C` / :meth:`set_C`.
     """
 
     def __init__(
@@ -481,6 +485,7 @@ class CppStructuredSweepSession:
         X: np.ndarray,
         *,
         device: str = "auto",
+        control: dict | None = None,
     ) -> None:
         from egg._cpp import cpp_core
 
@@ -489,8 +494,9 @@ class CppStructuredSweepSession:
         structured = structured_arrays(bsc)
         X_flat = np.ascontiguousarray(X, dtype=np.float64).ravel()
         self._session = cpp_core.CppStructuredSweepSession(
-            ctx_arrays, structured, X_flat, device=device, dim=ctx.d
+            ctx_arrays, structured, X_flat, device=device, dim=ctx.d, control=control
         )
+        self._d = ctx.d
 
     def run(
         self,
@@ -575,6 +581,93 @@ class CppStructuredSweepSession:
     def get_X(self) -> np.ndarray:
         """Return X gathered back to global node order, reshaped to the input shape."""
         return self._session.get_X().reshape(self._shape)
+
+    def run_control(
+        self,
+        n_outer: int,
+        *,
+        phase: str = "barrier",
+        grad_tol: float = 1e-8,
+        alpha_min: float = 1e-4,
+        lm0: float = 0.0,
+        pcg_max_iter: int = 200,
+        pcg_rtol: float = 1e-10,
+        pcg_forcing: bool = True,
+        model_db: bool = True,
+    ) -> dict:
+        """Run up to ``n_outer`` control-net reduced Gauss-Newton iterations on
+        the resident control state (requires ``control=`` at construction).
+
+        Each iteration pulls the fine TMOP gradient back to the free controls,
+        solves ``(A + lambda I) dC = -G`` by Jacobi-preconditioned matrix-free
+        PCG with the per-sample full GN Hessian action, and line-searches the
+        node-space correction ``M dC`` on the global fine energy under the
+        standard accept rule (finite, monotone to tol, min det > 0); rejection
+        bumps the Levenberg damping. Shape phases only — untangle stays nodal.
+
+        ``pcg_forcing`` (default) applies an inexact-Newton forcing term: the
+        effective PCG tolerance is ``max(pcg_rtol, min(0.5,
+        sqrt(max|G|/max|G|_0)))``, so early steps solve the GN system only to
+        the 1-2 digits the line search needs. Disable for exact-solve parity
+        against the NumPy reference.
+
+        ``model_db`` (default) composes the frozen-frame Boolean-sum
+        linearization ``db/dC`` into the GN Jacobian on in-session
+        sliding-wall runs — without it a tangential wall-control slide looks
+        like free normal fine-node motion and the per-frame b re-extension
+        injects energy (the sliding-frame ratchet).
+
+        Returns a report dict ``{energies, mindets, alphas, frame_jumps,
+        iters, converged}`` mirroring
+        :func:`egg.smoothing.control_ref.run_control_ref`; ``frame_jumps``
+        is the energy injected by each frame rebuild.
+        """
+        return self._session.run_control(
+            n_outer,
+            phase=phase,
+            grad_tol=grad_tol,
+            alpha_min=alpha_min,
+            lm0=lm0,
+            pcg_max_iter=pcg_max_iter,
+            pcg_rtol=pcg_rtol,
+            pcg_forcing=pcg_forcing,
+            model_db=model_db,
+        )
+
+    def get_C(self) -> np.ndarray:
+        """Download the full control lattice, shape ``(n_ctrl, d)``."""
+        return self._session.get_C().reshape(-1, self._d)
+
+    def set_C(self, C: np.ndarray) -> None:
+        """Upload a full control lattice ``(n_ctrl, d)`` and re-evaluate the
+        net (+ ``b``) into the resident packed X."""
+        self._session.set_C(np.ascontiguousarray(C, dtype=np.float64).ravel())
+
+    def set_control_reduction(self, nq: int, off, col, coef) -> None:
+        """Replace the multi-block reduction CSR ``dC = R dq`` (frozen-frame
+        updates; rows index stacked control components)."""
+        self._session.set_control_reduction(
+            int(nq),
+            np.ascontiguousarray(off, dtype=np.int32),
+            np.ascontiguousarray(col, dtype=np.int32),
+            np.ascontiguousarray(coef, dtype=np.float64),
+        )
+
+    def set_control_penalty(self, off, col, coef, w) -> None:
+        """Replace the multi-block penalty rows (homogeneous quadratic
+        ``0.5 * sum w_j (P_j C)^2`` over stacked control components)."""
+        self._session.set_control_penalty(
+            np.ascontiguousarray(off, dtype=np.int32),
+            np.ascontiguousarray(col, dtype=np.int32),
+            np.ascontiguousarray(coef, dtype=np.float64),
+            np.ascontiguousarray(w, dtype=np.float64),
+        )
+
+    def set_control_b(self, block: int, b) -> None:
+        """Replace one block's Boolean-sum offset and re-evaluate the net."""
+        self._session.set_control_b(
+            int(block), np.ascontiguousarray(b, dtype=np.float64).ravel()
+        )
 
 
 def structured_arrays(bsc: BlockStructuredContext) -> dict:

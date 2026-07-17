@@ -69,6 +69,14 @@ template <int D> class StructuredExecutorT
 
     SweepDeviceContextT<D>& ctx() { return ctx_; }
 
+    /// The block halo topology (session add-ons snapshot its USM pointers via
+    /// make_halo_view; the allocations outlive moves of this executor).
+    const BlockTopologyDevice<D>& topology() const { return topo_; }
+
+    /// The executor's in-order queue (shared by session add-ons, e.g. the
+    /// control-net solver, so their kernels serialize with the sweeps).
+    sycl::queue& queue() { return q_; }
+
     /// Run n_sweeps of double-buffered block-Jacobi (one merged launch per sweep),
     /// returns (energies, min-dets). Under the frozen-halo cadence Jacobi
     /// converges to the minimiser.
