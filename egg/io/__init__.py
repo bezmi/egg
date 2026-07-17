@@ -6,6 +6,7 @@
 # See the license for details.
 # For commercial licensing, contact s.imran@tuta.io
 
+from egg.io.control_net import load_control_net, save_control_net
 from egg.io.su2 import export_su2
 
-__all__ = ["export_su2"]
+__all__ = ["export_su2", "save_control_net", "load_control_net"]

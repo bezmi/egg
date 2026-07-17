@@ -400,6 +400,15 @@ function applyView() {
   if (sel && !el.querySelector('.hl')) sel.style.display = 'none';
   if (savedVB) el.setAttribute('viewBox', savedVB);
   scaleMarkers(el);  // fresh markers are authored-size; match the current zoom
+  // A control net appearing for the first time (control_point run starting,
+  // or an imported net) switches its layer on; once seen, the user's toggle
+  // choice stands for the rest of the run.
+  const hasNet = !!el.querySelector('.layer-net');
+  if (hasNet && !window._eggNetSeen) {
+    const netCb = document.querySelector('.layer-toggle[data-layer="net"]');
+    if (netCb) netCb.checked = true;
+  }
+  window._eggNetSeen = hasNet;
   document.querySelectorAll('.layer-toggle').forEach((cb) => {
     el.querySelectorAll('.layer-' + cb.dataset.layer).forEach((g) => {
       g.style.display = cb.checked ? '' : 'none';
@@ -641,6 +650,35 @@ document.addEventListener('click', async (e) => {
     const t = await r.text();
     if (!r.ok) { alert(t); return; }
     dl('mesh.su2', new Blob([t], {type: 'text/plain'}));
+  }
+  if (e.target.closest('#file-dl-net')) {
+    const code = document.querySelector('.editor textarea').value;
+    const path = document.getElementById('scriptpath').value;
+    const r = await fetch('/export/net', {method: 'POST', body: new URLSearchParams({code, path})});
+    if (!r.ok) { alert(await r.text()); return; }
+    dl('control_net.npz', await r.blob());
+  }
+  if (e.target.closest('#file-import-net')) {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.npz';
+    inp.onchange = async () => {
+      const f = inp.files[0];
+      if (!f) return;
+      const fd = new FormData();
+      fd.append('code', document.querySelector('.editor textarea').value);
+      fd.append('path', document.getElementById('scriptpath').value);
+      fd.append('file', f);
+      const r = await fetch('/import/net', {method: 'POST', body: fd});
+      const t = await r.text();
+      if (!r.ok) { alert(t); return; }
+      const view = document.getElementById('view');
+      if (view) {
+        view.innerHTML = t;
+        applyView();  // first .layer-net sighting switches the layer on
+      }
+    };
+    inp.click();
   }
 });
 

@@ -92,11 +92,29 @@ def main() -> None:
             )
             return
         grid, steps = reg
+        from .scene import control_net_state
+
         for phase, info in steps:
             stopped = _stop_requested()
+            # Net state first: the reader renders on the step frame, so the
+            # lattice overlay animates in the same frame as the grid.
+            net_state = control_net_state(grid)
+            if net_state is not None:
+                send(("net_state", net_state))
             send(("step", phase, dict(info), np.asarray(grid.global_nodes)))
             if stopped:
                 break
+        # A control_point run leaves its solved net on the grid; ship the
+        # persisted form so the server can overlay it and serve the export.
+        net = getattr(grid, "control_net", None)
+        if net is not None:
+            import io
+
+            from egg.io import save_control_net
+
+            buf = io.BytesIO()
+            save_control_net(net, buf)
+            send(("net", buf.getvalue()))
         send(("done",))
     except Exception:
         send(("error", traceback.format_exc()))

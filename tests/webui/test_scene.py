@@ -542,3 +542,86 @@ def test_capsule_guard_has_metric_dropdown_and_dipole_toggle():
     assert ps["corner dipole"].kind == "bool"
     new = scene.set_guard_param(code, "corner dipole", "false")
     assert "dipole=egg_webui.editable(False, label=" in new
+
+
+def test_control_net_overlay_renders_and_roundtrips(tmp_path):
+    """A grid carrying a solved control net renders the toggleable net layer,
+    and the persisted npz reloads onto a fresh exec of the same script (the
+    import-net flow's core)."""
+    import io as _io
+    import os
+    import sys
+
+    sys.path.insert(
+        0,
+        os.path.join(
+            os.path.dirname(__file__), "..", "..", "examples", "2D", "circles"
+        ),
+    )
+    pytest.importorskip("egg._cpp")
+    from topologies import build_circle_in_rectangle
+
+    from egg.io import load_control_net, save_control_net
+    from egg.smoothing.control_topology import build_control_topology
+
+    topo_b, _ents = build_circle_in_rectangle()
+    grid = topo_b.initialize_grid()
+    grid.control_net = build_control_topology(grid, walls=True)
+
+    sc = scene.Scene()
+    scene.refresh_grid_layer(sc, grid)
+    scene.refresh_net_layer(sc, grid)
+    assert sc.net_blocks and all(c.ndim == 3 for _n, c in sc.net_blocks)
+    svg = scene.render_svg(sc)
+    root = ET.fromstring(svg)
+    groups = {g.get("class") for g in root.iter("{http://www.w3.org/2000/svg}g")}
+    assert "layer-net" in groups
+
+    # Persist -> reload onto an identical grid (the import route's core).
+    buf = _io.BytesIO()
+    save_control_net(grid.control_net, buf)
+    buf.seek(0)
+    grid2 = build_circle_in_rectangle()[0].initialize_grid()
+    topo2 = load_control_net(grid2, buf)
+    topo2.write_to_grid()
+    sc2 = scene.Scene()
+    scene.refresh_net_layer(sc2, grid2)
+    assert not sc2.net_blocks  # not attached yet
+    grid2.control_net = topo2
+    scene.refresh_net_layer(sc2, grid2)
+    assert len(sc2.net_blocks) == len(sc.net_blocks)
+
+
+def test_net_layer_from_streamed_blocks():
+    """The reader-side overlay path: explicit per-block lattices (the
+    worker's streamed control_net_state) populate the layer without the grid
+    carrying a net, matching the grid-attached path."""
+    import os
+    import sys
+
+    sys.path.insert(
+        0,
+        os.path.join(
+            os.path.dirname(__file__), "..", "..", "examples", "2D", "circles"
+        ),
+    )
+    pytest.importorskip("egg._cpp")
+    from topologies import build_circle_in_rectangle
+
+    from egg.smoothing.control_topology import build_control_topology
+
+    topo_b, _ents = build_circle_in_rectangle()
+    grid = topo_b.initialize_grid()
+    grid.control_net = build_control_topology(grid, walls=True)
+
+    streamed = scene.control_net_state(grid)
+    assert streamed is not None and all(c.shape[-1] == 2 for c in streamed)
+
+    bare = build_circle_in_rectangle()[0].initialize_grid()  # no net attached
+    sc = scene.Scene()
+    scene.refresh_net_layer(sc, bare, blocks=streamed)
+    sc2 = scene.Scene()
+    scene.refresh_net_layer(sc2, grid)
+    assert len(sc.net_blocks) == len(sc2.net_blocks)
+    for (_na, ca), (_nb, cb) in zip(sc.net_blocks, sc2.net_blocks):
+        np.testing.assert_allclose(ca, cb)

@@ -356,6 +356,10 @@ html.restoring .canvas svg { visibility: hidden; }
 /* construction points: CAD-style control cage, dashed tangent lines */
 .ctrl-cage { fill: none; stroke: var(--egg-ctrl); stroke-width: 1.2;
              stroke-dasharray: 5 4; }
+/* solved control-net overlay: dashed B-spline lattice + control markers */
+.net-line { fill: none; stroke: var(--egg-net, var(--egg-ctrl));
+            stroke-width: 1.2; stroke-dasharray: 2 3; }
+.net-pt { fill: var(--egg-net, var(--egg-ctrl)); }
 .ctrl-pt { fill: var(--ctp-base); stroke: var(--egg-ctrl); stroke-width: 1.5; }
 .ctrl-pt.fixed { fill: var(--egg-pt-fixed); stroke: none; }
 .ctrl-pt.node { stroke: var(--egg-pt-node); stroke-width: 2; }

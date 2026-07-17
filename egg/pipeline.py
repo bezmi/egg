@@ -142,7 +142,7 @@ class PipelineConfig:
     # TMOP quality phase.
     tmop_sweeps: int = 40
     tmop_chunk: int = 10
-    tmop_smoother: Literal["jacobi", "fas"] = "jacobi"
+    tmop_smoother: Literal["jacobi", "fas", "control_point"] = "jacobi"
     tmop_metric: Literal["shape", "shape_size"] = "shape"
     fas_nu_pre: int = 2
     fas_nu_post: int = 2
@@ -150,6 +150,41 @@ class PipelineConfig:
     fas_max_levels: int = 32
     omega: float = 0.8
     report_every: int = 0
+
+    # Control-point smoother knobs (tmop_smoother="control_point"): the shape
+    # phase moves a coarse per-block B-spline control net instead of nodes
+    # (egg.smoothing.control_topology / control_backend). The proven nodal
+    # untangle still owns validity; control_presmooth nodal sweeps give the
+    # net fit a smooth valid start. control_ratio is the cells-per-control
+    # coarsening (finer nets track curved sliding walls; 2 is safe, 4 is
+    # cheaper on smooth interiors). Seam C2/orthogonality dials mirror
+    # run_control_topo.
+    control_presmooth: int = 100
+    # Smoother for the pre-fit nodal smooth: plain sweeps, FAS V-cycles at an
+    # equivalent sweep budget, or "auto" — FAS once the grid is large enough
+    # for the hierarchy to pay for itself (the fit only needs a smooth valid
+    # start, and at scale a handful of V-cycles reaches a far better one in a
+    # fraction of the sweeps' wall time).
+    control_presmooth_smoother: str = "auto"
+    control_ratio: int = 2
+    control_max_outer: int = 30
+    # Outer GN iterations per yielded "control" chunk (live views animate
+    # per chunk; 0 = the whole phase in one call).
+    control_chunk: int = 5
+    control_c2_weight: float = 0.0
+    control_ortho: str = "off"
+    control_ortho_weight: float = 1.0
+    # Extra knots inserted at every net axis end landing on a singular fan
+    # (chain-wide so seams stay conforming): the fan window is C1-penalty-only
+    # and a coarse net underfits the tight turning there. 0 disables.
+    control_fan_refine: int = 2
+    # Weight of the interior line-straightness rows (normal component of the
+    # control polygon's second divided difference, frame frozen at the fit).
+    # Grid lines can bow at near-zero shape-energy cost and a converged GN
+    # step parks in whichever bowed state the initial fit seeded; a small
+    # weight makes the straight member of that flat family the optimum.
+    # Zero for collinear controls at any spacing, so clustering is untouched.
+    control_smooth_weight: float = 10.0
 
     # Boundary-layer clustering target (see generate_steps / cluster_* below).
     cluster_boundary_layers: bool = True
@@ -180,11 +215,29 @@ class PipelineConfig:
     def validate(self) -> None:
         """Reject invalid enum knobs up front — a typo must fail before the
         untangle phase spends minutes, not after."""
-        if self.tmop_smoother not in ("jacobi", "fas"):
+        if self.tmop_smoother not in ("jacobi", "fas", "control_point"):
             raise ValueError(
-                f"PipelineConfig.tmop_smoother must be 'jacobi' or 'fas', got "
-                f"{self.tmop_smoother!r}"
+                f"PipelineConfig.tmop_smoother must be 'jacobi', 'fas' or "
+                f"'control_point', got {self.tmop_smoother!r}"
             )
+        if self.tmop_smoother == "control_point":
+            if self.interface_ortho is not None or self.interface_c2 is not None:
+                raise ValueError(
+                    "interface_ortho / interface_c2 are node-mode terms; the "
+                    "control-point smoother expresses seam orthogonality and "
+                    "curvature continuity directly on control legs — use "
+                    "control_ortho / control_c2_weight instead"
+                )
+            if self.control_ortho not in ("off", "penalty", "hard"):
+                raise ValueError(
+                    "PipelineConfig.control_ortho must be 'off', 'penalty' or "
+                    f"'hard', got {self.control_ortho!r}"
+                )
+            if self.control_presmooth_smoother not in ("auto", "jacobi", "fas"):
+                raise ValueError(
+                    "PipelineConfig.control_presmooth_smoother must be 'auto', "
+                    f"'jacobi' or 'fas', got {self.control_presmooth_smoother!r}"
+                )
         if self.tmop_metric not in ("shape", "shape_size"):
             raise ValueError(
                 f"PipelineConfig.tmop_metric must be 'shape' or 'shape_size', "
@@ -521,23 +574,224 @@ def generate_steps(
             )
         return sess.run(k, report_every=report_every, **run_kwargs)
 
-    done = 0
-    while done < tmop_sweeps:
-        k = min(tmop_chunk, tmop_sweeps - done)
-        # The chunk-end min det comes from the device reduction (same as the
-        # stepped untangle loop) — no host O(N) recompute per chunk.
-        energies, mds = run_tmop(session, k)
-        done += k
-        _sync(grid, session.get_X())
+    if cfg.tmop_smoother == "control_point":
+        # The shape phase moves the coarse control net instead of nodes.
+        # Sequence (see egg/smoothing/control_topology.py): nodal pre-smooth
+        # (the LSQ fit needs a valid, smooth start — fitting a rough grid can
+        # fold the evaluated net), fit + reduced Gauss-Newton on the device
+        # session (sliding CAD walls, exact C1 seams, fan fallback), then the
+        # net is kept on the grid — refine/regrid becomes algebraic
+        # re-evaluation.
+        # Boundary-layer clustering: the control solve runs on the SAME
+        # clustered target as node mode (chord-parameter fits keep the
+        # clustered grid representable by the net), so the smoother shapes
+        # the layer profile — and, crucially, the block interfaces — during
+        # the solve. Exact first-layer heights stay the opt-in respace/pin
+        # phases, same as node mode; `resample_block` remains available for
+        # re-gridding the stored net after the fact.
+        if cfg.control_presmooth > 0:
+            n_nodes = int(np.asarray(grid.global_nodes).shape[0])
+            use_fas = cfg.control_presmooth_smoother == "fas" or (
+                cfg.control_presmooth_smoother == "auto" and n_nodes >= 50_000
+            )
+            if use_fas:
+                # Equivalent-work budget: a V-cycle costs roughly
+                # 4 x (nu_pre + nu_post) fine-sweep equivalents including the
+                # coarse ladder, so the nominal presmooth budget converts to
+                # a handful of cycles (floored at 2, capped at 10).
+                cycles = max(
+                    2,
+                    min(
+                        10,
+                        cfg.control_presmooth
+                        // (4 * (cfg.fas_nu_pre + cfg.fas_nu_post)),
+                    ),
+                )
+                energies, mds = session.run_fas(
+                    cycles,
+                    nu_pre=cfg.fas_nu_pre,
+                    nu_post=cfg.fas_nu_post,
+                    nu_coarse=cfg.fas_nu_coarse,
+                    max_levels=cfg.fas_max_levels,
+                    **run_kwargs,
+                )
+                budget = {"cycles": cycles}
+            else:
+                energies, mds = session.run(
+                    cfg.control_presmooth, report_every=report_every, **run_kwargs
+                )
+                budget = {"sweeps": cfg.control_presmooth}
+            _sync(grid, session.get_X())
+            yield (
+                "tmop",
+                {
+                    "energy": float(np.asarray(energies)[-1]),
+                    "min_det": float(np.asarray(mds)[-1]),
+                    **budget,
+                },
+            )
+        from .smoothing.control_backend import run_control_topo
+        from .smoothing.control_topology import (
+            build_control_topology,
+            default_ctrl_shapes,
+        )
+
+        # fit_spacing="chord": the fit samples the grid's own (seam-
+        # harmonized) parameter distribution, so a boundary-layer-clustered
+        # initial grid stays representable by the net instead of pushing the
+        # whole clustering into b (where the sliding-wall re-extension would
+        # perturb hair-thin cells at their own scale).
+        ctrl_topo = build_control_topology(
+            grid,
+            default_ctrl_shapes(grid, r=cfg.control_ratio),
+            walls=True,
+            fit_spacing="chord",
+            fan_refine=cfg.control_fan_refine,
+        )
+        # On the grid from the fitted initial state onward: the chunk loop
+        # mutates this same topology, so live views can stream the net as it
+        # moves (the final state is the solved net).
+        grid.control_net = ctrl_topo
+        # Chunked so live views animate the control iterations; the session
+        # stays resident across chunks (report["session"]).
+        ctrl_kw = dict(
+            topo=ctrl_topo,
+            device=device,
+            phase=tmop_phase,
+            c2_weight=cfg.control_c2_weight,
+            ortho=cfg.control_ortho,
+            ortho_weight=cfg.control_ortho_weight,
+            smooth_weight=cfg.control_smooth_weight,
+        )
+        ctrl_target = iso if target is None else target
+        chunk_n = cfg.control_chunk if cfg.control_chunk > 0 else cfg.control_max_outer
+        sess_c = None
+        done_outer = 0
+        ctrl_rep = None
+        # The sliding-wall frame rebuilds keep the energy monotone within a
+        # frame but not across rebuilds; on hard configs the loop can ratchet
+        # (b re-extension injecting energy each frame). Track the best valid
+        # chunk state (q, b, X) and restore it if the loop drifted past it.
+        # Stall exit: two consecutive chunks without a meaningful energy
+        # improvement end the phase — this covers both the ratchet (worse
+        # chunks) and a flat optimum, where the GN gradient never reaches the
+        # tolerance but chunks stop buying anything (the reduction-order
+        # energy noise sits in the 4th-5th digit, hence the relative margin).
+        best = None
+        stalled_chunks = 0
+        while done_outer < cfg.control_max_outer:
+            k = min(chunk_n, cfg.control_max_outer - done_outer)
+            ctrl_topo, ctrl_rep = run_control_topo(
+                grid, ctrl_target, max_outer=k, session=sess_c, **ctrl_kw
+            )
+            sess_c = ctrl_rep["session"]
+            done_outer += max(int(ctrl_rep["iters"]), 1)
+            e_c = float(ctrl_rep["final_fine_energy"])
+            md_c = float(ctrl_rep["final_mindet"])
+            yield (
+                "control",
+                {
+                    "energy": e_c,
+                    "min_det": md_c,
+                    "iters": done_outer,
+                    "converged": bool(ctrl_rep["converged"]),
+                    "frame_jumps": list(ctrl_rep.get("frame_jumps", [])),
+                },
+            )
+            improved = md_c > 0.0 and (best is None or e_c < best[0] * (1.0 - 1e-5))
+            if md_c > 0.0 and (best is None or e_c <= best[0]):
+                best = (
+                    e_c,
+                    md_c,
+                    ctrl_topo.q.copy(),
+                    [np.array(b) for b in ctrl_topo.b_fields],
+                    np.array(grid.global_nodes),
+                )
+            if improved:
+                stalled_chunks = 0
+            else:
+                stalled_chunks += 1
+                if stalled_chunks >= 2:
+                    break
+            if ctrl_rep["converged"] or ctrl_rep["iters"] == 0:
+                break
+        if best is not None and ctrl_rep is not None:
+            e_last = float(ctrl_rep["final_fine_energy"])
+            md_last = float(ctrl_rep["final_mindet"])
+            if md_last <= 0.0 or e_last > best[0] * (1.0 + 1e-9):
+                e_b, md_b, q_b, b_b, X_b = best
+                ctrl_topo.q = q_b
+                ctrl_topo.b_fields = b_b
+                grid.global_nodes[:] = X_b
+                for bi, block in enumerate(grid.blocks):
+                    block.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]
+                yield (
+                    "control",
+                    {
+                        "energy": e_b,
+                        "min_det": md_b,
+                        "iters": done_outer,
+                        "converged": False,
+                        "restored": True,
+                    },
+                )
+    else:
+        done = 0
+        while done < tmop_sweeps:
+            k = min(tmop_chunk, tmop_sweeps - done)
+            # The chunk-end min det comes from the device reduction (same as
+            # the stepped untangle loop) — no host O(N) recompute per chunk.
+            energies, mds = run_tmop(session, k)
+            done += k
+            _sync(grid, session.get_X())
+            yield (
+                "tmop",
+                {
+                    "energy": float(np.asarray(energies)[-1]),
+                    "min_det": float(np.asarray(mds)[-1]),
+                    "sweeps": done,
+                },
+            )
+    project_nodes(grid, grid.dof_constraints)
+    if cfg.tmop_smoother == "control_point" and md_now() <= 0.0:
+        # The boundary snap can fold hair-thin near-wall cells when the
+        # control state ended slightly off its frame (a reverted closing
+        # rebuild). Recover with the proven nodal untangler (plain sweeps
+        # cannot clear a fold) plus a short re-smooth — constrained nodes
+        # stay on their entities, so the result is valid AND on-CAD (and
+        # slightly off the stored net, which keeps the smooth shape).
+        from .smoothing.cpp_backend import cpp_untangle
+
+        X_out, _md_u, _oi, _df = cpp_untangle(
+            ctx_iso,
+            grid,
+            grid.global_nodes,
+            sweeps_per_delta=cfg.sweeps_per_delta,
+            delta0_factor=cfg.delta0_factor,
+            shrink=cfg.untangle_shrink,
+            max_outer=cfg.max_outer,
+            device=device,
+            margin=margin,
+            omega=0.5,
+        )
+        _sync(grid, X_out)
+        project_nodes(grid, grid.dof_constraints)
+        rec_sess = CppStructuredSweepSession(
+            build_sweep_context(grid, iso if target is None else target),
+            build_block_structured_context(grid),
+            grid.global_nodes,
+            device=device,
+        )
+        energies, mds = rec_sess.run(200, phase=tmop_phase, omega=omega)
+        _sync(grid, rec_sess.get_X())
+        project_nodes(grid, grid.dof_constraints)
         yield (
-            "tmop",
+            "recover",
             {
                 "energy": float(np.asarray(energies)[-1]),
-                "min_det": float(np.asarray(mds)[-1]),
-                "sweeps": done,
+                "min_det": md_now(),
             },
         )
-    project_nodes(grid, grid.dof_constraints)
     score_ctx = tmop_ctx
 
     # --- Phase 3 (optional): pin the first n_fixed boundary layers exactly ---

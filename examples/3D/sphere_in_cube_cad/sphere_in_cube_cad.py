@@ -211,6 +211,14 @@ def main(argv=None):
     p.add_argument("--sweeps", type=int, default=200)
     p.add_argument("--chunk", type=int, default=40)
     p.add_argument(
+        "--smoother",
+        choices=["jacobi", "fas", "control_point"],
+        default="jacobi",
+        help="TMOP-phase smoother: block-Jacobi sweeps, FAS V-cycles, or the "
+        "control-net reduced Gauss-Newton solver (sliding sphere/plane "
+        "walls, exact C1 seams, fan fallback)",
+    )
+    p.add_argument(
         "--plot-live",
         action="store_true",
         help="PyVista animated XY/YZ sections (one frame per chunk)",
@@ -267,7 +275,12 @@ def main(argv=None):
         live = GridPlots(X0, sections, surf, a.plot_3d, surf_faces=surf_faces)
         live.open_live()
 
-    cfg = PipelineConfig(device=a.device, tmop_sweeps=a.sweeps, tmop_chunk=a.chunk)
+    cfg = PipelineConfig(
+        device=a.device,
+        tmop_sweeps=a.sweeps,
+        tmop_chunk=a.chunk,
+        tmop_smoother=a.smoother,
+    )
     energies, mindets = [], []
     for phase, info in generate_steps(grid, config=cfg, untangle_direct=True):
         if "energy" in info:
