@@ -132,6 +132,12 @@ class MultiBlockGrid:
         # Sliding geometry constraints: global DOF index -> GeometryEntity.
         # Populated by BlockTopology.initialize_grid; empty means all free/fixed.
         self.dof_constraints: dict[int, Any] = {}
+        # Control-net representation of the smoothed grid (a
+        # egg.smoothing.control_topology.ControlTopology), set by the
+        # pipeline's control-point smoother phase. When present the block
+        # shapes are algebraic: refine/derefine/cluster by re-evaluating the
+        # net at new node parameters, no re-solve.
+        self.control_net: Any = None
 
     @property
     def total_free_dofs(self) -> int:
