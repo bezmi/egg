@@ -437,9 +437,21 @@ def test_dense_grid_preview_is_decimated():
 # --- guard parameter panel: parse + span-exact rewrite ---
 
 
-def test_guard_params_of_the_egg_example():
-    code = (EXAMPLES_2D / "egg/egg.py").read_text()
-    by_name = {p.name: p for p in scene.guard_params(code)}
+# A representative editable guard block (the shape examples use when they expose
+# web-UI knobs). Kept synthetic so it does not track any one example's literals.
+_GUARD_CODE = (
+    'if __name__ == "__egg_webui__":\n'
+    "    a = egg_webui.params(\n"
+    "        bl_first_height=5.0e-3,\n"
+    "        tmop_sweeps=5000,\n"
+    "        smoother='jacobi',\n"
+    '        device="cpu",\n'
+    "    )\n"
+)
+
+
+def test_guard_params_reads_editable_literal_kinds():
+    by_name = {p.name: p for p in scene.guard_params(_GUARD_CODE)}
     assert by_name["bl_first_height"].text == "5.0e-3"
     assert by_name["bl_first_height"].kind == "float"
     assert by_name["tmop_sweeps"].kind == "int"
@@ -448,14 +460,15 @@ def test_guard_params_of_the_egg_example():
 
 
 def test_set_guard_param_rewrites_only_that_literal():
-    code = (EXAMPLES_2D / "egg/egg.py").read_text()
-    new = scene.set_guard_param(code, "tmop_sweeps", "120")
-    changed = [(a, b) for a, b in zip(code.splitlines(), new.splitlines()) if a != b]
+    new = scene.set_guard_param(_GUARD_CODE, "tmop_sweeps", "120")
+    changed = [
+        (a, b) for a, b in zip(_GUARD_CODE.splitlines(), new.splitlines()) if a != b
+    ]
     assert changed == [("        tmop_sweeps=5000,", "        tmop_sweeps=120,")]
     # user spellings survive; strings get quoted
-    new = scene.set_guard_param(code, "bl_first_height", "2.5e-3")
+    new = scene.set_guard_param(_GUARD_CODE, "bl_first_height", "2.5e-3")
     assert "bl_first_height=2.5e-3," in new
-    new = scene.set_guard_param(code, "smoother", "fas")
+    new = scene.set_guard_param(_GUARD_CODE, "smoother", "fas")
     assert "smoother='fas'," in new
 
 
@@ -547,7 +560,7 @@ def test_capsule_guard_has_metric_dropdown_and_dipole_toggle():
 def test_control_net_overlay_renders_and_roundtrips(tmp_path):
     """A grid carrying a solved control net renders the toggleable net layer,
     and the persisted npz reloads onto a fresh exec of the same script (the
-    import-net flow's core)."""
+    net overlay + persistence core)."""
     import io as _io
     import os
     import sys

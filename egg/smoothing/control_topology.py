@@ -396,6 +396,15 @@ class ControlTopology:
     wall_faces: dict = field(default_factory=dict)  # (block, axis, side) -> entity
     root_entity: dict = field(default_factory=dict)  # sliding root col -> entity
     axis_params: list = field(default_factory=list)  # per block, per axis node params
+    # Optional exact-reproduction layer: the per-node difference between the
+    # grid the net was fitted to and the net evaluation, at the CURRENT
+    # sampling (global-node order). None when the net carries no residual.
+    residual: object = None
+    # The raw source of that residual, keyed to the ORIGINAL sampling it was
+    # saved at: (per-block list of per-axis params, per-block field array). Kept
+    # so the residual can be re-interpolated to a NEW sampling (a regrid /
+    # remesh), where the resolution-locked ``residual`` array no longer aligns.
+    residual_src: object = None
 
     @property
     def n_roots(self) -> int:
@@ -422,11 +431,80 @@ class ControlTopology:
             Xg[grid.block_dof_maps[bi].reshape(-1)] = X.reshape(-1, self.d)
         return Xg
 
-    def write_to_grid(self) -> None:
+    def write_to_grid(self, *, exact: bool = False) -> None:
+        """Evaluate the net onto its grid.
+
+        With ``exact`` and a stored ``residual`` (same sampling as the net was
+        fitted at), the residual is added back for a bit-exact reproduction of
+        the original grid.
+        """
         grid = self.grid
-        grid.global_nodes[:] = self.prolong_global()
+        Xg = self.prolong_global()
+        if exact and self.residual is not None:
+            Xg = Xg + np.asarray(self.residual, dtype=float)
+        grid.global_nodes[:] = Xg
         for bi, block in enumerate(grid.blocks):
             block.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]
+
+    def residual_global(self) -> np.ndarray | None:
+        """Interpolate the stored residual source to the CURRENT sampling.
+
+        The residual is the post-processing correction (pin / respace / a nodal
+        polish) the net cannot represent, saved at the original sampling. This
+        re-samples it — in parameter space, per block — onto the grid's current
+        node parameters, so a regrid / remesh can reproduce the post-processed
+        grid, not just the lossy net. Returns a global-node array, or ``None``
+        when the net carries no residual. At the original sampling this is the
+        stored residual exactly (identity interpolation).
+        """
+        if self.residual_src is None:
+            return None
+        from scipy.interpolate import RegularGridInterpolator
+
+        old_params_per_block, fields = self.residual_src
+        grid = self.grid
+        res = np.zeros_like(np.asarray(grid.global_nodes, dtype=float))
+        for bi in range(len(self.cmaps)):
+            old_p = [np.asarray(p, dtype=float) for p in old_params_per_block[bi]]
+            new_p = [np.asarray(p, dtype=float) for p in self.axis_params[bi]]
+            interp = RegularGridInterpolator(
+                old_p,
+                np.asarray(fields[bi], dtype=float),
+                method="linear",
+                bounds_error=False,
+                fill_value=None,
+            )
+            mesh = np.stack(np.meshgrid(*new_p, indexing="ij"), axis=-1)
+            shp = tuple(len(p) for p in new_p)
+            res[grid.block_dof_maps[bi].reshape(-1)] = (
+                interp(mesh.reshape(-1, self.d))
+                .reshape(shp + (self.d,))
+                .reshape(-1, self.d)
+            )
+        return res
+
+    def apply_residual(self) -> bool:
+        """Add the (re-interpolated) residual to the grid if it stays valid.
+
+        The grid must already hold the net evaluation (call after
+        :meth:`write_to_grid` or :func:`resample_block`). The residual is added
+        only when net + residual keeps every cell valid, so it never seeds a
+        folded start; boundary DOFs are re-snapped by the caller's projection.
+        Returns ``True`` when the residual was applied.
+        """
+        res = self.residual_global()
+        if res is None:
+            return False
+        grid = self.grid
+        for bi in range(len(self.cmaps)):
+            dm = grid.block_dof_maps[bi]
+            cand = np.asarray(grid.blocks[bi].nodes, dtype=float) + res[dm]
+            if _corner_mindet(cand) <= 0.0:
+                return False
+        grid.global_nodes[:] = np.asarray(grid.global_nodes, dtype=float) + res
+        for bi, block in enumerate(grid.blocks):
+            block.nodes[...] = grid.global_nodes[grid.block_dof_maps[bi]]
+        return True
 
 
 def _touches_outer(sym: tuple, ctrl_shapes: list, seam_faces: set) -> bool:

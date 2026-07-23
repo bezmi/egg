@@ -652,31 +652,35 @@ document.addEventListener('click', async (e) => {
     dl('mesh.su2', new Blob([t], {type: 'text/plain'}));
   }
   if (e.target.closest('#file-dl-net')) {
-    const code = document.querySelector('.editor textarea').value;
+    const code = currentCode();
     const path = document.getElementById('scriptpath').value;
     const r = await fetch('/export/net', {method: 'POST', body: new URLSearchParams({code, path})});
     if (!r.ok) { alert(await r.text()); return; }
-    dl('control_net.npz', await r.blob());
+    dl('net.npz', await r.blob());
   }
-  if (e.target.closest('#file-import-net')) {
+  if (e.target.closest('#file-save-eggy')) {
+    const code = currentCode();
+    const path = document.getElementById('scriptpath').value;
+    const r = await fetch('/save/eggy', {method: 'POST', body: new URLSearchParams({code, path})});
+    if (!r.ok) { alert(await r.text()); return; }
+    dl('case.eggy', await r.blob());
+  }
+  if (e.target.closest('#file-open-eggy')) {
     const inp = document.createElement('input');
     inp.type = 'file';
-    inp.accept = '.npz';
+    inp.accept = '.eggy';
     inp.onchange = async () => {
       const f = inp.files[0];
       if (!f) return;
       const fd = new FormData();
-      fd.append('code', document.querySelector('.editor textarea').value);
-      fd.append('path', document.getElementById('scriptpath').value);
       fd.append('file', f);
-      const r = await fetch('/import/net', {method: 'POST', body: fd});
-      const t = await r.text();
-      if (!r.ok) { alert(t); return; }
-      const view = document.getElementById('view');
-      if (view) {
-        view.innerHTML = t;
-        applyView();  // first .layer-net sighting switches the layer on
-      }
+      const r = await fetch('/open/eggy', {method: 'POST', body: fd});
+      if (!r.ok) { alert(await r.text()); return; }
+      const j = await r.json();
+      // Load the unpacked script; nothing runs until the user hits run.
+      // A regrid script can Load the net sitting beside it on disk.
+      window.eggSetCode(j.code);
+      setFile(j.path, j.code);
     };
     inp.click();
   }

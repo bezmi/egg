@@ -47,7 +47,16 @@ The command-line surface lives in ``driver.py``; run
 
 import math
 
-from egg.pipeline import PipelineConfig, generate_steps
+from egg.pipeline import (
+    ControlPointSmoother,
+    FasSmoother,
+    JacobiSmoother,
+    Presmooth,
+    Pin,
+    Respace,
+    Untangle,
+    generate_steps,
+)
 
 from egg.geometry import Arc, Bezier, Edge, Line, Polyline, Vector3
 from egg.topology.builder import TopologyBuilder
@@ -135,8 +144,32 @@ def build_phoebus(grid_level: int = 1, n_fixed: int = 1):
     return topology, topology.entities
 
 
-def setup(a):
-    """Topology, grid, and config from parsed args — shared by the CLI
+def _smoother(a, *, metric, cluster, c2, ortho):
+    """The TMOP-phase smoother stage chosen by ``--smoother``.
+
+    The interface C2 / orthogonality terms are node-mode, so they attach to the
+    nodal smoothers; the control-point smoother has its own seam dials.
+    """
+    common = dict(
+        chunk=a["chunk"],
+        omega=a["omega"],
+        metric=metric,
+        cluster_boundary_layers=cluster,
+    )
+    s = a["smoother"]
+    if s == "control_point":
+        return [
+            Presmooth(JacobiSmoother(sweeps=100, **dict(common, chunk=100))),
+            ControlPointSmoother(**common),
+        ]
+    node = dict(
+        sweeps=a["tmop_sweeps"], interface_c2=c2, interface_ortho=ortho, **common
+    )
+    return [FasSmoother(**node) if s == "fas" else JacobiSmoother(**node)]
+
+
+def setup(a, *, direct=True):
+    """Topology, grid, and stage list from parsed args — shared by the CLI
     ``main()`` and the web UI (which passes the parser defaults)."""
     topo, ents = build_phoebus(grid_level=a["grid_level"], n_fixed=a["pin_layers"])
 
@@ -168,28 +201,29 @@ def setup(a):
         if a.get("ortho_weight", 0.0) > 0.0
         else None
     )
-    cfg = PipelineConfig(
-        tmop_sweeps=a["tmop_sweeps"],
-        tmop_chunk=a["chunk"],
-        tmop_smoother=a["smoother"],
-        tmop_metric=metric,
-        cluster_boundary_layers=pin,
-        omega=a["omega"],
-        interface_c2=c2,
-        interface_ortho=ortho,
-        device=a["device"],
-        pin_sweeps=a["pin_sweeps"] if pin else 0,
-        respace=not pin,
-    )
-    return topo, ents, grid, cfg
+    stages = [
+        Untangle(direct=direct),
+        *_smoother(a, metric=metric, cluster=pin, c2=c2, ortho=ortho),
+    ]
+    if pin:
+        stages.append(
+            Pin(
+                JacobiSmoother(
+                    sweeps=a["pin_sweeps"], chunk=a["chunk"], omega=a["omega"]
+                )
+            )
+        )
+    else:
+        stages.append(Respace())
+    return topo, ents, grid, stages
 
 
 def main():
     from driver import finish, parse_args
 
     a = parse_args()
-    topo, ents, grid, cfg = setup(vars(a))
-    steps = generate_steps(grid, config=cfg, untangle_direct=True)
+    topo, ents, grid, stages = setup(vars(a))
+    steps = generate_steps(grid, stages=stages, device=a.device)
 
     finish(grid, topo, ents, steps, a, title="Phoebus capsule")
 
@@ -212,15 +246,33 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         omega=0.8,
         # block-interface C2 curvature-continuity weight (0 = off); de-kinks the
         # grid lines crossing block seams (interface-only).
-        c2_weight=egg_webui.editable(0.0, label="interface C2 weight"),
-        c2_singularity=egg_webui.editable(0.0, label="singularity ring C2 weight"),
-        ortho_weight=egg_webui.editable(0.0, label="interface orthogonality weight"),
-        ortho_layers=egg_webui.editable(3, label="orthogonality band layers"),
-        ortho_relax=egg_webui.editable(1.0, label="orthogonality clustering relax"),
+        c2_weight=egg_webui.editable(
+            0.0, label="interface C2 weight", show_if={"smoother": ["jacobi", "fas"]}
+        ),
+        c2_singularity=egg_webui.editable(
+            0.0,
+            label="singularity ring C2 weight",
+            show_if={"smoother": ["jacobi", "fas"]},
+        ),
+        ortho_weight=egg_webui.editable(
+            0.0,
+            label="interface orthogonality weight",
+            show_if={"smoother": ["jacobi", "fas"]},
+        ),
+        ortho_layers=egg_webui.editable(
+            3,
+            label="orthogonality band layers",
+            show_if={"smoother": ["jacobi", "fas"]},
+        ),
+        ortho_relax=egg_webui.editable(
+            1.0,
+            label="orthogonality clustering relax",
+            show_if={"smoother": ["jacobi", "fas"]},
+        ),
         device="cpu",
     )
-    topo, ents, grid, cfg = setup(a)
-    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
+    topo, ents, grid, stages = setup(a, direct=False)
+    egg_webui.run(grid, generate_steps(grid, stages=stages, device=a["device"]))
 
 if __name__ == "__main__":
     main()

@@ -20,40 +20,61 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""An egg in a rectangle — O-grid ring, edge blocks, corner blocks.
+"""An egg in a rectangle — the simplest complete egg example.
 
-The namesake example. The egg boundary is a closed spline through an egg
-curve (fat end down); around it sits the same O-grid-in-rectangle topology
-as the spline-blob example, built leaning on the builder's inference:
-corners made with ``Edge.place_node`` slide on their host curve, shared
-corner objects become block connections, and faces whose corners are all
-nodes on one edge become geometry associations. Only the corner blocks
-need explicit ``associate()`` calls — their wall faces span two walls each.
+A closed egg-shaped spline sits inside a 4x4 square, meshed with an O-grid: a
+ring of four blocks hugs the egg, four edge blocks bridge the ring out to the
+domain walls, and four corner blocks fill the diagonals (twelve blocks). The
+egg surface carries wall-normal boundary-layer clustering.
 
-Boundary markers carry physical names for a flow solve: the left wall is
-``inflow``, the right wall ``outflow``, the top and bottom walls share the
-``wall`` marker, and the egg surface is ``egg``.
+The pipeline is fixed (no knobs): clear the folded start, smooth the nodes with
+block-Jacobi against the clustering target, pin the first wall layers to their
+exact heights and re-smooth, then fit a control net to the result and save it
+to ``./net.npz``. The saved net does not depend on the grid resolution, so it
+can be reloaded and re-evaluated at a new resolution and clustering without
+solving again — see the commented-out regrid block at the bottom of ``main``.
 
-The egg surface gets wall-normal boundary-layer clustering
-(``--bl-first-height`` / ``--bl-growth``); ``--pin-layers`` smooths
-against the aspect-ratio target and pins the first layers at their exact
-geometric heights, ``--pin-layers 0`` restores the spacing with the
-respace post-pass instead.
-
-The command-line surface lives in ``driver.py``; run
-``uv run egg.py --help`` for options.
+Runs on the command line (``uv run egg.py``) and in the egg web UI.
 """
+
+import os
 
 import numpy as np
 
-from egg.pipeline import PipelineConfig, generate_steps
-
 from egg.geometry import Edge, Line, Spline, Vector3
+from egg.pipeline import (
+    JacobiSmoother,
+    Pin,
+    Refit,
+    Save,
+    Untangle,
+    generate_steps,
+    run_pipeline,
+)
 from egg.topology.builder import TopologyBuilder
 
+# The net is saved beside the script so the regrid block in main() finds it by
+# this path regardless of the working directory.
+NET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "net.npz")
 
-def build_egg_in_rectangle(bl_first_height=0.0, bl_growth=1.5, n_fixed=2):
-    """Egg-in-rectangle topology; markers: inflow / outflow / wall / egg."""
+
+def build_egg_in_rectangle(
+    bl_first_height=5.0e-3, bl_growth=1.5, n_fixed=2, res_scale=1
+):
+    """Egg-in-rectangle O-grid topology; markers: inflow / outflow / wall / egg.
+
+    ``res_scale`` multiplies every block's cell count (1 = the base resolution),
+    so the regrid block in ``main`` can rebuild the SAME topology at a finer
+    grid and load the base-resolution net onto it. The topology (blocks, seams,
+    fans) is identical across scales — only the node counts change — which is
+    exactly what the saved net needs to re-tabulate.
+    """
+
+    def _res(*ns):
+        # Scale cell counts (node count n -> (n-1)*scale + 1) so shared faces
+        # stay conforming across the uniform scale.
+        return tuple((n - 1) * res_scale + 1 for n in ns)
+
     # Egg boundary: closed spline through an egg curve, fat end down.
     theta = np.linspace(0.0, 2.0 * np.pi, 17)[:-1]
     ring = [
@@ -95,7 +116,7 @@ def build_egg_in_rectangle(bl_first_height=0.0, bl_growth=1.5, n_fixed=2):
         # a shallow ring forces the steep part of the target across the
         # mid-square interface, which folds cells there (measured).
         o_res_j = 16 if bl_first_height > 0.0 else 8
-        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=(20, o_res_j))
+        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=_res(20, o_res_j))
     # Edge blocks between walls and mid square; wall associations inferred, so
     # every marker (inflow / outflow / wall) auto-derives from the named edges.
     for nm, c_sw, c_nw, c_se, c_ne in [
@@ -104,7 +125,7 @@ def build_egg_in_rectangle(bl_first_height=0.0, bl_growth=1.5, n_fixed=2):
         ("e_n", tne, mne, tnw, mnw),
         ("e_w", lnw, mnw, lsw, msw),
     ]:
-        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=(20, 10))
+        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=_res(20, 10))
     # Corner blocks: two walls meet at each, so associations stay explicit;
     # markers auto-derive from the edges' tags (wall_top/wall_bottom -> 'wall').
     for nm, w0, w1, c_sw, c_nw, c_se, c_ne in [
@@ -113,7 +134,7 @@ def build_egg_in_rectangle(bl_first_height=0.0, bl_growth=1.5, n_fixed=2):
         ("c_ne", right, top, ne, rne, tne, mne),
         ("c_nw", top, left, nw, tnw, lnw, mnw),
     ]:
-        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=(10, 10))
+        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=_res(10, 10))
         b.associate(nm, 0, 0, w0)
         b.associate(nm, 1, 0, w1)
 
@@ -122,149 +143,111 @@ def build_egg_in_rectangle(bl_first_height=0.0, bl_growth=1.5, n_fixed=2):
         # interior wall, so no domain boundary meets it obliquely and
         # relax_orthogonality stays empty.
         b.set_boundary_layer(
-            egg, first_height=bl_first_height, growth=bl_growth, n_fixed=n_fixed, n_layers=2
+            egg,
+            first_height=bl_first_height,
+            growth=bl_growth,
+            n_fixed=n_fixed,
+            n_layers=2,
         )
 
     topology = b.build()
     return topology, topology.entities
 
 
-def setup(a):
-    """Topology, grid, and config from parsed args — shared by the CLI
-    ``main()`` and the web UI (which passes the parser defaults).
+def pipeline():
+    """The fixed pipeline: untangle -> Jacobi smooth -> pin -> refit -> save.
 
-    NB: ``--pin-layers`` (→ ``n_fixed``) only takes effect when
-    ``--bl-first-height`` > 0 — without a first height there is no
-    boundary layer to pin, and ``--pin-sweeps`` pins those same layers,
-    so it too is a no-op without one.
+    - :class:`~egg.pipeline.Untangle` clears any folded cells in the TFI start
+      (this egg starts valid, so it self-skips).
+    - :class:`~egg.pipeline.JacobiSmoother` relaxes the nodes with block-Jacobi
+      against the boundary-layer clustering target the pipeline builds from the
+      egg's spec (``shape_size`` equalises cell size too; the profile stays in
+      the O-ring, ``bl_blend_neighbours=False``).
+    - :class:`~egg.pipeline.Pin` sets the first wall layers to their exact
+      heights, freezes them, and re-smooths with the given node smoother.
+    - :class:`~egg.pipeline.Refit` fits a control net to the final grid.
+    - :class:`~egg.pipeline.Save` writes that net to ``./net.npz`` so the
+      regrid block in ``main`` can load it. ``exact=True`` also stores the
+      residual (the pinned grid minus the net evaluation), so the regrid
+      reproduces the actual pinned mesh, not just the net's approximation.
     """
-    topo, ents = build_egg_in_rectangle(
-        bl_first_height=a["bl_first_height"],
-        bl_growth=a["bl_growth"],
-        n_fixed=a["pin_layers"],
-    )
-
-    # --pin-layers > 0 smooths against the boundary-layer clustering target
-    # and pins the first n_fixed layers exactly; the default path runs the
-    # pure shape metric (no clustering) and restores the egg spacing with the
-    # respace post-pass. cluster_boundary_layers picks between them.
-    #
-    # bl_blend_neighbours=False: continuing the clustering profile into the
-    # blocks behind the O-ring would drag them toward the mid square — they
-    # are far too coarse to carry it. Confine the profile to the ring; its
-    # outer rows reach the neighbour spacing on their own.
-    pin = a["bl_first_height"] > 0.0 and a["pin_layers"] > 0
-    grid = topo.initialize_grid()
-    # Optional block-interface C2 curvature-continuity term: de-kinks grid lines
-    # crossing the O-grid/H-grid seams (and the 5-way singularities between them).
-    # interface_only: act on windows that cross a seam, not the (legitimately
-    # curved) clustered interior near the egg wall.
-    c2w, c2s = a.get("c2_weight", 0.0), a.get("c2_singularity", 0.0)
-    c2 = (
-        {"weight": c2w, "interface_only": True, "singularity_weight": c2s}
-        if (c2w > 0.0 or c2s > 0.0)
-        else None
-    )
-    # Optional block-interface orthogonality term: pulls the cross-seam edge
-    # perpendicular to the seam (mode="normal"), which also straightens the
-    # crossing (continuity). Composes with the C2 term above.
-    ortho = (
-        {
-            "mode": "normal",
-            "weight": a["ortho_weight"],
-            "n_layers": a.get("ortho_layers", 3),
-            "cluster_relax": a.get("ortho_relax", 1.0),
-        }
-        if a.get("ortho_weight", 0.0) > 0.0
-        else None
-    )
-    cfg = PipelineConfig(
-        sweeps_per_delta=a["sweeps_per_delta"],
-        tmop_sweeps=a["tmop_sweeps"],
-        tmop_chunk=a["chunk"],
-        tmop_smoother=a["smoother"],
-        tmop_metric="shape_size",
-        cluster_boundary_layers=pin,
-        bl_blend_neighbours=False,
-        omega=a["omega"],
-        interface_c2=c2,
-        interface_ortho=ortho,
-        device=a["device"],
-        pin_sweeps=a["pin_sweeps"] if pin else 0,
-        respace=a["bl_first_height"] > 0.0 and not pin,
-    )
-    return topo, ents, grid, cfg
+    return [
+        Untangle(),
+        JacobiSmoother(
+            sweeps=200, chunk=50, metric="shape_size", bl_blend_neighbours=False
+        ),
+        Pin(JacobiSmoother(sweeps=100, chunk=50)),
+        Refit(),
+        Save(NET_PATH, exact=True),
+    ]
 
 
 def main():
-    from driver import finish, parse_args
+    topo, _ents = build_egg_in_rectangle()
+    grid = topo.initialize_grid()
+    # Solve and save the fitted net to ./net.npz.
+    run_pipeline(grid, stages=pipeline())
 
-    a = parse_args()
-    topo, ents, grid, cfg = setup(vars(a))
-    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
-
-    finish(
-        grid,
-        topo,
-        ents,
-        steps,
-        a,
-        title="egg in rectangle",
-        mindet_title="min det A (TMOP only)",
-    )
+    # --- Regrid without solving again -----------------------------------------
+    # The saved net is resolution-independent, so you can regrid this mesh to a
+    # NEW resolution and clustering by re-evaluating the net instead of solving.
+    # This block ADDS a regrid after the solve; to regrid INSTEAD of solving,
+    # comment out the `run_pipeline(grid, stages=pipeline())` solve call above
+    # (a prior solve run must have left ./net.npz), then uncomment this block:
+    # it rebuilds the SAME topology at 2x resolution with a tighter boundary
+    # layer, then Resamples the saved net onto it with clustering, and runs a
+    # short pin polish for neat exact layers.
+    #
+    # from egg.pipeline import Resample
+    #
+    # topo, _ents = build_egg_in_rectangle(res_scale=2, bl_first_height=2.5e-3)
+    # grid = topo.initialize_grid()
+    # run_pipeline(
+    #     grid,
+    #     stages=[
+    #         # load the saved net onto the finer grid AND re-cluster in one step
+    #         Resample(NET_PATH, cluster=True),
+    #         Untangle(),
+    #         JacobiSmoother(
+    #             sweeps=100, chunk=50, metric="shape_size", bl_blend_neighbours=False
+    #         ),
+    #         Pin(JacobiSmoother(sweeps=60, chunk=30)),   # exact first layers
+    #         Refit(),
+    #     ],
+    # )
 
 
 if __name__ == "__egg_webui__":  # running inside the egg web UI
     import egg.webui as egg_webui
 
-    from egg import editable
-    from egg.topology import ExplicitTopology
-
-    # CLI defaults, mirroring driver.py — edit freely
-    a = egg_webui.params(
-        bl_first_height=5.0e-3,
-        bl_growth=1.5,
-        pin_layers=1,
-        pin_sweeps=5000,
-        sweeps_per_delta=20,
-        tmop_sweeps=5000,
-        chunk=50,
-        smoother="jacobi",
-        omega=0.8,
-        # block-interface terms (0 = off), editable in the run panel: C2 de-kinks
-        # the grid lines crossing block seams; orthogonality pulls the cross-seam
-        # edge perpendicular to the seam.
-        c2_weight=egg_webui.editable(10, label="interface C2 weight"),
-        c2_singularity=egg_webui.editable(1, label="singularity ring C2 weight"),
-        ortho_weight=egg_webui.editable(0, label="interface orthogonality weight"),
-        ortho_layers=egg_webui.editable(3, label="orthogonality band layers"),
-        ortho_relax=egg_webui.editable(1.0, label="orthogonality clustering relax"),
-        device="cpu",
-    )
-    topo, ents, grid, cfg = setup(a)
-
-    # The egg O-grid is the frozen base; the editable({}) blocking is what the
-    # topology edit view (the "edit" view) draws into — snap to a base corner,
-    # bifurcate a block edge, bind a face to a curve by name — and `save edits`
-    # writes it back into this literal. The grid the smoother relaxes is rebuilt
-    # from the edited topology, so the blocking is actually meshed, not just drawn.
-    egg_topo = ExplicitTopology(
-        base=topo,
-        geometry=ents,
-        connectivity=editable({
-            "nodes": {
-            },
-            "edges": [
-                {"a": "_c6", "b": "_c7", "res": 10},
-            ],
-            "res": 10,
-        }),
-    )
-    topo = egg_topo.build()
+    # Bind entities to a non-underscore name so the web UI harvests the egg /
+    # wall curves for the geometry layer.
+    topo, ents = build_egg_in_rectangle()
     grid = topo.initialize_grid()
-    # cfg already carries cluster_boundary_layers / bl_blend_neighbours, so the
-    # pipeline rebuilds the clustering target from the edited topology itself.
-    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
+    egg_webui.run(grid, generate_steps(grid, stages=pipeline()))
+
+    # --- Regrid in the web UI ------------------------------------------------
+    # To regrid instead of solving: run this script once as-is (the Save stage
+    # writes ./net.npz beside it), then comment out the egg_webui.run solve call
+    # above, uncomment the block below, and run again. It rebuilds the SAME
+    # topology at 2x resolution with a tighter boundary layer, then Resamples the
+    # saved net onto it with clustering, and runs a short pin polish.
+    #
+    # from egg.pipeline import Resample
+    #
+    # topo, ents = build_egg_in_rectangle(res_scale=2, bl_first_height=2.5e-3)
+    # grid = topo.initialize_grid()
+    # stages = [
+    #     # load the saved net onto the finer grid AND re-cluster in one step
+    #     Resample(NET_PATH, cluster=True),
+    #     Untangle(),
+    #     JacobiSmoother(
+    #         sweeps=100, chunk=50, metric="shape_size", bl_blend_neighbours=False
+    #     ),
+    #     Pin(JacobiSmoother(sweeps=60, chunk=30)),   # exact first layers
+    #     Refit(),
+    # ]
+    # egg_webui.run(grid, generate_steps(grid, stages=stages))
 
 if __name__ == "__main__":
     main()

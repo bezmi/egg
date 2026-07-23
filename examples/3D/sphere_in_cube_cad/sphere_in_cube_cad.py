@@ -57,7 +57,16 @@ from itertools import product
 import numpy as np
 
 from egg.io import cad
-from egg.pipeline import PipelineConfig, generate_steps
+from egg.pipeline import (
+    ControlPointSmoother,
+    FasSmoother,
+    JacobiSmoother,
+    Presmooth,
+    Refit,
+    Save,
+    Untangle,
+    generate_steps,
+)
 from egg.topology.builder import TopologyBuilder
 
 # the shared sphere3d driver supplies the plot panes (GridPlots, edge helpers).
@@ -242,6 +251,13 @@ def main(argv=None):
         help="PyVista view of the declared block topology only, no solve",
     )
     p.add_argument("--su2", metavar="PATH", help="write the solved grid to an SU2 mesh")
+    p.add_argument(
+        "--export-eggy",
+        metavar="PATH",
+        default=None,
+        help="after the run, pack this example folder (script + STEP asset + "
+        "net cache) into a .eggy archive",
+    )
     a = p.parse_args(argv)
 
     topo = sphere_in_cube_cad(a.n, a.m, a.nh, r0=a.r0, cw=a.cw).build()  # node counts
@@ -275,14 +291,22 @@ def main(argv=None):
         live = GridPlots(X0, sections, surf, a.plot_3d, surf_faces=surf_faces)
         live.open_live()
 
-    cfg = PipelineConfig(
-        device=a.device,
-        tmop_sweeps=a.sweeps,
-        tmop_chunk=a.chunk,
-        tmop_smoother=a.smoother,
-    )
+    if a.smoother == "fas":
+        smoothing = [FasSmoother(sweeps=a.sweeps, chunk=a.chunk)]
+    elif a.smoother == "control_point":
+        # A nodal pre-pass gives the net fit a smooth, valid start.
+        smoothing = [
+            Presmooth(JacobiSmoother(sweeps=100, chunk=100)),
+            ControlPointSmoother(chunk=a.chunk),
+        ]
+    else:
+        smoothing = [JacobiSmoother(sweeps=a.sweeps, chunk=a.chunk)]
+    # Refit + Save leave a control net beside the script so the exported .eggy
+    # carries one (a regrid can resample from it); control mode keeps its solved net.
+    net_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "net.npz")
+    stages = [Untangle(), *smoothing, Refit(), Save(net_path)]
     energies, mindets = [], []
-    for phase, info in generate_steps(grid, config=cfg, untangle_direct=True):
+    for phase, info in generate_steps(grid, stages=stages, device=a.device):
         if "energy" in info:
             energies.append(info["energy"])
         if "min_det" in info:
@@ -301,6 +325,12 @@ def main(argv=None):
 
         export_su2(grid, a.su2)
         print(f"wrote {a.su2}")
+
+    if a.export_eggy:
+        from egg.io import eggy
+
+        eggy.pack(a.export_eggy, os.path.dirname(os.path.abspath(__file__)))
+        print(f"Exported .eggy archive to {a.export_eggy}")
 
     if live is not None:
         live.show()

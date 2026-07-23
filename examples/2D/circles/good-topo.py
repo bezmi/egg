@@ -38,8 +38,8 @@ from topologies import setup_single
 
 def main():
     a = parse_single_args("good circle-in-rectangle → TMOP smooth")
-    topo, ents, grid, cfg = setup_single(vars(a))
-    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
+    topo, ents, grid, stages = setup_single(vars(a), direct=not a.plot_live)
+    steps = generate_steps(grid, stages=stages, device=a.device)
 
     finish(
         grid,
@@ -68,8 +68,10 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         omega=0.8,
         device="cpu",
     )
-    topo, ents, grid, cfg = setup_single(a)
-    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
+    topo, ents, grid, stages = setup_single(a, direct=False)
+    egg_webui.run(
+        grid, generate_steps(grid, stages=stages, device=a["device"])
+    )
 
 if __name__ == "__main__":
     main()

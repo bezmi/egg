@@ -59,7 +59,16 @@ The command-line surface lives in ``driver.py``; run
 import math
 
 from egg.geometry import Arc, Edge, Line, Polyline, Vector3
-from egg.pipeline import PipelineConfig, generate_steps
+from egg.pipeline import (
+    ControlPointSmoother,
+    FasSmoother,
+    JacobiSmoother,
+    Presmooth,
+    Pin,
+    Respace,
+    Untangle,
+    generate_steps,
+)
 from egg.topology.builder import TopologyBuilder
 
 
@@ -216,8 +225,32 @@ def build_capsule(
     return topology, topology.entities
 
 
-def setup(a):
-    """Topology, grid, and config from parsed args — shared by the CLI
+def _smoother(a, *, metric, cluster, c2, ortho):
+    """The TMOP-phase smoother stage chosen by ``--smoother``.
+
+    The interface C2 / orthogonality terms are node-mode, so they attach to the
+    nodal smoothers; the control-point smoother has its own seam dials.
+    """
+    common = dict(
+        chunk=a["chunk"],
+        omega=a["omega"],
+        metric=metric,
+        cluster_boundary_layers=cluster,
+    )
+    s = a["smoother"]
+    if s == "control_point":
+        return [
+            Presmooth(JacobiSmoother(sweeps=100, **dict(common, chunk=100))),
+            ControlPointSmoother(**common),
+        ]
+    node = dict(
+        sweeps=a["tmop_sweeps"], interface_c2=c2, interface_ortho=ortho, **common
+    )
+    return [FasSmoother(**node) if s == "fas" else JacobiSmoother(**node)]
+
+
+def setup(a, *, direct=True):
+    """Topology, grid, and stage list from parsed args — shared by the CLI
     ``main()`` and the web UI (which passes the parser defaults).
 
     NB: ``--pin-layers`` (→ ``n_fixed``) only takes effect when
@@ -239,7 +272,7 @@ def setup(a):
     # plain metric (no clustering) and restores the wall spacing with the
     # respace post-pass. cluster_boundary_layers picks between them: the
     # pipeline builds the clustering target from the set_boundary_layer specs
-    # itself, sizing the shape_size far field correctly (see PipelineConfig).
+    # itself, sizing the shape_size far field correctly.
     pin = a["bl_first_height"] > 0.0 and a["pin_layers"] > 0
     grid = topo.initialize_grid()
     metric = a.get("metric", "shape")
@@ -264,29 +297,29 @@ def setup(a):
         if a.get("ortho_weight", 0.0) > 0.0
         else None
     )
-    cfg = PipelineConfig(
-        sweeps_per_delta=a["sweeps_per_delta"],
-        tmop_sweeps=a["tmop_sweeps"],
-        tmop_chunk=a["chunk"],
-        tmop_smoother=a["smoother"],
-        tmop_metric=metric,
-        cluster_boundary_layers=pin,
-        omega=a["omega"],
-        interface_c2=c2,
-        interface_ortho=ortho,
-        device=a["device"],
-        pin_sweeps=a["pin_sweeps"] if pin else 0,
-        respace=a["bl_first_height"] > 0.0 and not pin,
-    )
-    return topo, ents, grid, cfg
+    stages = [
+        Untangle(sweeps_per_delta=a["sweeps_per_delta"], direct=direct),
+        *_smoother(a, metric=metric, cluster=pin, c2=c2, ortho=ortho),
+    ]
+    if pin:
+        stages.append(
+            Pin(
+                JacobiSmoother(
+                    sweeps=a["pin_sweeps"], chunk=a["chunk"], omega=a["omega"]
+                )
+            )
+        )
+    elif a["bl_first_height"] > 0.0:
+        stages.append(Respace())
+    return topo, ents, grid, stages
 
 
 def main():
     from driver import finish, parse_args
 
     a = parse_args()
-    topo, ents, grid, cfg = setup(vars(a))
-    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
+    topo, ents, grid, stages = setup(vars(a), direct=not a.plot_live)
+    steps = generate_steps(grid, stages=stages, device=a.device)
 
     finish(
         grid,
@@ -323,15 +356,33 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         # block-interface C2 curvature-continuity weight (0 = off); de-kinks the
         # grid lines crossing the block seams. interface-only, so it leaves the
         # clustered near-wall cells alone.
-        c2_weight=egg_webui.editable(0.0, label="interface C2 weight"),
-        c2_singularity=egg_webui.editable(0.0, label="singularity ring C2 weight"),
-        ortho_weight=egg_webui.editable(0.0, label="interface orthogonality weight"),
-        ortho_layers=egg_webui.editable(3, label="orthogonality band layers"),
-        ortho_relax=egg_webui.editable(1.0, label="orthogonality clustering relax"),
+        c2_weight=egg_webui.editable(
+            0.0, label="interface C2 weight", show_if={"smoother": ["jacobi", "fas"]}
+        ),
+        c2_singularity=egg_webui.editable(
+            0.0,
+            label="singularity ring C2 weight",
+            show_if={"smoother": ["jacobi", "fas"]},
+        ),
+        ortho_weight=egg_webui.editable(
+            0.0,
+            label="interface orthogonality weight",
+            show_if={"smoother": ["jacobi", "fas"]},
+        ),
+        ortho_layers=egg_webui.editable(
+            3,
+            label="orthogonality band layers",
+            show_if={"smoother": ["jacobi", "fas"]},
+        ),
+        ortho_relax=egg_webui.editable(
+            1.0,
+            label="orthogonality clustering relax",
+            show_if={"smoother": ["jacobi", "fas"]},
+        ),
         device="cpu",
     )
-    topo, ents, grid, cfg = setup(a)
-    egg_webui.run(grid, generate_steps(grid, config=cfg))
+    topo, ents, grid, stages = setup(a, direct=False)
+    egg_webui.run(grid, generate_steps(grid, stages=stages, device=a["device"]))
 
 if __name__ == "__main__":
     main()

@@ -138,6 +138,7 @@ class GuardParam:
     kind: str  # bool | int | float | str
     span: tuple[int, int, int, int]  # lineno, col, end_lineno, end_col (1-based lines)
     choices: tuple | None = None  # literal options -> dropdown (editable() only)
+    show_if: dict | None = None  # {param: value|[values]} -> shown only when matched
 
 
 def _is_params_call(node) -> bool:
@@ -252,7 +253,7 @@ def _editable_params(tree: ast.Module, code: str) -> list[GuardParam]:
         kind = _literal_kind(val)
         if kind is None:
             continue  # only plain literals can be rewritten losslessly
-        label, choices = None, None
+        label, choices, show_if = None, None, None
         for kw in node.keywords:
             if kw.arg == "label" and isinstance(kw.value, ast.Constant):
                 label = str(kw.value.value)
@@ -261,6 +262,11 @@ def _editable_params(tree: ast.Module, code: str) -> list[GuardParam]:
                     choices = tuple(ast.literal_eval(e) for e in kw.value.elts)
                 except ValueError:
                     choices = None
+            elif kw.arg == "show_if" and isinstance(kw.value, ast.Dict):
+                try:
+                    show_if = ast.literal_eval(kw.value)
+                except ValueError:
+                    show_if = None
         text = ast.get_source_segment(code, val) or ""
         params.append(
             GuardParam(
@@ -269,6 +275,7 @@ def _editable_params(tree: ast.Module, code: str) -> list[GuardParam]:
                 kind,
                 (val.lineno, val.col_offset, val.end_lineno, val.end_col_offset),
                 choices=choices,
+                show_if=show_if,
             )
         )
     return params
@@ -313,6 +320,40 @@ def guard_params(code: str) -> list[GuardParam]:
         if n > 1:
             p.name = f"{p.name}#{n}"
     return params
+
+
+def _param_value(p: GuardParam):
+    """The current value of a param, parsed from its source text."""
+    try:
+        return ast.literal_eval(p.text)
+    except (ValueError, SyntaxError):
+        return p.text
+
+
+def visible_params(params: list[GuardParam]) -> list[GuardParam]:
+    """Drop params whose ``show_if`` is not met by the other params' values.
+
+    ``show_if`` maps a parameter name to an allowed value (or list of values);
+    a param is shown only when every named parameter currently matches. Lets
+    the panel show only the parameters that apply to the current choices (e.g.
+    node-mode interface knobs disappear when the control-point smoother is
+    selected).
+    """
+    values = {p.name: _param_value(p) for p in params}
+    out = []
+    for p in params:
+        if p.show_if:
+            hidden = False
+            for key, allowed in p.show_if.items():
+                if not isinstance(allowed, (list, tuple, set)):
+                    allowed = [allowed]
+                if values.get(key) not in allowed:
+                    hidden = True
+                    break
+            if hidden:
+                continue
+        out.append(p)
+    return out
 
 
 def set_guard_param(code: str, name: str, raw: str) -> str:

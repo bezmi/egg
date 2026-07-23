@@ -37,8 +37,10 @@ from topologies import setup_twin
 
 def main():
     a = parse_twin_args("side-by-side: twin-circle untangle + per-wall BL")
-    topo, ents, grid, cfg = setup_twin(vars(a), rough=True)
-    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
+    topo, ents, grid, stages = setup_twin(
+        vars(a), rough=True, direct=not a.plot_live
+    )
+    steps = generate_steps(grid, stages=stages, device=a.device)
 
     finish(
         grid,
@@ -70,8 +72,10 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         omega=0.8,
         device="cpu",
     )
-    topo, ents, grid, cfg = setup_twin(a, rough=True)
-    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
+    topo, ents, grid, stages = setup_twin(a, rough=True, direct=False)
+    egg_webui.run(
+        grid, generate_steps(grid, stages=stages, device=a["device"])
+    )
 
 if __name__ == "__main__":
     main()

@@ -52,6 +52,13 @@ def parse_args(argv=None):
         help="write the final grid as an SU2 mesh (markers: inner, outer)",
     )
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
+    p.add_argument(
+        "--export-eggy",
+        metavar="PATH",
+        default=None,
+        help="after the run, pack this example folder (script + assets + net "
+        "cache) into a .eggy archive for sharing/regridding",
+    )
     p.add_argument("--tmop-sweeps", type=int, default=40)
     p.add_argument(
         "--smoother",
@@ -125,5 +132,13 @@ def finish(grid, topo, ents, steps, a, *, title, mindet_title="min det A"):
 
         export_su2(grid, a.export)
         print(f"Exported SU2 mesh to {a.export}")
+
+    if getattr(a, "export_eggy", None):
+        import os
+
+        from egg.io import eggy
+
+        eggy.pack(a.export_eggy, os.path.dirname(os.path.abspath(__file__)))
+        print(f"Exported .eggy archive to {a.export_eggy}")
 
     print("Done.")

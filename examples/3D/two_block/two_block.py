@@ -35,10 +35,11 @@ Run: ``uv run --no-sync python two_block.py --device cpu``.
 from __future__ import annotations
 
 import argparse
+import os
 
 import numpy as np
 
-from egg.pipeline import PipelineConfig, generate_steps
+from egg.pipeline import JacobiSmoother, Refit, Save, Untangle, generate_steps
 from egg.topology.builder import TopologyBuilder
 
 CORNERS = {
@@ -80,6 +81,12 @@ def main(argv=None):
     p.add_argument("--device", choices=["cpu", "gpu", "auto"], default="cpu")
     p.add_argument("--sweeps", type=int, default=200)
     p.add_argument("--chunk", type=int, default=50)
+    p.add_argument(
+        "--export-eggy",
+        metavar="PATH",
+        default=None,
+        help="after the run, pack this example folder into a .eggy archive",
+    )
     a = p.parse_args(argv)
 
     topo = build(a.n).build()
@@ -89,14 +96,28 @@ def main(argv=None):
         f"singularities={len(topo.singularities)}"
     )
 
-    cfg = PipelineConfig(device=a.device, tmop_sweeps=a.sweeps, tmop_chunk=a.chunk)
-    for phase, info in generate_steps(grid, config=cfg, untangle_direct=True):
+    # Refit + Save leave a control net beside the script so the exported .eggy
+    # carries one (a regrid can resample from it); the smoother itself is nodal.
+    net_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "net.npz")
+    stages = [
+        Untangle(),
+        JacobiSmoother(sweeps=a.sweeps, chunk=a.chunk),
+        Refit(),
+        Save(net_path),
+    ]
+    for phase, info in generate_steps(grid, stages=stages, device=a.device):
         if phase in ("init", "final") or phase == "tmop":
             bits = " ".join(
                 f"{k}={v:.4e}" if isinstance(v, float) else f"{k}={v}"
                 for k, v in info.items()
             )
             print(f"  {phase}: {bits}")
+
+    if a.export_eggy:
+        from egg.io import eggy
+
+        eggy.pack(a.export_eggy, os.path.dirname(os.path.abspath(__file__)))
+        print(f"Exported .eggy archive to {a.export_eggy}")
 
     assert not np.any(np.isnan(grid.global_nodes))
     print("Done.")

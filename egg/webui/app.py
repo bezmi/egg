@@ -47,7 +47,6 @@ import urllib.parse
 import time
 from pathlib import Path
 
-import numpy as np
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
@@ -94,6 +93,7 @@ from .scene import (
     scene_bounds,
     set_editable_blocking,
     set_guard_param,
+    visible_params,
 )
 
 from egg.pipeline import PipelineConfig
@@ -498,7 +498,7 @@ def _params_panel(code: str):
     between the view bar and the canvas). Edits post to /api/param, which
     rewrites the value's exact source span in the code buffer — the code
     stays the single source of truth, the panel is just a lens on it."""
-    params = guard_params(code)
+    params = visible_params(guard_params(code))
     if not params:
         return Div(id="params")
     fields = []
@@ -956,86 +956,108 @@ async def export_su2_route(code: str, path: str = ""):
 
 
 @rt("/export/net", methods=["post"])
-async def export_net_route(code: str, path: str = ""):
-    """Download the control net the last run of this script solved (the
-    worker ships the persisted npz alongside the final frame)."""
+def export_net_route(code: str = "", path: str = ""):
+    """Save the resident grid's control net as an ``.npz`` — the escape hatch
+    for a run whose pipeline had no :class:`~egg.pipeline.Save` stage. Exports
+    the last smoothed grid's net (no re-run) when the script is unchanged since
+    that run; 400 when there is no net (a nodal run with no Refit produces none).
+    """
     if _last["harvest"] is None or _last["code"] != code:
         return PlainTextResponse(
-            "no solved control net for this script — run it first "
-            '(tmop_smoother="control_point")',
-            status_code=400,
+            "run the pipeline first, then save the net", status_code=400
         )
-    if not _last["net"]:
+    h = _last["harvest"]
+    net = getattr(h.grid, "control_net", None) if h.grid is not None else None
+    if net is None:
         return PlainTextResponse(
-            "the last run produced no control net — it needs "
-            'tmop_smoother="control_point"',
+            "this run produced no control net — use the control-point smoother "
+            "or add a Refit stage, then run again",
             status_code=400,
         )
+    try:
+        from egg.io import save_control_net
+
+        buf = io.BytesIO()
+        save_control_net(net, buf)
+    except Exception as exc:
+        return PlainTextResponse(f"export failed: {exc}", status_code=400)
     return Response(
-        _last["net"],
+        buf.getvalue(),
         media_type="application/octet-stream",
-        headers={"Content-Disposition": 'attachment; filename="control_net.npz"'},
+        headers={"Content-Disposition": 'attachment; filename="net.npz"'},
     )
 
 
-@rt("/import/net", methods=["post"])
-async def import_net_route(request):
-    """Load a saved control net onto the script's grid and show the result.
+@rt("/open/eggy", methods=["post"])
+async def open_eggy_route(request):
+    """Open a ``.eggy`` case archive: unpack it and load its script.
 
-    The script must build the same grid (topology, resolutions, constraints)
-    the net was solved on — :func:`egg.io.load_control_net` rejects
-    mismatches. The evaluated grid replaces the view and becomes the resident
-    state (SU2/net export see it)."""
+    The upload is unpacked into a fresh directory on this machine and its
+    entry script is returned. Nothing runs: the editor shows the script (with
+    its saved net and assets sitting beside it on disk), which a regrid script
+    can resample from. Returns ``{path, code}``.
+    """
     form = await request.form()
-    code = form.get("code", "")
-    path = form.get("path", "") or None
     up = form.get("file")
     if up is None:
         return PlainTextResponse("no file uploaded", status_code=400)
     data = await up.read()
 
     def work():
-        from egg.io import load_control_net
+        from egg.io import eggy
 
-        ns, out, err = exec_script(code, path)
-        if err is not None:
-            raise ValueError("script error — fix it first")
-        h = harvest(ns, init_grid=True)
-        reg = ns.get("__egg_webui_run__")
-        if reg is not None:
-            h.grid = reg[0]
-        if h.grid is None:
-            raise ValueError("the script builds no grid")
-        topo = load_control_net(h.grid, io.BytesIO(data))
-        topo.write_to_grid()
-        h.grid.control_net = topo
-        refresh_grid_layer(h.scene, h.grid)
-        refresh_net_layer(h.scene, h.grid)
-        svg = render_svg(h.scene, mode="grid")
-        stats = {
-            "blocks": len(h.scene.grid_blocks),
-            "net controls": sum(
-                int(np.prod(c.shape[:-1])) for _n, c in h.scene.net_blocks
-            ),
-        }
-        r = SceneResult(
-            svg,
-            stats,
-            h.scene.warnings,
-            out,
-            None,
-            h.scene.min_det,
-            0,
-            grid_quality(h.scene.grid_blocks),
-        )
-        return h, r
+        work_dir = tempfile.mkdtemp(prefix="egg-eggy-")
+        blob = os.path.join(work_dir, "_upload.eggy")
+        with open(blob, "wb") as f:
+            f.write(data)
+        if not eggy.is_eggy(blob):
+            raise ValueError("not a .eggy archive (a zip holding a script)")
+        eggy.unpack(blob, work_dir)
+        os.remove(blob)
+        script = eggy.entry_script(work_dir)
+        return script, Path(script).read_text()
 
     try:
-        h, r = await asyncio.to_thread(work)
+        script, code = await asyncio.to_thread(work)
     except Exception as exc:
-        return PlainTextResponse(f"import failed: {exc}", status_code=400)
-    _last["code"], _last["harvest"], _last["net"] = code, h, data
-    return view_fragment(r, code, mode="grid")
+        return PlainTextResponse(f"open failed: {exc}", status_code=400)
+    return JSONResponse({"path": script, "code": code})
+
+
+@rt("/save/eggy", methods=["post"])
+def save_eggy_route(code: str, path: str = ""):
+    """Pack the current case (script + its folder) into a ``.eggy`` to download.
+
+    The editor's script is written to ``path`` first, then that script's whole
+    folder (assets and the net a Save stage wrote) is zipped verbatim.
+    Save the script to a file before saving the archive, so it has a folder.
+    """
+    if not path:
+        return PlainTextResponse(
+            "save the script to a file first, then save the .eggy",
+            status_code=400,
+        )
+
+    def work():
+        from egg.io import eggy
+
+        p = Path(path).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(code)
+        out = os.path.join(tempfile.mkdtemp(prefix="egg-eggy-"), "case.eggy")
+        eggy.pack(out, str(p.parent))
+        return out
+
+    try:
+        out = work()
+    except Exception as exc:
+        return PlainTextResponse(f"save failed: {exc}", status_code=400)
+    blob = Path(out).read_bytes()
+    return Response(
+        blob,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": 'attachment; filename="case.eggy"'},
+    )
 
 
 # --- open/save: the server's filesystem IS the user's filesystem (local
@@ -1195,19 +1217,25 @@ async def get(view: str = "grid"):
                 Div(cls="menu-sep"),
                 Button("export svg", id="file-dl-svg"),
                 Button("export su2", id="file-dl-su2"),
+                Button(
+                    "save net (npz)",
+                    id="file-dl-net",
+                    title="save the last run's control net as an .npz — the "
+                    "escape hatch if the pipeline had no Save stage; a regrid "
+                    "script can resample from it",
+                ),
                 Div(cls="menu-sep"),
                 Button(
-                    "import control net…",
-                    id="file-import-net",
-                    title="load a saved control net (.npz) onto this script's "
-                    "grid and evaluate it — the grid must match the one the "
-                    "net was solved on",
+                    "open .eggy…",
+                    id="file-open-eggy",
+                    title="open a case archive (.eggy): unpack it and load its "
+                    "script — a regrid script can resample from the packed net",
                 ),
                 Button(
-                    "export control net",
-                    id="file-dl-net",
-                    title="download the control net solved by the last "
-                    'tmop_smoother="control_point" run of this script',
+                    "save .eggy",
+                    id="file-save-eggy",
+                    title="pack this case (script + its folder, including the "
+                    "saved net) into a .eggy archive to share or regrid",
                 ),
             ),
             _menu(
@@ -1237,7 +1265,7 @@ async def get(view: str = "grid"):
                     Input(type="checkbox", cls="layer-toggle", data_layer="net"),
                     "control net",
                     title="the solved B-spline control lattice of a "
-                    'tmop_smoother="control_point" run (or an imported net)',
+                    'tmop_smoother="control_point" run',
                 ),
                 Div(cls="menu-sep"),
                 Label(
