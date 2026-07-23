@@ -485,7 +485,7 @@ class CppStructuredSweepSession:
         X: np.ndarray,
         *,
         device: str = "auto",
-        control: dict | None = None,
+        control: dict[str, object] | None = None,
     ) -> None:
         from egg._cpp import cpp_core
 

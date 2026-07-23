@@ -31,6 +31,7 @@ from egg.pipeline import (
     Untangle,
     validate,
 )
+from egg.smoothing.config_types import InterfaceC2, InterfaceOrtho
 
 sys.path.insert(
     0, os.path.join(os.path.dirname(__file__), "..", "examples", "2D", "circles")
@@ -305,8 +306,8 @@ def test_pin_applies_its_own_smoother_interface_terms(monkeypatch):
         )
     )
     # the pin context (the last one built) carries the Pin smoother's terms...
-    assert calls[-1].get("interface_c2") == {"weight": 3.0}
-    assert calls[-1].get("interface_ortho") == {"weight": 2.0}
+    assert calls[-1].get("interface_c2") == InterfaceC2(weight=3.0)
+    assert calls[-1].get("interface_ortho") == InterfaceOrtho(weight=2.0)
     # ...and no earlier (main) context did
     assert all(c.get("interface_c2") is None for c in calls[:-1])
 
@@ -335,7 +336,7 @@ def test_pin_bare_smoother_does_not_inherit_main_interface_terms(monkeypatch):
         )
     )
     # the main context carried weight 9, but the pin context (last) carries none
-    assert any(c.get("interface_c2") == {"weight": 9.0} for c in calls[:-1])
+    assert any(c.get("interface_c2") == InterfaceC2(weight=9.0) for c in calls[:-1])
     assert calls[-1].get("interface_c2") is None
 
 

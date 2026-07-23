@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 
 from egg.core.types import Block, MultiBlockGrid
+from egg.errors import EggValidationError
 
 __all__ = [
     "Corner",
@@ -228,6 +229,7 @@ class BlockTopology:
         self._validate()
         self._validate_boundary_tags()
         self._resolve_orientations()
+        self._validate_conformance()
         self.grid = self._build_dof_map()
         self.singularities = self._detect_singularities()
         # Declared fan frames (dicts of corner names, via
@@ -333,6 +335,38 @@ class BlockTopology:
                         unmatched_b.discard(name_b)
                         break
             conn.orientation = orientation
+
+    def _validate_conformance(self) -> None:
+        """Reject connected faces whose shared axes have mismatched resolutions.
+
+        Two blocks joined on a face must have the same number of nodes along
+        every shared face axis; otherwise the node-matching walk in
+        ``_build_dof_map`` indexes the smaller block out of range (a raw
+        IndexError deep in the build). Catch it here with a clear message.
+        """
+        problems: list[str] = []
+        for conn in self.interface_connections:
+            spec_a = self.block_specs[conn.face_a.block_name]
+            spec_b = self.block_specs[conn.face_b.block_name]
+            shape_a = spec_a.logical_shape
+            shape_b = spec_b.logical_shape
+            free_axes_a, free_axes_b, axis_map = self._interface_axis_map(conn)
+            for p, (q, _rev) in enumerate(axis_map):
+                na = shape_a[free_axes_a[p]]
+                nb = shape_b[free_axes_b[q]]
+                if na != nb:
+                    problems.append(
+                        f"non-conforming interface "
+                        f"{conn.face_a.block_name}[{conn.face_a.axis},{conn.face_a.side}]"
+                        f" <-> "
+                        f"{conn.face_b.block_name}[{conn.face_b.axis},{conn.face_b.side}]:"
+                        f" {na} vs {nb} nodes along a shared axis"
+                    )
+        if problems:
+            raise EggValidationError(
+                "connected block faces must have matching resolutions:\n  "
+                + "\n  ".join(problems)
+            )
 
     def _interface_axis_map(
         self, conn: InterfaceConnection

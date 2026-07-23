@@ -23,7 +23,7 @@ Dimension note: this builder is 2-D (it names the two axis neighbours directly).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import cached_property
 from itertools import product
 from typing import TYPE_CHECKING, Callable
@@ -31,9 +31,16 @@ from typing import TYPE_CHECKING, Callable
 import numpy as np
 
 from . import batch as _batch
+from ..errors import EggValidationError
+from .config_types import Directional, InterfaceC2, InterfaceOrtho
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from egg.core.types import MultiBlockGrid
+    from egg.geometry.base import GeometryEntity
+    from egg.smoothing.config_types import EnergyStencil, FlatWire
+    from egg.smoothing.directional import DirectionalSamples
 
 __all__ = [
     "SweepContext",
@@ -76,7 +83,7 @@ class SweepContext:
         incident cells, e.g. a fixed corner).
     """
 
-    energy_stencil: dict
+    energy_stencil: EnergyStencil
     free_dofs: np.ndarray  # (F,) int moving DOFs with >= 1 incident cell
     dof_constraint_tags: np.ndarray  # (M,) int32 entity type tag per DOF
     dof_constraint_params: np.ndarray  # (M, PARAM_PAD_SIZE) float64 per DOF
@@ -85,20 +92,20 @@ class SweepContext:
     # only fixed-size entities are present.
     entity_arena: np.ndarray
     # Original entity objects per DOF (for the typed SoA wire boundary).
-    # None when no constraints are present.
-    dof_entities: dict
+    # Empty when no constraints are present.
+    dof_entities: dict[int, GeometryEntity]
     # Embedding dimension (2 or 3).
     d: int
     # The C++ wire ({"groups", "energy_stencil"}) built once by
     # egg.smoothing.flat_context.build_flat_context — the single wire builder
     # for both this (reference-carrying) path and the direct structured path.
-    wire: dict
+    wire: FlatWire
 
     # Lazy-build ingredients for the parity-reference views: the grid (cell /
     # logical-index iteration), the cell_stencil result, and the per-sample
     # target inverses. Position-independent, so retaining the grid is safe.
     _grid: MultiBlockGrid = field(repr=False, default=None)
-    _stencil: dict = field(repr=False, default=None)
+    _stencil: dict[str, object] = field(repr=False, default=None)
     _samp_w_inv: np.ndarray = field(repr=False, default=None)
 
     @cached_property
@@ -199,9 +206,9 @@ def build_sweep_context(
     grid: MultiBlockGrid,
     target_fn: Callable[..., np.ndarray],
     *,
-    interface_ortho: dict | None = None,
-    interface_c2: dict | None = None,
-    directional=None,
+    interface_ortho: InterfaceOrtho | Mapping[str, object] | None = None,
+    interface_c2: InterfaceC2 | Mapping[str, object] | None = None,
+    directional: Directional | Mapping[str, object] | DirectionalSamples | None = None,
     frozen_interface=None,
 ) -> SweepContext:
     """Build the sweep context: energy stencil, constraint encoding, C++ wire.
@@ -236,22 +243,29 @@ def build_sweep_context(
         if frozen_arr.size == 0:
             frozen_arr = None
 
+    io_cfg = InterfaceOrtho.coerce(interface_ortho)
     iface = None
-    if interface_ortho:
+    if io_cfg is not None:
         from egg.smoothing.interface_ortho import interface_ortho_samples
 
-        iface = interface_ortho_samples(grid, pinned=frozen_arr, **interface_ortho)
+        iface = interface_ortho_samples(grid, pinned=frozen_arr, **asdict(io_cfg))
 
+    ic2_cfg = InterfaceC2.coerce(interface_c2)
     curvature = None
-    if interface_c2:
+    if ic2_cfg is not None:
         from egg.smoothing.interface_c2 import curvature_windows
 
-        curvature = curvature_windows(grid, frozen=frozen_arr, **interface_c2)
+        curvature = curvature_windows(grid, frozen=frozen_arr, **asdict(ic2_cfg))
 
-    # Directional soft-energy samples: a prebuilt DirectionalSamples table, or a
-    # dict of keyword args for build_directional_samples (references frozen from
-    # the grid's current node positions at this build).
-    if isinstance(directional, dict):
+    # Directional soft-energy samples: a prebuilt DirectionalSamples table passes
+    # through; a Directional config or plain dict is built here (references
+    # frozen from the grid's current node positions). A raw dict keeps the
+    # builder's own field defaults; a Directional carries the pipeline scale.
+    if isinstance(directional, Directional):
+        from egg.smoothing.directional import build_directional_samples
+
+        directional = build_directional_samples(grid, **asdict(directional))
+    elif isinstance(directional, dict):
         from egg.smoothing.directional import build_directional_samples
 
         directional = build_directional_samples(grid, **directional)
@@ -279,6 +293,19 @@ def build_sweep_context(
             for co in corners:
                 samp_w[sid] = target_fn(bi, block, cell_base, co)
                 sid += 1
+    if ns:
+        # A target matrix must be finite with positive determinant; otherwise its
+        # inverse is inf/nan and every energy built on it is garbage. Catch a bad
+        # target here instead of letting it poison the solve silently.
+        dets = np.linalg.det(samp_w)
+        bad = ~(np.isfinite(dets) & (dets > 0))
+        if bad.any():
+            k = int(np.flatnonzero(bad)[0])
+            raise EggValidationError(
+                f"target matrix at sample {k} has non-positive or non-finite "
+                f"determinant ({float(dets[k])!r}); the target must return a "
+                f"finite matrix with det > 0 for every (block, cell, corner)"
+            )
     samp_w_inv = np.linalg.inv(samp_w) if ns else np.zeros((0, d, d))
 
     energy_stencil = {

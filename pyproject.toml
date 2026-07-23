@@ -111,3 +111,27 @@ build.targets = []                  # [] = build the default (all) target, not j
 # C++ formatting/linting: .clang-format / .clang-tidy.
 [tool.ruff]
 line-length = 88
+
+[tool.ruff.lint]
+# Start narrow: require return-type annotations (the largest annotation gap).
+# Argument-type rules (ANN001/002/003) are added once the modules are annotated.
+extend-select = ["ANN201", "ANN205", "ANN206"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+
+[tool.basedpyright]
+pythonVersion = "3.13"
+include = ["egg"]
+exclude = ["**/__pycache__", "build", "egg/webui/static"]
+# "standard" catches the errors this effort targets (wrong config values, bad
+# call args, return-type mismatches) without flooding on the not-yet-annotated
+# legacy code. The four "unknown/missing type" reports below are silenced until
+# each directory is annotated; they get re-enabled per directory, then removed
+# once the whole package type-checks strict.
+typeCheckingMode = "standard"
+reportMissingParameterType = false
+reportUnknownParameterType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportMissingTypeStubs = false

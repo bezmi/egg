@@ -23,9 +23,20 @@ axis 0 most significant: ``b = sum_k o_k << (d - 1 - k)`` — the C-order of
 the concatenated blocks.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from egg.geometry.entity_soa import group_entities_by_type
+
+if TYPE_CHECKING:
+    from egg.geometry.base import GeometryEntity
+    from egg.smoothing.config_types import FlatWire
+    from egg.smoothing.directional import DirectionalSamples
+    from egg.smoothing.interface_c2 import CurvatureWindows
+    from egg.smoothing.interface_ortho import InterfaceSamples
 
 
 def _axbit(d):
@@ -123,16 +134,16 @@ def cell_stencil(blocks, d):
 
 
 def build_flat_context(
-    blocks,
-    free_mask,
-    dof_entities,
-    d,
+    blocks: list[np.ndarray],
+    free_mask: np.ndarray,
+    dof_entities: dict[int, GeometryEntity],
+    d: int,
     *,
-    w_inv,
-    interface=None,
-    curvature=None,
-    directional=None,
-):
+    w_inv: np.ndarray,
+    interface: InterfaceSamples | None = None,
+    curvature: CurvatureWindows | None = None,
+    directional: DirectionalSamples | None = None,
+) -> FlatWire:
     """Assemble the ragged ``{"groups", "energy_stencil"}`` wire format.
 
     ``blocks``       list of global-node-id arrays, one per structured block;

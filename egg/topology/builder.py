@@ -249,10 +249,20 @@ class TopologyBuilder:
             entity = entity.entity
         if block_name not in self._block_specs:
             raise ValueError(f"associate() references unknown block '{block_name}'")
+        self._check_face(axis, side, "associate")
         self._associations.append(
             Association(face=FaceSpec(block_name, axis, side), entity=entity)
         )
         return self
+
+    def _check_face(self, axis: int, side: int, who: str) -> None:
+        """Reject an out-of-range face selector before it reaches the grid build."""
+        if not isinstance(axis, int) or not 0 <= axis < self._d:
+            raise ValueError(
+                f"{who}() axis must be in 0..{self._d - 1}, got {axis!r}"
+            )
+        if side not in (0, 1):
+            raise ValueError(f"{who}() side must be 0 (low) or 1 (high), got {side!r}")
 
     def tag_boundary(
         self,
@@ -277,6 +287,7 @@ class TopologyBuilder:
         """
         if block_name not in self._block_specs:
             raise ValueError(f"tag_boundary() references unknown block '{block_name}'")
+        self._check_face(axis, side, "tag_boundary")
         self._boundary_tags.setdefault(name, []).append(
             FaceSpec(block_name, axis, side)
         )
@@ -449,6 +460,23 @@ class TopologyBuilder:
         """
         if isinstance(entity, Edge):
             entity = entity.entity
+        if not (isinstance(first_height, (int, float)) and first_height > 0):
+            raise ValueError(
+                f"set_boundary_layer() first_height must be > 0, got {first_height!r}"
+            )
+        if not (isinstance(growth, (int, float)) and growth >= 1):
+            raise ValueError(
+                f"set_boundary_layer() growth must be >= 1, got {growth!r}"
+            )
+        if not (isinstance(n_layers, int) and n_layers > 0):
+            raise ValueError(
+                f"set_boundary_layer() n_layers must be an int > 0, got {n_layers!r}"
+            )
+        if not (isinstance(n_fixed, int) and 0 <= n_fixed <= n_layers):
+            raise ValueError(
+                f"set_boundary_layer() n_fixed must be an int in 0..n_layers "
+                f"({n_layers}), got {n_fixed!r}"
+            )
         if relax_orthogonality:
             import warnings
 

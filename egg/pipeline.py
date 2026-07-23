@@ -31,12 +31,31 @@ from __future__ import annotations
 
 import os
 import warnings
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Iterator, Literal
 
 import numpy as np
 
+from collections.abc import Mapping
+
 from .core.types import MultiBlockGrid
+from .enums import (
+    ControlOrtho,
+    Device,
+    PresmoothSmoother,
+    TmopMetric,
+    TmopSmoother,
+    coerce_enum,
+    enum_errors,
+)
+from .errors import EggValidationError
+from .smoothing.config_types import (
+    Directional,
+    FasParams,
+    InterfaceC2,
+    InterfaceOrtho,
+    config_errors,
+)
 
 __all__ = [
     "generate",
@@ -175,8 +194,8 @@ class PipelineConfig:
     # TMOP quality phase.
     tmop_sweeps: int = 40
     tmop_chunk: int = 10
-    tmop_smoother: Literal["jacobi", "fas", "control_point"] = "jacobi"
-    tmop_metric: Literal["shape", "shape_size"] = "shape"
+    tmop_smoother: TmopSmoother = TmopSmoother.JACOBI
+    tmop_metric: TmopMetric = TmopMetric.SHAPE
     fas_nu_pre: int = 2
     fas_nu_post: int = 2
     fas_nu_coarse: int = 32
@@ -198,14 +217,14 @@ class PipelineConfig:
     # for the hierarchy to pay for itself (the fit only needs a smooth valid
     # start, and at scale a handful of V-cycles reaches a far better one in a
     # fraction of the sweeps' wall time).
-    control_presmooth_smoother: str = "auto"
+    control_presmooth_smoother: PresmoothSmoother = PresmoothSmoother.AUTO
     control_ratio: int = 2
     control_max_outer: int = 30
     # Outer GN iterations per yielded "control" chunk (live views animate
     # per chunk; 0 = the whole phase in one call).
     control_chunk: int = 5
     control_c2_weight: float = 0.0
-    control_ortho: str = "off"
+    control_ortho: ControlOrtho = ControlOrtho.OFF
     control_ortho_weight: float = 1.0
     # Extra knots inserted at every net axis end landing on a singular fan
     # (chain-wide so seams stay conforming): the fan window is C1-penalty-only
@@ -233,14 +252,14 @@ class PipelineConfig:
     # (see egg.smoothing.interface_ortho): a dict of kwargs forwarded to
     # interface_ortho_samples, e.g. {"mode": "normal", "weight": 0.3}. None (the
     # default) leaves the objective as the plain shape/shape_size metric.
-    interface_ortho: dict | None = None
+    interface_ortho: InterfaceOrtho | Mapping[str, object] | None = None
 
     # Optional block-interface C2 curvature term (2D). When set, the TMOP phase
     # adds the curvature-continuity term over grid-line windows (see
     # egg.smoothing.interface_c2): a dict of kwargs forwarded to
     # curvature_windows, e.g. {"weight": 0.0, "iface_boost": 20.0}. Concentrates
     # curvature continuity across block seams; None leaves it off.
-    interface_c2: dict | None = None
+    interface_c2: InterfaceC2 | Mapping[str, object] | None = None
 
     # Directional soft-energy terms over declared parallel chains and fan
     # frames (see egg.smoothing.directional). None (the default) enables the
@@ -249,54 +268,45 @@ class PipelineConfig:
     # (lambda_parallel/lambda_line/lambda_stem/energy_scale — 0 disables that
     # term); False forces the terms off. References re-freeze from the current
     # node positions at every phase start.
-    directional: dict | bool | None = None
+    directional: Directional | Mapping[str, object] | bool | None = None
 
-    device: Literal["cpu", "gpu", "auto"] = "cpu"
+    device: Device = Device.CPU
     verbose: bool = False
 
     def validate(self) -> None:
-        """Reject invalid enum knobs up front — a typo must fail before the
-        untangle phase spends minutes, not after."""
-        if self.tmop_smoother not in ("jacobi", "fas", "control_point"):
-            raise ValueError(
-                f"PipelineConfig.tmop_smoother must be 'jacobi', 'fas' or "
-                f"'control_point', got {self.tmop_smoother!r}"
+        """Reject invalid knobs up front — a typo must fail before the untangle
+        phase spends minutes, not after. Normalizes string knobs to their enum."""
+        # coerce_enum validates and returns the enum member; store it so the rest
+        # of the pipeline sees a normalized value.
+        self.tmop_smoother = coerce_enum(
+            TmopSmoother, self.tmop_smoother, "PipelineConfig.tmop_smoother"
+        )
+        self.tmop_metric = coerce_enum(
+            TmopMetric, self.tmop_metric, "PipelineConfig.tmop_metric"
+        )
+        self.control_ortho = coerce_enum(
+            ControlOrtho, self.control_ortho, "PipelineConfig.control_ortho"
+        )
+        self.control_presmooth_smoother = coerce_enum(
+            PresmoothSmoother,
+            self.control_presmooth_smoother,
+            "PipelineConfig.control_presmooth_smoother",
+        )
+        self.device = coerce_enum(Device, self.device, "PipelineConfig.device")
+        if self.tmop_smoother == TmopSmoother.CONTROL_POINT and (
+            self.interface_ortho is not None or self.interface_c2 is not None
+        ):
+            raise EggValidationError(
+                "interface_ortho / interface_c2 are node-mode terms; the "
+                "control-point smoother expresses seam orthogonality and "
+                "curvature continuity directly on control legs — use "
+                "control_ortho / control_c2_weight instead"
             )
-        if self.tmop_smoother == "control_point":
-            if self.interface_ortho is not None or self.interface_c2 is not None:
-                raise ValueError(
-                    "interface_ortho / interface_c2 are node-mode terms; the "
-                    "control-point smoother expresses seam orthogonality and "
-                    "curvature continuity directly on control legs — use "
-                    "control_ortho / control_c2_weight instead"
-                )
-            if self.control_ortho not in ("off", "penalty", "hard"):
-                raise ValueError(
-                    "PipelineConfig.control_ortho must be 'off', 'penalty' or "
-                    f"'hard', got {self.control_ortho!r}"
-                )
-            if self.control_presmooth_smoother not in ("auto", "jacobi", "fas"):
-                raise ValueError(
-                    "PipelineConfig.control_presmooth_smoother must be 'auto', "
-                    f"'jacobi' or 'fas', got {self.control_presmooth_smoother!r}"
-                )
-        if self.tmop_metric not in ("shape", "shape_size"):
-            raise ValueError(
-                f"PipelineConfig.tmop_metric must be 'shape' or 'shape_size', "
-                f"got {self.tmop_metric!r}"
-            )
-        if self.device not in ("cpu", "gpu", "auto"):
-            raise ValueError(
-                f"PipelineConfig.device must be 'cpu', 'gpu' or 'auto', got "
-                f"{self.device!r}"
-            )
-        if self.interface_ortho is not None:
-            mode = self.interface_ortho.get("mode", "normal")
-            if mode not in ("normal", "continuous"):
-                raise ValueError(
-                    "PipelineConfig.interface_ortho['mode'] must be 'normal' or "
-                    f"'continuous', got {mode!r}"
-                )
+        # Coercion validates (ranges, unknown keys); discard the result here.
+        InterfaceOrtho.coerce(self.interface_ortho)
+        InterfaceC2.coerce(self.interface_c2)
+        if not isinstance(self.directional, bool):
+            Directional.coerce(self.directional)
 
     def to_stages(self) -> list["Stage"]:
         """Build the equivalent stage list and warn.
@@ -537,12 +547,19 @@ class MeshState:
     order, not a streaming buffer.
     """
 
-    def __init__(self, grid, *, device="cpu", verbose=False, target=None):
+    def __init__(
+        self,
+        grid: MultiBlockGrid,
+        *,
+        device: Device | str = Device.CPU,
+        verbose: bool = False,
+        target: Callable[..., np.ndarray] | None = None,
+    ) -> None:
         from .smoothing.solver import build_sweep_context
         from .smoothing.targets import IdentityTarget
 
         self.grid = grid
-        self.device = device
+        self.device = coerce_enum(Device, device, "device")
         self.verbose = verbose
         self.d = grid.topology.d
         self.iso = IdentityTarget(self.d)
@@ -602,13 +619,11 @@ def _directional_config(directional) -> dict | None:
     leave, without hurting alignment. User keys override; the per-declaration
     ``"weight"`` tunes a single chain.
     """
-    if directional is False or directional is None:
-        return (
-            None
-            if directional is False
-            else {"energy_scale": 200.0, "lambda_fair": 1.0}
-        )
-    return {"energy_scale": 200.0, "lambda_fair": 1.0, **directional}
+    if directional is False:
+        return None
+    if directional is None or directional is True:
+        return asdict(Directional())
+    return asdict(Directional.coerce(directional))
 
 
 def _establish_objective(
@@ -680,6 +695,41 @@ def _establish_objective(
     return target, ctx
 
 
+def _unencodable_entity_errors(grid: MultiBlockGrid) -> list[str]:
+    """Report any constraint geometry the device cannot encode, up front.
+
+    Every distinct entity a DOF slides on must encode to the device SoA layout
+    (and stay within the compiled degree caps). Encoding fails late otherwise,
+    at wire-build time inside the first stage; check it here instead.
+    """
+    from egg.geometry.entity_soa import encode_entity_soa
+
+    d = grid.topology.d
+    errs: list[str] = []
+    seen: set[int] = set()
+    for entity in grid.dof_constraints.values():
+        if entity is None or id(entity) in seen:
+            continue
+        seen.add(id(entity))
+        try:
+            encode_entity_soa(entity, d=d)
+        except NotImplementedError as e:
+            errs.append(f"constraint geometry cannot be used: {e}")
+    return errs
+
+
+def _scalar_errors(who: str, sweeps: object, chunk: object, omega: object) -> list[str]:
+    """Range checks shared by the smoother stages."""
+    errs: list[str] = []
+    if isinstance(sweeps, bool) or not isinstance(sweeps, int) or sweeps < 0:
+        errs.append(f"{who} sweeps must be a non-negative int, got {sweeps!r}")
+    if isinstance(chunk, bool) or not isinstance(chunk, int) or chunk < 1:
+        errs.append(f"{who} chunk must be an int >= 1, got {chunk!r}")
+    if isinstance(omega, bool) or not isinstance(omega, (int, float)) or omega <= 0:
+        errs.append(f"{who} omega must be a positive number, got {omega!r}")
+    return errs
+
+
 # Capability tokens for validate(). "grid" = a built grid; "smoothed" = a
 # quality-optimised grid; "net" = a control net faithful to the grid. A stage
 # declares what must be present before it (``requires``) and what it leaves
@@ -701,6 +751,33 @@ class Stage:
         ``requires`` / ``produces`` capability chain). ``pipeline`` is the whole
         stage list and ``index`` is this stage's position in it. The default
         adds no rule of its own.
+        """
+
+    def check(self) -> list[str]:
+        """Return this stage's own config problems as messages (empty if valid).
+
+        Called for every stage at the start of a run so the pipeline reports all
+        bad values at once and aborts before any solving. Building a stage never
+        validates, so a live-reloaded script stays quiet while a value is typed.
+        """
+        return []
+
+    def check_grid(self, grid: MultiBlockGrid) -> list[str]:
+        """Config problems that depend on the grid (empty if valid).
+
+        Runs alongside :meth:`check` in the mandatory validation stage, for
+        rules that need the grid the run will use (e.g. a term that only works
+        in 2D). The default has none.
+        """
+        return []
+
+    def normalize(self) -> None:
+        """Replace this stage's raw inputs with typed config objects.
+
+        Called once, after :meth:`check` passes, so the rest of the run works
+        with enums and config dataclasses instead of the strings/dicts the user
+        may have passed. Coercion cannot fail here because ``check`` already
+        accepted the values.
         """
 
     def run(self, s: MeshState) -> Iterator[tuple[str, dict]]:
@@ -733,14 +810,14 @@ class Untangle(Stage):
     def __init__(
         self,
         *,
-        margin=1e-9,
-        sweeps_per_delta=20,
-        delta0_factor=2.0,
-        shrink=0.8,
-        max_outer=60,
-        direct=True,
-        report_every=0,
-    ):
+        margin: float = 1e-9,
+        sweeps_per_delta: int = 20,
+        delta0_factor: float = 2.0,
+        shrink: float = 0.8,
+        max_outer: int = 60,
+        direct: bool = True,
+        report_every: int = 0,
+    ) -> None:
         self.margin = margin
         self.sweeps_per_delta = sweeps_per_delta
         self.delta0_factor = delta0_factor
@@ -748,6 +825,32 @@ class Untangle(Stage):
         self.max_outer = max_outer
         self.direct = direct
         self.report_every = report_every
+
+    def check(self) -> list[str]:
+        errs: list[str] = []
+        if (
+            isinstance(self.sweeps_per_delta, bool)
+            or not isinstance(self.sweeps_per_delta, int)
+            or self.sweeps_per_delta < 1
+        ):
+            errs.append(
+                f"Untangle sweeps_per_delta must be an int >= 1, "
+                f"got {self.sweeps_per_delta!r}"
+            )
+        if (
+            isinstance(self.max_outer, bool)
+            or not isinstance(self.max_outer, int)
+            or self.max_outer < 1
+        ):
+            errs.append(f"Untangle max_outer must be an int >= 1, got {self.max_outer!r}")
+        if not isinstance(self.shrink, (int, float)) or not 0.0 < self.shrink < 1.0:
+            errs.append(f"Untangle shrink must be in (0, 1), got {self.shrink!r}")
+        if not isinstance(self.delta0_factor, (int, float)) or self.delta0_factor <= 0:
+            errs.append(
+                f"Untangle delta0_factor must be a positive number, "
+                f"got {self.delta0_factor!r}"
+            )
+        return errs
 
     def run(self, s: MeshState):
         from .projection.project import project_nodes
@@ -837,19 +940,22 @@ class _NodalSmoother(Stage):
     def __init__(
         self,
         *,
-        sweeps=40,
-        chunk=10,
-        omega=0.8,
-        report_every=0,
-        metric="shape",
-        cluster_boundary_layers=True,
-        bl_blend_neighbours=True,
-        bl_interior_spacing=None,
-        fas_params=None,
-        interface_ortho=None,
-        interface_c2=None,
-        directional=None,
-    ):
+        sweeps: int = 40,
+        chunk: int = 10,
+        omega: float = 0.8,
+        report_every: int = 0,
+        metric: TmopMetric = TmopMetric.SHAPE,
+        cluster_boundary_layers: bool = True,
+        bl_blend_neighbours: bool = True,
+        bl_interior_spacing: float | None = None,
+        fas_params: FasParams | Mapping[str, object] | None = None,
+        interface_ortho: InterfaceOrtho | Mapping[str, object] | None = None,
+        interface_c2: InterfaceC2 | Mapping[str, object] | None = None,
+        directional: Directional | Mapping[str, object] | bool | None = None,
+    ) -> None:
+        # Store inputs as given; validation runs together at pipeline start (see
+        # Stage.check / _run_stages), so building a stage never raises. This keeps
+        # a live-reloaded script quiet while a value is being typed.
         self.sweeps = sweeps
         self.chunk = chunk
         self.omega = omega
@@ -858,12 +964,40 @@ class _NodalSmoother(Stage):
         self.cluster_boundary_layers = cluster_boundary_layers
         self.bl_blend_neighbours = bl_blend_neighbours
         self.bl_interior_spacing = bl_interior_spacing
-        self.fas_params = fas_params or dict(
-            nu_pre=2, nu_post=2, nu_coarse=32, max_levels=32
-        )
+        self.fas_params = fas_params
         self.interface_ortho = interface_ortho
         self.interface_c2 = interface_c2
         self.directional = directional
+
+    def check(self) -> list[str]:
+        """Config problems, gathered so the pipeline reports them all at once."""
+        who = type(self).__name__
+        errs = _scalar_errors(who, self.sweeps, self.chunk, self.omega)
+        errs += enum_errors(TmopMetric, self.metric, f"{who} metric")
+        errs += config_errors(FasParams, self.fas_params, f"{who} fas_params")
+        errs += config_errors(InterfaceOrtho, self.interface_ortho, f"{who} interface_ortho")
+        errs += config_errors(InterfaceC2, self.interface_c2, f"{who} interface_c2")
+        if not isinstance(self.directional, bool):
+            errs += config_errors(Directional, self.directional, f"{who} directional")
+        return errs
+
+    def check_grid(self, grid: MultiBlockGrid) -> list[str]:
+        who = type(self).__name__
+        errs: list[str] = []
+        if grid.topology.d != 2:
+            if self.interface_ortho is not None:
+                errs.append(f"{who} interface_ortho is a 2D-only term (grid is 3D)")
+            if self.interface_c2 is not None:
+                errs.append(f"{who} interface_c2 is a 2D-only term (grid is 3D)")
+        return errs
+
+    def normalize(self) -> None:
+        self.metric = coerce_enum(TmopMetric, self.metric, "metric")
+        self.fas_params = FasParams.coerce(self.fas_params) or FasParams()
+        self.interface_ortho = InterfaceOrtho.coerce(self.interface_ortho)
+        self.interface_c2 = InterfaceC2.coerce(self.interface_c2)
+        if not isinstance(self.directional, bool):
+            self.directional = Directional.coerce(self.directional)
 
     def run_chunk(self, session, k, phase):
         """Run ``k`` sweeps (Jacobi) or V-cycles (FAS) on ``session``.
@@ -873,7 +1007,8 @@ class _NodalSmoother(Stage):
         """
         kw = {"omega": self.omega, "phase": phase}
         if self.nodal_kind == "fas":
-            return session.run_fas(k, **self.fas_params, **kw)
+            fp = FasParams.coerce(self.fas_params) or FasParams()
+            return session.run_fas(k, **asdict(fp), **kw)
         return session.run(k, report_every=self.report_every, **kw)
 
     def run(self, s: MeshState):
@@ -981,6 +1116,15 @@ class Presmooth(Stage):
                 "only helps the control-point smoother"
             )
 
+    def check(self) -> list[str]:
+        return self.smoother.check()
+
+    def check_grid(self, grid: MultiBlockGrid) -> list[str]:
+        return self.smoother.check_grid(grid)
+
+    def normalize(self) -> None:
+        self.smoother.normalize()
+
     def run(self, s: MeshState):
         # A warm start (a Resample stage seeded the grid from a saved net) already
         # holds a smooth grid, so there is nothing to prepare.
@@ -1009,30 +1153,29 @@ class ControlPointSmoother(Stage):
     def __init__(
         self,
         *,
-        omega=0.8,
-        report_every=0,
-        chunk=10,
-        fas_params=None,
-        metric="shape",
-        cluster_boundary_layers=True,
-        bl_blend_neighbours=True,
-        bl_interior_spacing=None,
-        ratio=2,
-        max_outer=30,
-        control_chunk=5,
-        c2_weight=0.0,
-        ortho="off",
-        ortho_weight=1.0,
-        fan_refine=2,
-        smooth_weight=10.0,
-        directional=None,
-    ):
+        omega: float = 0.8,
+        report_every: int = 0,
+        chunk: int = 10,
+        fas_params: FasParams | Mapping[str, object] | None = None,
+        metric: TmopMetric = TmopMetric.SHAPE,
+        cluster_boundary_layers: bool = True,
+        bl_blend_neighbours: bool = True,
+        bl_interior_spacing: float | None = None,
+        ratio: int = 2,
+        max_outer: int = 30,
+        control_chunk: int = 5,
+        c2_weight: float = 0.0,
+        ortho: ControlOrtho = ControlOrtho.OFF,
+        ortho_weight: float = 1.0,
+        fan_refine: int = 2,
+        smooth_weight: float = 10.0,
+        directional: Directional | Mapping[str, object] | bool | None = None,
+    ) -> None:
+        # Store inputs as given; validated together at pipeline start (check).
         self.omega = omega
         self.report_every = report_every
         self.chunk = chunk
-        self.fas_params = fas_params or dict(
-            nu_pre=2, nu_post=2, nu_coarse=32, max_levels=32
-        )
+        self.fas_params = fas_params
         self.metric = metric
         self.cluster_boundary_layers = cluster_boundary_layers
         self.bl_blend_neighbours = bl_blend_neighbours
@@ -1046,6 +1189,24 @@ class ControlPointSmoother(Stage):
         self.fan_refine = fan_refine
         self.smooth_weight = smooth_weight
         self.directional = directional
+
+    def check(self) -> list[str]:
+        who = "ControlPointSmoother"
+        errs = enum_errors(TmopMetric, self.metric, f"{who} metric")
+        errs += enum_errors(ControlOrtho, self.ortho, f"{who} ortho")
+        errs += config_errors(FasParams, self.fas_params, f"{who} fas_params")
+        if not isinstance(self.directional, bool):
+            errs += config_errors(Directional, self.directional, f"{who} directional")
+        if isinstance(self.chunk, bool) or not isinstance(self.chunk, int) or self.chunk < 1:
+            errs.append(f"{who} chunk must be an int >= 1, got {self.chunk!r}")
+        return errs
+
+    def normalize(self) -> None:
+        self.metric = coerce_enum(TmopMetric, self.metric, "metric")
+        self.ortho = coerce_enum(ControlOrtho, self.ortho, "ortho")
+        self.fas_params = FasParams.coerce(self.fas_params) or FasParams()
+        if not isinstance(self.directional, bool):
+            self.directional = Directional.coerce(self.directional)
 
     def run(self, s: MeshState):
         from .projection.project import project_nodes
@@ -1259,6 +1420,16 @@ class Pin(Stage):
                 f"(or None for a stamp-only pin), got {type(smoother).__name__}"
             )
         self.smoother = smoother
+
+    def check(self) -> list[str]:
+        return self.smoother.check() if self.smoother is not None else []
+
+    def check_grid(self, grid: MultiBlockGrid) -> list[str]:
+        return self.smoother.check_grid(grid) if self.smoother is not None else []
+
+    def normalize(self) -> None:
+        if self.smoother is not None:
+            self.smoother.normalize()
 
     def run(self, s: MeshState):
         from .projection.project import project_nodes
@@ -1592,9 +1763,47 @@ def validate(stages) -> None:
         have |= set(st.produces)
 
 
+class ConfigValidationStage(Stage):
+    """Mandatory first stage: validate the whole run before anything solves.
+
+    Runs ahead of every real stage (not when a stage is built), so a
+    live-reloaded script never raises mid-edit. It checks stage order, gathers
+    every stage's config problems and the grid's validity into one message, and
+    aborts if anything is wrong. It never touches the grid and yields no events.
+    """
+
+    def __init__(self, stages: "list[Stage]") -> None:
+        self.stages = stages
+
+    def run(self, s: MeshState) -> Iterator[tuple[str, dict]]:
+        validate(self.stages)  # stage order / capability chain
+        errs: list[str] = []
+        for st in self.stages:
+            errs += st.check()
+            errs += st.check_grid(s.grid)
+        if not np.all(np.isfinite(s.grid.global_nodes)):
+            errs.append(
+                "grid has non-finite node coordinates; check the topology, "
+                "geometry constraints, and target before smoothing"
+            )
+        errs += _unencodable_entity_errors(s.grid)
+        if errs:
+            raise EggValidationError(
+                "invalid pipeline configuration:\n  " + "\n  ".join(errs)
+            )
+        # Inputs are valid: normalize every stage so the run works with typed
+        # config objects (enums, dataclasses) instead of raw strings/dicts.
+        for st in self.stages:
+            st.normalize()
+        return
+        yield  # pragma: no cover  (never yields)
+
+
 def _run_stages(state: MeshState, stages):
     """Emit ``init``, run every stage, then the ``final`` summary."""
-    validate(stages)
+    stages = list(stages)
+    # The mandatory validation stage runs first and aborts on any bad input.
+    yield from ConfigValidationStage(stages).run(state)
     yield ("init", {"min_det": state.md_now()})
     for stage in stages:
         yield from stage.run(state)
@@ -1616,7 +1825,7 @@ def generate_steps(
     config: PipelineConfig | None = None,
     *,
     stages=None,
-    device: str | None = None,
+    device: Device | None = None,
     verbose: bool = False,
     **overrides,
 ):
@@ -1667,7 +1876,12 @@ def generate_steps(
             raise TypeError(
                 "pass either stages=... or config=/keyword overrides, not both"
             )
-        state = MeshState(grid, device=device or "cpu", verbose=verbose, target=target)
+        state = MeshState(
+            grid,
+            device=device if device is not None else Device.CPU,
+            verbose=verbose,
+            target=target,
+        )
         yield from _run_stages(state, list(stages))
         return
 
