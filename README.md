@@ -49,9 +49,7 @@ The basics:
   **topology** (tap elements for names + constraining geometry);
   **file → export su2 / svg** downloads the mesh (with `tag_boundary`
   markers) or the picture.
-
-Details, theming, and the full script contract: [`webui/README.md`](webui/README.md).
-
+  
 ### Documentation
 
 Start the app (`uv sync --group ui`). Then the full egg documentation is
