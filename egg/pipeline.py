@@ -242,6 +242,15 @@ class PipelineConfig:
     # curvature continuity across block seams; None leaves it off.
     interface_c2: dict | None = None
 
+    # Directional soft-energy terms over declared parallel chains and fan
+    # frames (see egg.smoothing.directional). None (the default) enables the
+    # terms automatically whenever the topology declares them, with unit
+    # weights; a dict of kwargs is forwarded to build_directional_samples
+    # (lambda_parallel/lambda_line/lambda_stem/energy_scale — 0 disables that
+    # term); False forces the terms off. References re-freeze from the current
+    # node positions at every phase start.
+    directional: dict | bool | None = None
+
     device: Literal["cpu", "gpu", "auto"] = "cpu"
     verbose: bool = False
 
@@ -324,6 +333,7 @@ class PipelineConfig:
             cluster_boundary_layers=self.cluster_boundary_layers,
             bl_blend_neighbours=self.bl_blend_neighbours,
             bl_interior_spacing=self.bl_interior_spacing,
+            directional=self.directional,
         )
         stages: list[Stage] = [untangle]
         if self.tmop_smoother == "control_point":
@@ -552,6 +562,7 @@ class MeshState:
         self.active_target = None
         self.interface_ortho = None
         self.interface_c2 = None
+        self.directional = None
         self.score_ctx = self.ctx_iso
         self.score_metric = "shape_2d"
 
@@ -576,13 +587,21 @@ class MeshState:
         return _cpp_reduce(self.grid, score_ctx, self.device, phase=phase)[0]
 
 
-def _establish_objective(s: MeshState, *, metric, cluster, blend, interior, io, ic2):
+def _establish_objective(
+    s: MeshState, *, metric, cluster, blend, interior, io, ic2, directional=None
+):
     """Fix the TMOP target + sweep context a smoother (and pin/respace) uses.
 
     Mirrors the old auto-build: an explicit ``s.target`` wins; otherwise a
     boundary-layer clustering target is built from the topology specs, or a
     mean-size target under the size metric, or the plain isotropic context.
     Records the objective on ``s`` so later phases score the same energy.
+
+    ``directional``: None enables the directional soft-energy terms whenever
+    the topology declares parallel chains or fan frames (unit weights), a dict
+    is kwargs for ``build_directional_samples``, False forces them off. The
+    frozen references are rebuilt from the grid's CURRENT node positions here,
+    at every phase start — the same staleness contract as ``interface_ortho``.
     """
     from .smoothing.solver import build_sweep_context
 
@@ -604,7 +623,28 @@ def _establish_objective(s: MeshState, *, metric, cluster, blend, interior, io, 
 
             target = mean_size_target(s.grid)
         # else (shape metric, no clustering) stays None and reuses ctx_iso.
-    if target is None and io is None and ic2 is None:
+    # The pipeline's default scale: the directional penalties compete with
+    # the shape energy's own preference (a singular fan's 72-degree sectors,
+    # a rail's resistance to transverse cell shear), so unit weights barely
+    # move anything. 200 straightens a framed five-fan to ~1 degree and pulls
+    # a marked wedge rail to a few degrees while the accept rule keeps the
+    # term soft (energy-monotone, barrier intact). The chain fairness term
+    # rides at the same lambda: orientation-only, it rounds block-corner
+    # kinks on a marked rail and damps the short-wavelength ripples a pure
+    # parallelism pull can leave, without hurting alignment (measured on the
+    # wedge rails: worst kink 24 -> 4 degrees, alignment unchanged). User
+    # keys override; the per-declaration "weight" tunes a single chain.
+    dir_cfg = (
+        None
+        if directional is False
+        else {"energy_scale": 200.0, "lambda_fair": 1.0, **(directional or {})}
+    )
+    dir_samples = None
+    if dir_cfg is not None:
+        from .smoothing.directional import build_directional_samples
+
+        dir_samples = build_directional_samples(s.grid, **dir_cfg)
+    if target is None and io is None and ic2 is None and dir_samples is None:
         ctx = s.ctx_iso
     else:
         ctx = build_sweep_context(
@@ -612,10 +652,12 @@ def _establish_objective(s: MeshState, *, metric, cluster, blend, interior, io, 
             s.iso if target is None else target,
             interface_ortho=io,
             interface_c2=ic2,
+            directional=dir_samples,
         )
     s.active_target = target
     s.interface_ortho = io
     s.interface_c2 = ic2
+    s.directional = dir_cfg if dir_samples is not None else None
     s.score_ctx = ctx
     s.score_metric = "shape_size" if metric == "shape_size" else "shape_2d"
     return target, ctx
@@ -789,6 +831,7 @@ class _NodalSmoother(Stage):
         fas_params=None,
         interface_ortho=None,
         interface_c2=None,
+        directional=None,
     ):
         self.sweeps = sweeps
         self.chunk = chunk
@@ -803,6 +846,7 @@ class _NodalSmoother(Stage):
         )
         self.interface_ortho = interface_ortho
         self.interface_c2 = interface_c2
+        self.directional = directional
 
     def run_chunk(self, session, k, phase):
         """Run ``k`` sweeps (Jacobi) or V-cycles (FAS) on ``session``.
@@ -830,6 +874,7 @@ class _NodalSmoother(Stage):
             interior=self.bl_interior_spacing,
             io=self.interface_ortho,
             ic2=self.interface_c2,
+            directional=self.directional,
         )
         phase = "shape_size" if self.metric == "shape_size" else "barrier"
         total = max((self.sweeps // self.chunk) * self.chunk, self.chunk)
@@ -963,6 +1008,7 @@ class ControlPointSmoother(Stage):
         ortho_weight=1.0,
         fan_refine=2,
         smooth_weight=10.0,
+        directional=None,
     ):
         self.omega = omega
         self.report_every = report_every
@@ -982,6 +1028,7 @@ class ControlPointSmoother(Stage):
         self.ortho_weight = ortho_weight
         self.fan_refine = fan_refine
         self.smooth_weight = smooth_weight
+        self.directional = directional
 
     def run(self, s: MeshState):
         from .projection.project import project_nodes
@@ -999,6 +1046,7 @@ class ControlPointSmoother(Stage):
             interior=self.bl_interior_spacing,
             io=None,
             ic2=None,
+            directional=self.directional,
         )
         tmop_phase = "shape_size" if self.metric == "shape_size" else "barrier"
         # A warm start (a Resample stage seeded the grid from a saved net) already
@@ -1048,6 +1096,7 @@ class ControlPointSmoother(Stage):
             ortho=self.ortho,
             ortho_weight=self.ortho_weight,
             smooth_weight=self.smooth_weight,
+            directional=s.directional,
         )
         ctrl_target = s.iso if target is None else target
         chunk_n = self.control_chunk if self.control_chunk > 0 else self.max_outer
@@ -1200,11 +1249,14 @@ class Pin(Stage):
         yield ("pin", {"n_dofs": int(pinned.size), "min_det": s.md_now()})
         if not pinned.size:
             return
+        # s.directional is the recorded config dict, so the sample references
+        # re-freeze from the pinned grid's current node positions.
         pin_ctx = build_sweep_context(
             s.grid,
             s.iso if s.active_target is None else s.active_target,
             interface_ortho=s.interface_ortho,
             interface_c2=s.interface_c2,
+            directional=s.directional,
         )
         session = CppStructuredSweepSession(
             pin_ctx,

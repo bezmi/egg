@@ -85,6 +85,29 @@ class GeometryEntity(ABC):
         return self
 
     @property
+    def open_ends(self) -> bool:
+        """Whether this segment releases sliding nodes beyond its ends.
+
+        Set with :meth:`open_ended`. A bound node projects onto the segment
+        while its foot parameter is within range and moves as a *free* node
+        beyond either end (recaptured if its foot re-enters), so a guide can
+        cover part of a rail of nodes without clamping the overflow at its
+        endpoints. Straight segments only (Line / Line3).
+        """
+        return bool(getattr(self, "_egg_open_ends", False))
+
+    def open_ended(self):
+        """Make this segment an open-ended rail; return ``self`` (fluent).
+
+        Nodes bound to it slide along the segment but drop off its ends and
+        become free instead of clamping at the endpoints — see
+        :attr:`open_ends`. Supported for straight segments (``Line`` /
+        ``Line3``); other entity kinds raise at encode time.
+        """
+        self._egg_open_ends = True
+        return self
+
+    @property
     def boundary_layer(self) -> dict | None:
         """Wall-normal clustering requested on this entity, or ``None``.
 
@@ -119,9 +142,21 @@ class GeometryEntity(ABC):
                 first_height=5e-3, growth=1.5, n_fixed=2
             )
 
-        ``relax_orthogonality`` accepts entities, :class:`Edge`\\ s, or the
-        *names* of other named geometry (resolved at build time).
+        ``relax_orthogonality`` is deprecated here: declare it on the topology
+        (``TopologyBuilder.relax_orthogonality(...)`` or
+        ``ExplicitTopology(relax_orthogonality=...)``); entries given here are
+        forwarded at build time.
         """
+        if relax_orthogonality:
+            import warnings
+
+            warnings.warn(
+                "clustered(relax_orthogonality=...) is deprecated; use "
+                "TopologyBuilder.relax_orthogonality(...) or "
+                "ExplicitTopology(relax_orthogonality=...)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._egg_bl = dict(
             first_height=first_height,
             growth=growth,

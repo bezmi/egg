@@ -35,10 +35,12 @@ the identity, so a wrapped script builds the same headless.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
 
+from .block_topology import ParallelWalkWarning
 from .builder import TopologyBuilder
 from .trace import Diagnostic, trace_topology
 
@@ -148,6 +150,28 @@ class ExplicitTopology:
         3D: ``nodes`` (``{xyz, on}``) + ``blocks`` (each ``{corners: [8 ids in
         product order], res}``); a boundary face whose four corners share a
         bound surface (via each node's ``on``) rides it.
+    relax_orthogonality : sequence, optional
+        Domain boundaries whose orthogonality requirements are relaxed —
+        geometry *labels* (or entities/Edges), passed to
+        :meth:`~egg.topology.builder.TopologyBuilder.relax_orthogonality`
+        on flatten and carried on the built topology.
+    fan_frames : dict, optional
+        Frames for singular fan nodes:
+        ``{node: {"through": [a, b], "normal": c}}`` with legs named by
+        their far node. The same section may live inside ``connectivity``
+        instead (where the web UI round-trips it); declaring one fan in
+        both places is an error. Passed to
+        :meth:`~egg.topology.builder.TopologyBuilder.fan_frame` on flatten
+        and carried resolved on the built topology.
+    parallel : sequence, optional
+        Chains of block edges held loosely parallel to a boundary:
+        ``[{"to": label, "chain": [c0, c1, ...], "weight"?, "taper"?}, ...]``
+        with ``to`` a geometry label (or entity/Edge) and the chain an
+        ordered node list whose consecutive pairs are block edges. The same
+        section may live inside ``connectivity`` (where the web UI
+        round-trips it); both are applied. Passed to
+        :meth:`~egg.topology.builder.TopologyBuilder.parallel_to` on flatten
+        and carried resolved on the built topology.
     d : int
         Spatial dimension (2 or 3).
     """
@@ -158,6 +182,9 @@ class ExplicitTopology:
         base: Any = None,
         geometry: dict[str, Any] | None = None,
         connectivity: dict | None = None,
+        relax_orthogonality: tuple = (),
+        fan_frames: dict | None = None,
+        parallel: tuple | list | None = None,
         d: int = 2,
     ):
         if d not in (2, 3):
@@ -165,10 +192,108 @@ class ExplicitTopology:
         self.base = base
         self.geometry = dict(geometry or {})
         self.connectivity = dict(connectivity or {})
+        self.relax_orthogonality = tuple(relax_orthogonality)
+        self.fan_frames = dict(fan_frames or {})
+        self.parallel = list(parallel or [])
         self.d = d
 
     def _gents(self) -> list[tuple[str, Any, bool]]:
         return [(lbl, ent, _is_closed(ent)) for lbl, ent in self.geometry.items()]
+
+    def _relax_entries(self) -> list:
+        """relax_orthogonality entries with geometry *labels* resolved to their
+        entities; anything else passes through to the builder's resolution
+        (entity names, Edges, raw entities)."""
+        return [
+            self.geometry.get(o, o) if isinstance(o, str) else o
+            for o in self.relax_orthogonality
+        ]
+
+    def _fan_frame_decls(self, diags: list[Diagnostic]) -> list[dict]:
+        """The kwarg and connectivity fan-frame declarations merged into
+        builder call kwargs; malformed or doubly-declared entries become
+        diagnostics (blocking the flatten) instead of raising."""
+        section = self.connectivity.get("fan_frames") or {}
+        both = {str(k) for k in section} & {str(k) for k in self.fan_frames}
+        if both:
+            diags.append(
+                Diagnostic(
+                    "fan_frame_conflict",
+                    f"fan_frames for {sorted(both)} declared both as a "
+                    "kwarg and in the connectivity; declare each fan once",
+                )
+            )
+        out: list[dict] = []
+        for src in (self.fan_frames, section):
+            for node, spec in src.items():
+                spec = spec or {}
+                thr = spec.get("through")
+                nrm = spec.get("normal")
+                if not isinstance(thr, (list, tuple)) or len(thr) != 2 or not nrm:
+                    diags.append(
+                        Diagnostic(
+                            "bad_fan_frame",
+                            f"fan_frame {node!r} needs 'through': [a, b] "
+                            "and 'normal': c",
+                        )
+                    )
+                    continue
+                out.append(
+                    dict(
+                        corner=str(node),
+                        through=(str(thr[0]), str(thr[1])),
+                        normal=str(nrm),
+                    )
+                )
+        return out
+
+    def _parallel_decls(self, diags: list[Diagnostic]) -> list[dict]:
+        """The kwarg and connectivity parallel-chain declarations merged into
+        builder call kwargs; malformed entries become diagnostics (blocking
+        the flatten) instead of raising. Geometry labels resolve to their
+        entities; other names pass through to the builder's resolution."""
+        out: list[dict] = []
+        for entry in list(self.parallel) + list(
+            self.connectivity.get("parallel") or []
+        ):
+            entry = entry or {}
+            to = entry.get("to")
+            chain = entry.get("chain")
+            if not to or not isinstance(chain, (list, tuple)) or len(chain) < 2:
+                diags.append(
+                    Diagnostic(
+                        "bad_parallel",
+                        "parallel entry needs 'to': <boundary> and "
+                        "'chain': [c0, c1, ...]",
+                    )
+                )
+                continue
+            out.append(
+                dict(
+                    to=self.geometry.get(to, to) if isinstance(to, str) else to,
+                    chain=tuple(str(c) for c in chain),
+                    weight=float(entry.get("weight", 1.0)),
+                    taper=(
+                        None if entry.get("taper") is None else float(entry["taper"])
+                    ),
+                )
+            )
+        return out
+
+    @staticmethod
+    def _build_with_warn_diags(build, diags: list[Diagnostic]):
+        """Run ``build()`` converting :class:`ParallelWalkWarning` into
+        advisory ``warn_parallel_projection`` diagnostics; anything else
+        re-emits unchanged."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            topo = build()
+        for w in caught:
+            if issubclass(w.category, ParallelWalkWarning):
+                diags.append(Diagnostic("warn_parallel_projection", str(w.message)))
+            else:
+                warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
+        return topo
 
     def base_graph(self) -> dict:
         """Base corners (name -> ``{xy, fixed, on}``) and block-face edges
@@ -736,11 +861,21 @@ class ExplicitTopology:
                     for ent_name in sorted(common):
                         tb.associate(name, axis, side, geometry[ent_name])
 
+        fan_decls = self._fan_frame_decls(diags)
+        par_decls = self._parallel_decls(diags)
         errors = [d for d in diags if not d.kind.startswith("warn")]
         if errors:
             return None, diags
         try:
-            return tb.build(), diags
+            if self.relax_orthogonality:
+                tb.relax_orthogonality(*self._relax_entries())
+            for f in fan_decls:
+                tb.fan_frame(f["corner"], through=f["through"], normal=f["normal"])
+            for p in par_decls:
+                tb.parallel_to(
+                    p["to"], chain=p["chain"], weight=p["weight"], taper=p["taper"]
+                )
+            return self._build_with_warn_diags(tb.build, diags), diags
         except Exception as exc:  # a non-conforming assembly still fails to build
             return None, [Diagnostic("build_error", str(exc))]
 
@@ -785,13 +920,23 @@ class ExplicitTopology:
             user_res=user_res,
         )
         diags += tdiags
+        fan_decls = self._fan_frame_decls(diags)
+        par_decls = self._parallel_decls(diags)
         # ``warn_*`` diagnostics are advisory (e.g. a dropped boundary marker):
         # they are reported but do not block a build/commit.
         errors = [d for d in diags if not d.kind.startswith("warn")]
         if errors:
             return None, diags
         try:
-            topo = builder.build()
+            if self.relax_orthogonality:
+                builder.relax_orthogonality(*self._relax_entries())
+            for f in fan_decls:
+                builder.fan_frame(f["corner"], through=f["through"], normal=f["normal"])
+            for p in par_decls:
+                builder.parallel_to(
+                    p["to"], chain=p["chain"], weight=p["weight"], taper=p["taper"]
+                )
+            topo = self._build_with_warn_diags(builder.build, diags)
         except Exception as exc:  # a non-conforming merge still fails to build
             return None, [Diagnostic("build_error", str(exc))]
         return topo, diags  # topo valid; diags holds only advisory warnings
@@ -853,6 +998,14 @@ class ExplicitTopology:
             "ExplicitTopology(",
             "    base=None,",
             f"    geometry={geometry_var},",
+        ]
+        if self.relax_orthogonality:
+            labels = ", ".join(
+                _lit(o if isinstance(o, str) else getattr(o, "name", None) or "?")
+                for o in self.relax_orthogonality
+            )
+            out.append(f"    relax_orthogonality=({labels},),")
+        out += [
             "    connectivity=editable({",
             '        "nodes": {',
         ]
@@ -865,6 +1018,17 @@ class ExplicitTopology:
         else:
             out.append('        "edges": [')
             out += [f"            {_lit(e)}," for e in conn["edges"]]
+            out.append("        ],")
+        if conn.get("fan_frames"):
+            out.append('        "fan_frames": {')
+            out += [
+                f"            {_lit(k)}: {_lit(v)},"
+                for k, v in conn["fan_frames"].items()
+            ]
+            out.append("        },")
+        if conn.get("parallel"):
+            out.append('        "parallel": [')
+            out += [f"            {_lit(p)}," for p in conn["parallel"]]
             out.append("        ],")
         out += [f'        "res": {_lit(conn["res"])},', "    }),", ")"]
         text = "\n".join(out)
@@ -958,7 +1122,12 @@ class ExplicitTopology:
             for spec in nodes.values():
                 if "on" in spec:
                     spec["on"] = sorted(spec["on"])
-            return {"nodes": nodes, "blocks": blocks, "res": 10}, notes
+            out3 = {"nodes": nodes, "blocks": blocks, "res": 10}
+            if topo.fan_frames:
+                out3["fan_frames"] = self._fan_frames_export(topo)
+            if getattr(topo, "parallel_chains", ()):
+                out3["parallel"] = self._parallel_export(topo, label_of, notes)
+            return out3, notes
 
         entries: dict[frozenset, dict] = {}
         order: list[frozenset] = []
@@ -1024,4 +1193,39 @@ class ExplicitTopology:
             if e["res"] == res_default:
                 del e["res"]
             edges_out.append(e)
-        return {"nodes": nodes, "edges": edges_out, "res": res_default}, notes
+        out2 = {"nodes": nodes, "edges": edges_out, "res": res_default}
+        if topo.fan_frames:
+            out2["fan_frames"] = self._fan_frames_export(topo)
+        if getattr(topo, "parallel_chains", ()):
+            out2["parallel"] = self._parallel_export(topo, label_of, notes)
+        return out2, notes
+
+    @staticmethod
+    def _fan_frames_export(topo) -> dict:
+        """The resolved fan frames back in declaration form (corner names)."""
+        return {
+            f.corner: {"through": [f.through[0], f.through[1]], "normal": f.normal}
+            for f in topo.fan_frames
+        }
+
+    @staticmethod
+    def _parallel_export(topo, label_of: dict, notes: list[str]) -> list:
+        """The resolved parallel chains back in declaration form; a chain to
+        an entity no label reaches cannot ride the blocking and is dropped
+        with a note."""
+        out = []
+        for p in topo.parallel_chains:
+            lbl = label_of.get(id(p.to)) or getattr(p.to, "name", None)
+            if lbl is None:
+                notes.append(
+                    f"parallel chain {'-'.join(p.chain)} targets an unnamed "
+                    "entity; entry dropped"
+                )
+                continue
+            e: dict = {"to": lbl, "chain": list(p.chain)}
+            if p.weight != 1.0:
+                e["weight"] = p.weight
+            if p.taper is not None:
+                e["taper"] = p.taper
+            out.append(e)
+        return out

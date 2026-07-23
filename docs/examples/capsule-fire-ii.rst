@@ -373,16 +373,17 @@ Boundary layer, build, entities
 .. code-block:: python
 
    if bl_first_height > 0.0:
+       b.relax_orthogonality(outflow)
        b.set_boundary_layer(
            wall, first_height=bl_first_height, growth=bl_growth,
-           n_fixed=n_fixed, relax_orthogonality=(outflow,),
+           n_fixed=n_fixed,
        )
 
    topology = b.build()
    return topology, topology.entities
 
 The clustering request is stamped on the wall entity as before.
-``relax_orthogonality=(outflow,)`` tells the target builder that the
+``b.relax_orthogonality(outflow)`` tells the target builder that the
 outflow may meet the wall obliquely and, if so, to let the near-wall cells
 shear into the outflow direction rather than lose their layer heights
 fighting to stay orthogonal. Here the vertical outflow already meets the

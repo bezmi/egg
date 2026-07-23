@@ -123,7 +123,15 @@ def cell_stencil(blocks, d):
 
 
 def build_flat_context(
-    blocks, free_mask, dof_entities, d, *, w_inv, interface=None, curvature=None
+    blocks,
+    free_mask,
+    dof_entities,
+    d,
+    *,
+    w_inv,
+    interface=None,
+    curvature=None,
+    directional=None,
 ):
     """Assemble the ragged ``{"groups", "energy_stencil"}`` wire format.
 
@@ -283,6 +291,22 @@ def build_flat_context(
                 g["curv_nodes"] = np.ascontiguousarray(tab["curv_nodes"].reshape(-1))
                 g["curv_slot"] = np.ascontiguousarray(tab["curv_slot"].reshape(-1))
                 g["curv_weight"] = np.ascontiguousarray(tab["curv_weight"].reshape(-1))
+        # Directional soft-energy sample table (per-DOF, same alignment as the
+        # curvature table). Node ids are global; the structured remap rewrites
+        # them to owner slots.
+        if directional is not None and directional.n > 0:
+            from .directional import directional_dof_table
+
+            tab = directional_dof_table(free_mask, directional)
+            if tab:
+                g["dir_k"] = tab["dir_k"]
+                g["dir_eps"] = tab["dir_eps"]
+                g["dir_nodes"] = np.ascontiguousarray(tab["dir_nodes"].reshape(-1))
+                g["dir_slot"] = np.ascontiguousarray(tab["dir_slot"].reshape(-1))
+                g["dir_kind"] = np.ascontiguousarray(tab["dir_kind"].reshape(-1))
+                g["dir_ref"] = np.ascontiguousarray(tab["dir_ref"].reshape(-1))
+                g["dir_axis"] = np.ascontiguousarray(tab["dir_axis"].reshape(-1))
+                g["dir_weight"] = np.ascontiguousarray(tab["dir_weight"].reshape(-1))
         groups.append(g)
 
     all_sid = np.arange(ns)
@@ -290,4 +314,22 @@ def build_flat_context(
     # A uniform target ships as one shared W_inv row (the energy reduction reads it
     # with stride 0), same as the group table — avoids one (d, d) per sample.
     energy_stencil.update(sample_fields(all_sid, uniform_out=True))
+    # Whole-sample directional table: the energy/line-search reductions add the
+    # directional total so every accept decision sees the composed objective.
+    if directional is not None and directional.n > 0:
+        from .directional import directional_energy_table
+
+        tab = directional_energy_table(directional)
+        if tab:
+            energy_stencil["dir_num"] = tab["dir_num"]
+            energy_stencil["dir_eps"] = tab["dir_eps"]
+            energy_stencil["dir_nodes"] = np.ascontiguousarray(
+                tab["dir_nodes"].reshape(-1)
+            )
+            energy_stencil["dir_kind"] = tab["dir_kind"]
+            energy_stencil["dir_ref"] = np.ascontiguousarray(tab["dir_ref"].reshape(-1))
+            energy_stencil["dir_axis"] = np.ascontiguousarray(
+                tab["dir_axis"].reshape(-1)
+            )
+            energy_stencil["dir_weight"] = tab["dir_weight"]
     return {"groups": groups, "energy_stencil": energy_stencil}

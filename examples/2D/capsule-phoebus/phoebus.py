@@ -132,12 +132,12 @@ def build_phoebus(grid_level: int = 1, n_fixed: int = 1):
     # The outflow meets the wall obliquely; relaxing orthogonality towards it
     # lets the clustering target follow it with sheared cells instead of
     # trading away the near-wall layer heights.
+    bld.relax_orthogonality(outflow)
     bld.set_boundary_layer(
         wall,
         first_height=H_WALL,
         growth=BL_GROWTH,
         n_fixed=n_fixed,
-        relax_orthogonality=(outflow,),
     )
 
     topology = bld.build()

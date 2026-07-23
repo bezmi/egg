@@ -85,8 +85,12 @@ class BoundaryLayerTarget:
     wall_side : int
         0 = low face, 1 = high face of ``wall_axis``.
     n_layers : int
-        Unused; retained for backwards compatibility (the geometric growth now
-        runs until it is capped by ``interior_spacing``).
+        Declared extent of the boundary layer. The geometric growth runs until
+        capped by ``interior_spacing``; beyond ``n_layers`` the profile
+        additionally blends to the isotropic interior spacing over another
+        ``n_layers`` (see :meth:`normal_spacing`), so a band whose growth never
+        reaches the cap (e.g. uniform layers with ``growth=1.0``) hands over to
+        the far field instead of demanding its layer height forever.
     interior_spacing : float
         Cap on the wall-normal spacing; defaults to ``tangential_spacing`` so
         the far field is isotropic.
@@ -187,11 +191,23 @@ class BoundaryLayerTarget:
             self._k_iso = max(1, self.n_layers)
 
     def normal_spacing(self, k: int) -> float:
-        """Wall-normal target spacing at layer index ``k`` (capped growth)."""
+        """Wall-normal target spacing at layer index ``k``.
+
+        The geometric profile is capped at ``interior_spacing`` (and
+        ``max_height``); beyond ``n_layers`` it BLENDS to the isotropic
+        interior spacing over another ``n_layers``, so a band whose growth
+        never reaches the cap (e.g. uniform layers, growth 1.0) still hands
+        over to the far field instead of demanding its layer height through
+        the whole block and collapsing the band.
+        """
         s_geo = self.first_height * self.growth**k
         if self.max_height is not None:
             s_geo = min(s_geo, self.max_height)
-        return min(s_geo, self.interior_spacing)
+        s = min(s_geo, self.interior_spacing)
+        if k > self.n_layers:
+            w = _smoothstep((k - self.n_layers) / max(self.n_layers, 1))
+            s = ((1.0 - w) * s) + (w * self.interior_spacing)
+        return s
 
     def _layer_index(self, block, cell_base) -> int:
         """Off-wall layer index of a cell (plus ``k_offset``)."""
@@ -528,9 +544,10 @@ def build_topology_target(
         optimiser follows the boundary with uniformly sheared
         parallelograms instead of rotating the near-wall cells orthogonal
         to it and losing the layer heights. Unlisted boundaries keep the
-        plain orthogonal target. Defaults to the entities declared via
-        ``builder.set_boundary_layer(relax_orthogonality=...)``; passing
-        the argument here overrides that declaration.
+        plain orthogonal target. Defaults to the topology-level declaration
+        (``TopologyBuilder.relax_orthogonality`` /
+        ``ExplicitTopology(relax_orthogonality=...)``); passing the argument
+        here overrides it.
 
     Returns
     -------
@@ -633,7 +650,14 @@ def build_topology_target(
     if relax_orthogonality:
         relax_ids = {id(getattr(e, "entity", e)) for e in relax_orthogonality}
     else:
+        # The topology-level declaration (TopologyBuilder.relax_orthogonality /
+        # ExplicitTopology(relax_orthogonality=...)); per-spec entries remain
+        # only for hand-built topologies that never went through build().
         relax_ids = {
+            id(getattr(e, "entity", e))
+            for e in getattr(topology, "relax_orthogonality", ())
+        }
+        relax_ids |= {
             id(getattr(e, "entity", e))
             for spec in specs.values()
             for e in spec.get("relax_orthogonality", ())

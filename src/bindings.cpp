@@ -17,6 +17,7 @@
 namespace py = pybind11;
 
 #include "control_solve.hpp"
+#include "directional.hpp"
 #include "geometry.hpp"
 #include "metric.hpp"
 #include "patch.hpp"
@@ -292,6 +293,42 @@ std::vector<egg::real>
     return v;
 }
 
+// Host-side directional soft-energy total and analytic gradient over a sample
+// table (the SYCL-free oracle mirroring egg.smoothing.directional). X is
+// [n_nodes*D], grad accumulates in place ([n_nodes*D], caller-zeroed).
+template <int D>
+double directional_eval_impl(const std::vector<egg::real>& X,
+                             const std::vector<int>& nodes,
+                             const std::vector<int>& kind,
+                             const std::vector<egg::real>& ref,
+                             const std::vector<egg::real>& weight,
+                             egg::real eps,
+                             std::vector<egg::real>& grad)
+{
+    double e_total = 0.0;
+    for (std::size_t i = 0; i < weight.size(); ++i) {
+        const int arity = egg::dir_kind_arity(kind[i]);
+        if (arity == 0) {
+            throw py::value_error("directional_eval: unsupported sample kind " +
+                                  std::to_string(kind[i]));
+        }
+        const int* nd = nodes.data() + (i * 4);
+        egg::PtN<D> p[3];
+        for (int m = 0; m < arity; ++m) { p[m] = egg::load_pt<D>(X.data(), nd[m]); }
+        const egg::real* r = ref.data() + (i * static_cast<std::size_t>(D));
+        e_total += static_cast<double>(egg::dir_window_energy<D>(kind[i], p, r, weight[i], eps));
+        for (int m = 0; m < arity; ++m) {
+            egg::VecN<D> g {};
+            egg::MatN<D> h {};
+            egg::real e0 = egg::real(0);
+            egg::dir_window_accumulate<D>(kind[i], p, r, weight[i], eps, m, g, h, e0);
+            egg::real* row = grad.data() + (static_cast<std::size_t>(nd[m]) * D);
+            for (int k = 0; k < D; ++k) { row[k] += g[k]; }
+        }
+    }
+    return e_total;
+}
+
 template <int D>
 egg::SweepContextHostT<D>
   unpack_context(const py::dict& ctx_arrays, const double* X_data, std::size_t num_nodes)
@@ -355,6 +392,22 @@ egg::SweepContextHostT<D>
                 sg.curv_weight = extract_real(gd, "curv_weight");
             }
         }
+        // Directional soft-energy sample table: per-DOF fixed-K arrays
+        // (dir_nodes [ndof*K*4], dir_slot/dir_kind [ndof*K], dir_ref/dir_axis
+        // [ndof*K*D], dir_weight [ndof*K]). Node ids are global here;
+        // apply_structured_remap rewrites them to structured owner slots.
+        if (gd.contains("dir_k")) {
+            sg.dir_k = gd["dir_k"].cast<int>();
+            if (sg.dir_k > 0) {
+                sg.dir_eps = static_cast<egg::real>(gd["dir_eps"].cast<double>());
+                sg.dir_nodes = extract_int(gd, "dir_nodes");
+                sg.dir_slot = extract_int(gd, "dir_slot");
+                sg.dir_kind = extract_int(gd, "dir_kind");
+                sg.dir_ref = extract_real(gd, "dir_ref");
+                sg.dir_axis = extract_real(gd, "dir_axis");
+                sg.dir_weight = extract_real(gd, "dir_weight");
+            }
+        }
 
         // Typed per-entity-type SoA sub-dicts (the sole carrier of entity
         // data). Each present type contributes {tag, kFields, dof_local,
@@ -413,6 +466,19 @@ egg::SweepContextHostT<D>
     host.energy_stencil.W_inv = extract_real(es, "W_inv");
     // Optional per-sample energy weight; omission ⇒ unit weight (one shared row).
     if (es.contains("weight")) { host.energy_stencil.weight = extract_real(es, "weight"); }
+    // Directional soft-energy whole-sample table (energy totals); node ids are
+    // global here and remapped alongside gc/gn by apply_structured_remap.
+    if (es.contains("dir_num")) {
+        host.energy_stencil.dir_num = es["dir_num"].cast<std::size_t>();
+        if (host.energy_stencil.dir_num > 0) {
+            host.energy_stencil.dir_eps = static_cast<egg::real>(es["dir_eps"].cast<double>());
+            host.energy_stencil.dir_nodes = extract_int(es, "dir_nodes");
+            host.energy_stencil.dir_kind = extract_int(es, "dir_kind");
+            host.energy_stencil.dir_ref = extract_real(es, "dir_ref");
+            host.energy_stencil.dir_axis = extract_real(es, "dir_axis");
+            host.energy_stencil.dir_weight = extract_real(es, "dir_weight");
+        }
+    }
 
     // Fail fast on a malformed context before any device allocation / kernel.
     validate_context<D>(host);
@@ -980,6 +1046,24 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
             x = s;
         }
     }
+
+    // Directional-sample nodes likewise resolve to their OWNER structured slot;
+    // pad slots (-1) pass through. Both the per-DOF group tables and the
+    // energy-stencil whole-sample table carry global ids on the wire.
+    const auto remap_dir_nodes = [&](std::vector<int>& v) {
+        for (int& x : v) {
+            if (x < 0) { continue; }
+            const int s = g2s[static_cast<std::size_t>(x)];
+            if (s < 0) {
+                throw std::invalid_argument(
+                  "structured: a directional-sample node references a global node absent from "
+                  "every block's interior map");
+            }
+            x = s;
+        }
+    };
+    for (auto& g : host.groups) { remap_dir_nodes(g.dir_nodes); }
+    remap_dir_nodes(host.energy_stencil.dir_nodes);
 
     // Register any overflow nodes the lookup appended, so every consumer sized
     // off the layout (device X, metric scratch, gather-back staging, control
@@ -1732,6 +1816,61 @@ PYBIND11_MODULE(cpp_core, m)
       "Returns (mu, grad(9,), hess(81,)).");
 
     m.def(
+      "directional_eval",
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& nodes_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& kind_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& ref_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& weight_arr,
+         double eps) -> std::tuple<double, py::array_t<double>> {
+          if (X_arr.ndim() != 2 || (X_arr.shape(1) != 2 && X_arr.shape(1) != 3)) {
+              throw py::value_error("directional_eval: X must be (n_nodes, 2) or (n_nodes, 3)");
+          }
+          const int d = static_cast<int>(X_arr.shape(1));
+          const auto n = static_cast<std::size_t>(weight_arr.size());
+          if (nodes_arr.ndim() != 2 || nodes_arr.shape(1) != 4 ||
+              static_cast<std::size_t>(nodes_arr.shape(0)) != n ||
+              static_cast<std::size_t>(kind_arr.size()) != n || ref_arr.ndim() != 2 ||
+              static_cast<std::size_t>(ref_arr.shape(0)) != n || ref_arr.shape(1) != d) {
+              throw py::value_error("directional_eval: inconsistent sample-table shapes");
+          }
+          const std::vector<egg::real> X = narrow(X_arr);
+          const std::vector<egg::real> ref = narrow(ref_arr);
+          const std::vector<egg::real> weight = narrow(weight_arr);
+          const int* np_ = nodes_arr.data();
+          std::vector<int> nodes(np_, np_ + nodes_arr.size());
+          const int* kp = kind_arr.data();
+          std::vector<int> kind(kp, kp + kind_arr.size());
+          std::vector<egg::real> grad(X.size(), egg::real(0));
+          const auto e = d == 2 ? directional_eval_impl<2>(X,
+                                                           nodes,
+                                                           kind,
+                                                           ref,
+                                                           weight,
+                                                           static_cast<egg::real>(eps),
+                                                           grad)
+                                : directional_eval_impl<3>(X,
+                                                           nodes,
+                                                           kind,
+                                                           ref,
+                                                           weight,
+                                                           static_cast<egg::real>(eps),
+                                                           grad);
+          py::array_t<double> g_ret = to_f64(grad.data(), static_cast<py::ssize_t>(grad.size()));
+          g_ret = g_ret.reshape({X_arr.shape(0), X_arr.shape(1)});
+          return std::make_tuple(e, g_ret);
+      },
+      py::arg("X"),
+      py::arg("nodes"),
+      py::arg("kind"),
+      py::arg("ref"),
+      py::arg("weight"),
+      py::arg("eps") = 1e-12,
+      "Directional soft-energy total and analytic gradient over a sample table "
+      "(host-side oracle). X (n_nodes, d), nodes (n, 4) with -1 pads, kind (n,), "
+      "ref (n, d), weight (n,). Returns (energy, grad (n_nodes, d)).");
+
+    m.def(
       "geometry_project",
       [](const py::array_t<double, py::array::c_style | py::array::forcecast>& p_arr,
          int tag,
@@ -1772,8 +1911,7 @@ PYBIND11_MODULE(cpp_core, m)
          const py::array_t<double, py::array::c_style | py::array::forcecast>& records_arr,
          const py::list& seg_list) -> std::tuple<py::array_t<double>, py::array_t<double>> {
           if (q_arr.ndim() != 2 || (q_arr.shape(1) != 2 && q_arr.shape(1) != 3)) {
-              throw std::invalid_argument(
-                "geometry_project_batch: q must be (n, 2) or (n, 3)");
+              throw std::invalid_argument("geometry_project_batch: q must be (n, 2) or (n, 3)");
           }
           const auto n = static_cast<std::size_t>(q_arr.shape(0));
           const std::vector<egg::real> records = narrow(records_arr);
@@ -1806,7 +1944,11 @@ PYBIND11_MODULE(cpp_core, m)
               feet = py::array_t<double>({static_cast<py::ssize_t>(n), py::ssize_t {D}});
               double* fp = feet.mutable_data();
               egg::with_entity<D>(
-                static_cast<egg::EntityTag>(tag), soa, segs.data(), 0, [&](const auto& e) {
+                static_cast<egg::EntityTag>(tag),
+                soa,
+                segs.data(),
+                0,
+                [&](const auto& e) {
                     using E = std::decay_t<decltype(e)>;
                     // Curves and surfaces only: Free (tdim == D) has no foot.
                     if constexpr (E::tdim >= 1 && E::tdim < D) {
@@ -1830,9 +1972,8 @@ PYBIND11_MODULE(cpp_core, m)
                                 for (int k = 0; k < D; ++k) {
                                     bp[(i * D + static_cast<std::size_t>(k)) * K +
                                        static_cast<std::size_t>(c)] =
-                                      static_cast<double>(
-                                        f.basis[static_cast<std::size_t>(c)]
-                                               [static_cast<std::size_t>(k)]);
+                                      static_cast<double>(f.basis[static_cast<std::size_t>(c)]
+                                                                 [static_cast<std::size_t>(k)]);
                                 }
                             }
                         }

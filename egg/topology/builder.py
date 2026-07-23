@@ -58,6 +58,16 @@ class TopologyBuilder:
         self._corner_ids: dict[int, str] = {}
         self._corner_objs: dict[str, Any] = {}
         self._boundary_tags: dict[str, list[FaceSpec]] = {}
+        # Boundaries declared via relax_orthogonality() — entities, Edges, or
+        # names; resolved at build() against the associated entities.
+        self._relax_orthogonality: list = []
+        # Fan frames declared via fan_frame() — corner-name dicts, resolved
+        # and validated by BlockTopology at build().
+        self._fan_frames: list[dict] = []
+        # Parallel chains declared via parallel_to() — corner-name dicts with
+        # the boundary as given (entity, Edge, or name; names resolve at
+        # build()), resolved and validated by BlockTopology.
+        self._parallel_chains: list[dict] = []
 
     def add_corner(
         self, name: str, position: Any, *, fixed: bool = True
@@ -427,12 +437,9 @@ class TopologyBuilder:
             exact cumulative heights and leave the optimisation, so a
             follow-up TMOP pass smooths only the grid above them.
         relax_orthogonality : tuple of entities or Edges, optional
-            Domain-boundary entities that meet this wall obliquely: near
-            each, the clustering target shears the wall-normal direction
-            into the boundary's own direction, so the smoother follows it
-            with sheared parallelograms instead of rotating the near-wall
-            cells orthogonal to it and trading away the layer heights (see
-            :func:`~egg.smoothing.targets.build_topology_target`).
+            Deprecated — declare relaxed boundaries on the topology itself
+            via :meth:`relax_orthogonality`; entries given here are
+            forwarded there (with a :class:`DeprecationWarning`).
         blocks : tuple of str, optional
             Restrict the spec to the faces of these blocks. By default the
             clustering applies to every face associated with ``entity`` —
@@ -442,6 +449,16 @@ class TopologyBuilder:
         """
         if isinstance(entity, Edge):
             entity = entity.entity
+        if relax_orthogonality:
+            import warnings
+
+            warnings.warn(
+                "set_boundary_layer(relax_orthogonality=...) is deprecated; "
+                "use TopologyBuilder.relax_orthogonality(...)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._relax_orthogonality.extend(relax_orthogonality)
         self._boundary_layer_specs[id(entity)] = dict(
             first_height=first_height,
             growth=growth,
@@ -449,12 +466,91 @@ class TopologyBuilder:
             max_height=max_height,
             tangential_spacing=tangential_spacing,
             n_fixed=int(n_fixed),
-            relax_orthogonality=tuple(
-                e.entity if isinstance(e, Edge) else e for e in relax_orthogonality
-            ),
+            relax_orthogonality=(),
             blocks=tuple(blocks) if blocks is not None else None,
         )
         self._bl_entities[id(entity)] = entity
+        return self
+
+    def relax_orthogonality(self, *boundaries: Any) -> "TopologyBuilder":
+        """Relax the smoother's orthogonality requirements at these domain
+        boundaries; return ``self`` (fluent).
+
+        Near a listed boundary the mesh may follow the boundary's own
+        direction instead of being held orthogonal to whatever structure
+        (e.g. a boundary-layer clustering target) would otherwise rotate
+        cells against it — a wall-normal column shears into the boundary
+        rather than trading away its layer heights (see
+        :func:`~egg.smoothing.targets.build_topology_target`). The
+        declaration is independent of any clustering spec; consumers that
+        need it pick it up from the built topology's
+        ``relax_orthogonality`` tuple.
+
+        ``boundaries`` may be geometry entities, :class:`Edge`\\ s, or the
+        *names* of named associated geometry (resolved at :meth:`build`;
+        an unknown name raises there).
+        """
+        self._relax_orthogonality.extend(boundaries)
+        return self
+
+    def fan_frame(
+        self, corner: Any, *, through: tuple, normal: Any
+    ) -> "TopologyBuilder":
+        """Frame a singular fan corner; return ``self`` (fluent).
+
+        The two ``through`` legs are held smoothly collinear across the fan
+        — one continuous rail passing through the singular node — and the
+        ``normal`` leg orthogonal to them, so the fan's angular defect lands
+        in the remaining legs. ``corner`` and each leg's far corner may be
+        registered names or the Vector3/Node objects the corners were
+        declared with. Validation happens at :meth:`build`: the corner must
+        be a singular node and every leg one of its block edges.
+        """
+        thr = tuple(through)
+        if len(thr) != 2:
+            raise ValueError("fan_frame: 'through' must name exactly two corners")
+        self._fan_frames.append(
+            dict(
+                corner=self._corner_ref(corner),
+                through=(self._corner_ref(thr[0]), self._corner_ref(thr[1])),
+                normal=self._corner_ref(normal),
+            )
+        )
+        return self
+
+    def parallel_to(
+        self,
+        boundary: Any,
+        *,
+        chain: tuple,
+        weight: float = 1.0,
+        taper: float | None = None,
+    ) -> "TopologyBuilder":
+        """Hold a line of block edges loosely parallel to a boundary; return
+        ``self`` (fluent).
+
+        ``chain`` is an ordered corner list whose consecutive pairs must be
+        block edges (corners may be registered names or the Vector3/Node
+        objects they were declared with); ``boundary`` a geometry entity, an
+        :class:`Edge`, or the *name* of a named associated entity (resolved
+        at :meth:`build`). The smoother adds a soft directional energy on
+        each chain segment against the boundary's frozen normal — orientation
+        only, spacing stays free. ``weight`` scales the term; ``taper``, when
+        given, is the arclength scale of a Gaussian falloff from the chain's
+        singular vertices (default: uniform over the whole chain).
+        Validation happens at :meth:`build`: every consecutive pair must be a
+        block edge and the boundary must be associated to at least one face.
+        """
+        ch = tuple(self._corner_ref(c) for c in chain)
+        if len(ch) < 2:
+            raise ValueError("parallel_to: 'chain' needs at least two corners")
+        w = float(weight)
+        if not w > 0.0:
+            raise ValueError("parallel_to: weight must be positive")
+        t = None if taper is None else float(taper)
+        if t is not None and not t > 0.0:
+            raise ValueError("parallel_to: taper must be positive")
+        self._parallel_chains.append(dict(to=boundary, chain=ch, weight=w, taper=t))
         return self
 
     def _infer_connections(self) -> list[InterfaceConnection]:
@@ -558,7 +654,13 @@ class TopologyBuilder:
         connections = self._connections + self._infer_connections()
         associations = self._associations + self._infer_associations(connections)
         boundary_tags = self._auto_boundary_tags(associations, connections)
-        boundary_layer_specs = self._collect_boundary_layers(associations)
+        boundary_layer_specs, carried_relax = self._collect_boundary_layers(
+            associations
+        )
+        relax: list = []
+        for e in self._resolve_relax(associations) + carried_relax:
+            if not any(e is r for r in relax):
+                relax.append(e)
         return BlockTopology(
             d=self._d,
             corners=self._corners,
@@ -567,21 +669,61 @@ class TopologyBuilder:
             associations=associations,
             boundary_layer_specs=boundary_layer_specs,
             boundary_tags=boundary_tags,
+            relax_orthogonality=tuple(relax),
+            fan_frames=tuple(self._fan_frames),
+            parallel_chains=tuple(
+                dict(p, to=self._resolve_boundary(p["to"], associations))
+                for p in self._parallel_chains
+            ),
         )
+
+    def _resolve_relax(self, associations: list[Association]) -> list:
+        """The relax_orthogonality() declarations as resolved entities: Edges
+        unwrap, names look up the named associated entities (unknown -> raise)."""
+        by_name: dict[str, Any] = {}
+        for assoc in associations:
+            nm = getattr(assoc.entity, "name", None)
+            if nm is not None:
+                by_name.setdefault(nm, assoc.entity)
+        out = []
+        for o in self._relax_orthogonality:
+            if isinstance(o, str):
+                if o not in by_name:
+                    raise ValueError(
+                        f"relax_orthogonality: no associated entity is named {o!r}"
+                    )
+                out.append(by_name[o])
+            else:
+                out.append(o.entity if isinstance(o, Edge) else o)
+        return out
+
+    @staticmethod
+    def _resolve_boundary(o: Any, associations: list[Association]) -> Any:
+        """A parallel_to boundary reference as a resolved entity: Edges
+        unwrap, names look up the named associated entities (unknown -> raise)."""
+        if isinstance(o, str):
+            for assoc in associations:
+                if getattr(assoc.entity, "name", None) == o:
+                    return assoc.entity
+            raise ValueError(f"parallel_to: no associated entity is named {o!r}")
+        return o.entity if isinstance(o, Edge) else o
 
     def _collect_boundary_layers(
         self, associations: list[Association]
-    ) -> dict[int, dict]:
+    ) -> tuple[dict[int, dict], list]:
         """Explicit :meth:`set_boundary_layer` specs plus any carried on an
-        associated entity via :meth:`~egg.geometry.base.GeometryEntity.clustered`.
+        associated entity via :meth:`~egg.geometry.base.GeometryEntity.clustered`,
+        and the (deprecated) ``relax_orthogonality`` entries those carried specs
+        declare — resolved against the named associated entities, returned
+        separately so :meth:`build` folds them into the topology-level set.
 
         Keyed by ``id(entity)`` like the explicit specs (the smoother matches
         them against the associations the same way). An explicit
         ``set_boundary_layer`` for an entity wins over its carried spec, so the
-        builder method stays the override. ``relax_orthogonality`` entries given
-        by *name* are resolved here against the named associated entities.
+        builder method stays the override.
         """
         specs = dict(self._boundary_layer_specs)
+        carried_relax: list = []
         by_name: dict[str, Any] = {}
         for assoc in associations:
             nm = getattr(assoc.entity, "name", None)
@@ -599,14 +741,15 @@ class TopologyBuilder:
             if bl is None or id(ent) in specs:  # explicit set_boundary_layer wins
                 continue
             spec = dict(bl)
-            spec["relax_orthogonality"] = tuple(
+            carried_relax += [
                 r
                 for r in map(_resolve, bl.get("relax_orthogonality", ()))
                 if r is not None
-            )
+            ]
+            spec["relax_orthogonality"] = ()
             specs[id(ent)] = spec
             self._bl_entities.setdefault(id(ent), ent)
-        return specs
+        return specs, carried_relax
 
     def _auto_boundary_tags(
         self, associations: list[Association], connections: list

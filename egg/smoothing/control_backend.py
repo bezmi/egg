@@ -632,6 +632,7 @@ def run_control_topo(
     model_db: bool = True,
     phase: str = "barrier",
     session=None,
+    directional=None,
 ):
     """Device counterpart of
     :func:`egg.smoothing.control_topology.run_control_topo_ref` (D-general —
@@ -701,7 +702,10 @@ def run_control_topo(
             wire.get("p_w", np.zeros(0)),
         )
 
-        ctx = build_sweep_context(grid, target_fn)
+        # Directional soft-energy terms compose into the accept energies and
+        # the fine gradient of the reduced GN solve; references freeze from
+        # the grid's current node positions at this build.
+        ctx = build_sweep_context(grid, target_fn, directional=directional)
         bsc = build_block_structured_context(grid)
         sess = CppStructuredSweepSession(
             ctx, bsc, np.asarray(grid.global_nodes), device=device, control=wire

@@ -213,12 +213,12 @@ def build_capsule(
         # a right angle; declared for consistency with the phoebus example
         # (and so a slanted outflow, as in the gdtk original, keeps its
         # layer heights).
+        b.relax_orthogonality(outflow)
         b.set_boundary_layer(
             wall,
             first_height=bl_first_height,
             growth=bl_growth,
             n_fixed=n_fixed,
-            relax_orthogonality=(outflow,),
         )
 
     topology = b.build()

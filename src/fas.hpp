@@ -228,6 +228,9 @@ inline void reduce_linesearch_pair(sycl::queue& q,
                        eval(a0, e0_sum, m0_min);
                        eval(a1, e1_sum, m1_min);
                    });
+    // Directional soft-energy totals for both trials (accumulating reduction
+    // on the in-order queue; no-op when the stencil carries none).
+    reduce_directional_linesearch_pair<D>(q, es.dir, X, corr, a0, a1, out);
 }
 
 /// One V-cycle leg on coarse level @p li of @p levels, in place. On entry

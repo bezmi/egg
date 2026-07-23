@@ -201,6 +201,7 @@ def build_sweep_context(
     *,
     interface_ortho: dict | None = None,
     interface_c2: dict | None = None,
+    directional=None,
 ) -> SweepContext:
     """Build the sweep context: energy stencil, constraint encoding, C++ wire.
 
@@ -213,6 +214,11 @@ def build_sweep_context(
     dict of keyword args for
     :func:`egg.smoothing.interface_ortho.interface_ortho_samples` (``mode``,
     ``weight``). The frame is frozen from ``grid``'s current node positions.
+
+    ``directional`` (optional) composes the directional soft-energy terms: a
+    prebuilt :class:`~egg.smoothing.directional.DirectionalSamples` table, or a
+    dict of keyword args for
+    :func:`egg.smoothing.directional.build_directional_samples`.
     """
     from egg.smoothing.flat_context import cell_stencil
 
@@ -227,6 +233,14 @@ def build_sweep_context(
         from egg.smoothing.interface_c2 import curvature_windows
 
         curvature = curvature_windows(grid, **interface_c2)
+
+    # Directional soft-energy samples: a prebuilt DirectionalSamples table, or a
+    # dict of keyword args for build_directional_samples (references frozen from
+    # the grid's current node positions at this build).
+    if isinstance(directional, dict):
+        from egg.smoothing.directional import build_directional_samples
+
+        directional = build_directional_samples(grid, **directional)
 
     M = grid.global_node_count
     d = grid.topology.d
@@ -297,6 +311,7 @@ def build_sweep_context(
         w_inv=samp_w_inv,
         interface=iface,
         curvature=curvature,
+        directional=directional,
     )
 
     return SweepContext(

@@ -400,15 +400,8 @@ function applyView() {
   if (sel && !el.querySelector('.hl')) sel.style.display = 'none';
   if (savedVB) el.setAttribute('viewBox', savedVB);
   scaleMarkers(el);  // fresh markers are authored-size; match the current zoom
-  // A control net appearing for the first time (control_point run starting,
-  // or an imported net) switches its layer on; once seen, the user's toggle
-  // choice stands for the rest of the run.
-  const hasNet = !!el.querySelector('.layer-net');
-  if (hasNet && !window._eggNetSeen) {
-    const netCb = document.querySelector('.layer-toggle[data-layer="net"]');
-    if (netCb) netCb.checked = true;
-  }
-  window._eggNetSeen = hasNet;
+  // The net layer obeys the user's toggle like every other layer: a net
+  // appearing mid-run (a control_point solve starting) must not check it.
   document.querySelectorAll('.layer-toggle').forEach((cb) => {
     el.querySelectorAll('.layer-' + cb.dataset.layer).forEach((g) => {
       g.style.display = cb.checked ? '' : 'none';
@@ -1017,8 +1010,13 @@ function eggBuildGraph(data) {
     const m = /^u(\d+)$/.exec(id);
     if (m) seq = Math.max(seq, +m[1] + 1);
   }
+  // Sections the editor has no UI for (fan_frames, ...) must survive the
+  // load -> edit -> save round trip verbatim.
+  const extra = {};
+  for (const k of Object.keys(f))
+    if (k !== 'nodes' && k !== 'edges' && k !== 'res') extra[k] = f[k];
   return {geometry: data.geometry || [], res: f.res == null ? 10 : f.res,
-          nodes, edges, drawing: null, cursor: null, seq, dirty: false,
+          nodes, edges, extra, drawing: null, cursor: null, seq, dirty: false,
           hist: {undo: [], redo: []}, last: null,
           selN: new Set(), selE: new Set()};
 }
@@ -1040,7 +1038,7 @@ function eggToBlocking(g) {
     if (e.res) o.res = e.res;     // explicit resolution -> drives its loop
     return o;
   });
-  return {nodes, edges, res: g.res};
+  return Object.assign({}, g.extra || {}, {nodes, edges, res: g.res});
 }
 function eggSnapshot() { return JSON.stringify(eggToBlocking(eggEd)); }
 function eggRestore(json) {  // replace the graph, keep history + geometry

@@ -399,6 +399,11 @@ def _place_on_columns(
     return new
 
 
+# A pinned band may not claim more than this fraction of a pinched column
+# (respace_first_layers tapers the ladder there instead of failing).
+kTaper = 0.8
+
+
 def respace_first_layers(
     grid, topology=None, n: int | None = None, pin: bool = True
 ) -> np.ndarray:
@@ -432,6 +437,11 @@ def respace_first_layers(
 
     Notes
     -----
+    Where the requested band exceeds ``kTaper`` of a column's height (the
+    domain pinches, e.g. a stagnation corner), that column's ladder is
+    scaled to fit instead of failing — heights taper smoothly into the
+    pinch and stay exact everywhere else.
+
     Free rows that end up below the pinned band (a requested band taller
     than the smoothed equilibrium delivered) are re-placed just above it —
     still free — so the pin cannot invert the cells above the band and
@@ -492,19 +502,20 @@ def respace_first_layers(
             dist[0] = 0.0
             dist = np.maximum.accumulate(dist)
             dist += np.arange(len(dist)) * 1e-15
-            if cum_h[-1] >= dist[-1]:
-                raise ValueError(
-                    "respace_first_layers: pinned band height "
-                    f"{cum_h[-1]:.3e} does not fit in a column of height "
-                    f"{dist[-1]:.3e}"
-                )
-            jobs.append((dofs, pts, cum, dist))
+            # Where the domain pinches (a stagnation corner, a band closing
+            # onto another boundary) the requested band can exceed the whole
+            # column. Taper instead of failing: scale THIS column's ladder so
+            # the band takes at most kTaper of the column, leaving the rest
+            # for the free rows. dist varies continuously along the wall, so
+            # the taper blends smoothly into the exact-height columns.
+            scale = min(1.0, kTaper * float(dist[-1]) / float(cum_h[-1]))
+            jobs.append((dofs, pts, cum, dist, scale))
 
         # Place every free pinned row of every column in one batched
         # secant refinement (see _place_on_columns).
         pairs = [
             (j, k)
-            for j, (dofs, _, _, _) in enumerate(jobs)
+            for j, (dofs, _, _, _, _) in enumerate(jobs)
             for k in range(1, n_pin + 1)
             if grid.free_mask[int(dofs[k])]
         ]
@@ -516,7 +527,7 @@ def respace_first_layers(
                 np.stack([jobs[j][2] for j in pj]),
                 np.stack([jobs[j][3] for j in pj]),
                 assoc.entity,
-                cum_h[pk - 1],
+                cum_h[pk - 1] * np.array([jobs[j][4] for j in pj]),
             )
             for (j, k), new in zip(pairs, placed):
                 dof_k = int(jobs[j][0][k])
@@ -533,8 +544,8 @@ def respace_first_layers(
         # first row already beyond it (same along-column slide); they
         # stay free, so the follow-up TMOP pass re-equilibrates them
         # from a valid start.
-        band_top = float(cum_h[-1])
-        for dofs, pts, cum, dist in jobs:
+        for dofs, pts, cum, dist, scale in jobs:
+            band_top = float(cum_h[-1]) * scale
             j = n_pin + 1
             while j < len(dofs) - 1 and float(dist[j]) <= band_top:
                 j += 1

@@ -14,6 +14,7 @@ than directly.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from itertools import product
 from typing import Any
@@ -29,8 +30,16 @@ __all__ = [
     "InterfaceConnection",
     "Association",
     "Singularity",
+    "FanFrame",
+    "ParallelChain",
+    "ParallelWalkWarning",
     "BlockTopology",
 ]
+
+
+class ParallelWalkWarning(UserWarning):
+    """Some parallel-chain nodes have no logical column to their boundary;
+    the sample builder will fall back to frozen nearest-foot projection."""
 
 
 @dataclass
@@ -133,6 +142,49 @@ class Singularity:
     valence: int
 
 
+@dataclass
+class FanFrame:
+    """A user-directed frame at a singular fan corner.
+
+    The two ``through`` legs are held smoothly collinear across the fan
+    (one continuous rail passing through the singular node) and the
+    ``normal`` leg orthogonal to them; the remaining legs absorb the fan's
+    angular defect. Declared with corner names; resolution at
+    :class:`BlockTopology` construction fills in the fan corner's global
+    DOF and, per leg, the ordered fine-node DOF ids along its block edge
+    (the fan corner's own DOF first).
+    """
+
+    corner: str
+    through: tuple[str, str]
+    normal: str
+    dof: int = -1
+    through_rails: tuple[tuple[int, ...], tuple[int, ...]] = ((), ())
+    normal_rail: tuple[int, ...] = ()
+
+
+@dataclass
+class ParallelChain:
+    """A line of block edges held loosely parallel to an associated boundary.
+
+    Declared with an ordered corner list whose consecutive pairs are block
+    edges (via :meth:`~egg.topology.builder.TopologyBuilder.parallel_to`).
+    Resolution at :class:`BlockTopology` construction fills in ``dofs`` — the
+    ordered fine-node DOF ids along the whole chain — and ``wall_dofs``: per
+    chain node, the boundary fine-node DOF its block column reaches when
+    walked perpendicular to the chain (crossing interfaces), or ``-1`` where
+    no column reaches the boundary and the sample builder must fall back to
+    frozen nearest-foot projection.
+    """
+
+    to: Any
+    chain: tuple[str, ...]
+    weight: float = 1.0
+    taper: float | None = None
+    dofs: tuple[int, ...] = ()
+    wall_dofs: tuple[int, ...] = ()
+
+
 class BlockTopology:
     """Validated topology: corners, blocks, connectivity, associations.
 
@@ -151,6 +203,9 @@ class BlockTopology:
         associations: list[Association],
         boundary_layer_specs: dict | None = None,
         boundary_tags: dict[str, list[FaceSpec]] | None = None,
+        relax_orthogonality: tuple = (),
+        fan_frames: tuple = (),
+        parallel_chains: tuple = (),
     ):
         self.d = d
         self.corners = dict(corners)
@@ -159,6 +214,11 @@ class BlockTopology:
         self.associations = list(associations)
         # entity-id -> dict of BoundaryLayerTarget kwargs (first_height, growth, …)
         self.boundary_layer_specs = dict(boundary_layer_specs or {})
+        # Domain boundaries whose orthogonality requirements are relaxed —
+        # resolved entities, declared via TopologyBuilder.relax_orthogonality
+        # (or the deprecated clustering-spec kwargs, forwarded at build).
+        # Consumed by egg.smoothing.targets.build_topology_target.
+        self.relax_orthogonality: tuple = tuple(relax_orthogonality)
         # marker name -> block faces carrying that boundary-condition tag
         self.boundary_tags: dict[str, list[FaceSpec]] = {
             name: list(faces) for name, faces in (boundary_tags or {}).items()
@@ -170,6 +230,16 @@ class BlockTopology:
         self._resolve_orientations()
         self.grid = self._build_dof_map()
         self.singularities = self._detect_singularities()
+        # Declared fan frames (dicts of corner names, via
+        # TopologyBuilder.fan_frame) resolved against the DOF map: each must
+        # name a singular corner and three of its block edges.
+        self.fan_frames: list[FanFrame] = self._resolve_fan_frames(fan_frames)
+        # Declared parallel chains (dicts with a resolved boundary entity,
+        # via TopologyBuilder.parallel_to) resolved against the DOF map:
+        # ordered fine-node ids plus the per-node boundary correspondence.
+        self.parallel_chains: list[ParallelChain] = self._resolve_parallel_chains(
+            parallel_chains
+        )
 
     @property
     def entities(self) -> dict[str, Any]:
@@ -636,6 +706,301 @@ class BlockTopology:
             # valence == 2*d, or valence < 2*d on boundary -> regular node
 
         return singularities
+
+    def _corner_leg_rails(self, corner: str) -> dict[str, tuple[int, ...]]:
+        """Per block-edge neighbour of ``corner``: the fine-node DOF ids along
+        that edge, ordered from the corner outward (its own DOF first).
+
+        Blocks sharing the edge produce identical rails through the shared-DOF
+        map, so the first block found wins.
+        """
+        rails: dict[str, tuple[int, ...]] = {}
+        for bi, spec in enumerate(self.block_specs.values()):
+            if corner not in spec.corner_names:
+                continue
+            dof_map = self.grid.block_dof_maps[bi]
+            shape = spec.logical_shape
+            idxs = spec._corner_logical_indices(self.d)
+            slot_of = {t: s for s, t in enumerate(idxs)}
+            for slot, cname in enumerate(spec.corner_names):
+                if cname != corner:
+                    continue
+                cidx = idxs[slot]
+                for axis in range(self.d):
+                    nidx = tuple(1 - v if k == axis else v for k, v in enumerate(cidx))
+                    nname = spec.corner_names[slot_of[nidx]]
+                    if nname == corner or nname in rails:
+                        continue
+                    ix = [0 if v == 0 else shape[k] - 1 for k, v in enumerate(cidx)]
+                    n = shape[axis]
+                    span = range(n) if cidx[axis] == 0 else range(n - 1, -1, -1)
+                    line = []
+                    for t in span:
+                        ix[axis] = t
+                        line.append(int(dof_map[tuple(ix)]))
+                    rails[nname] = tuple(line)
+        return rails
+
+    def _resolve_fan_frames(self, declared: tuple) -> list[FanFrame]:
+        """Validate and resolve fan-frame declarations against the DOF map.
+
+        Each declaration must name a singular corner and three distinct block
+        edges incident to it (two through, one normal); anything else raises
+        with the offending corner/leg named.
+        """
+        if not declared:
+            return []
+        shared = self._get_shared_face_set()
+        frames: list[FanFrame] = []
+        seen: set[str] = set()
+        for f in declared:
+            corner = str(f["corner"])
+            through = tuple(str(c) for c in f["through"])
+            normal = str(f["normal"])
+            if corner in seen:
+                raise ValueError(f"fan_frame: {corner!r} is framed twice")
+            seen.add(corner)
+            if corner not in self.corners:
+                raise ValueError(f"fan_frame: unknown corner {corner!r}")
+            if len(through) != 2:
+                raise ValueError(
+                    f"fan_frame at {corner!r}: 'through' must name exactly two corners"
+                )
+            legs = (*through, normal)
+            if len(set(legs)) != 3:
+                raise ValueError(
+                    f"fan_frame at {corner!r}: through and normal must be "
+                    "three distinct edges"
+                )
+            rails = self._corner_leg_rails(corner)
+            for leg in legs:
+                if leg not in rails:
+                    raise ValueError(
+                        f"fan_frame at {corner!r}: no block edge {corner!r}-{leg!r}"
+                    )
+            # Valence = incident fine edges (distinct first-step DOFs); the
+            # regular count is 2d for an interior node, 2d-1 on the boundary.
+            valence = len({r[1] for r in rails.values() if len(r) > 1})
+            on_boundary = any(
+                (name, axis, side) not in shared
+                for name, spec in self.block_specs.items()
+                if corner in spec.corner_names
+                for axis in range(self.d)
+                for side in (0, 1)
+                if corner in spec.face_corner_names(axis, side, self.d)
+            )
+            regular = 2 * self.d - 1 if on_boundary else 2 * self.d
+            singular = valence > regular or (not on_boundary and valence != regular)
+            if not singular:
+                raise ValueError(
+                    f"fan_frame: {corner!r} is a regular node (valence "
+                    f"{valence}); frames apply only at singular fans"
+                )
+            frames.append(
+                FanFrame(
+                    corner=corner,
+                    through=(through[0], through[1]),
+                    normal=normal,
+                    dof=int(rails[legs[0]][0]),
+                    through_rails=(rails[through[0]], rails[through[1]]),
+                    normal_rail=rails[normal],
+                )
+            )
+        return frames
+
+    def _face_twin_map(self) -> dict:
+        """``(block_name, axis, side) -> (other_block_idx, other_axis,
+        other_side, mapper)`` for every shared face, where ``mapper`` carries a
+        full logical index across the interface (both directions covered)."""
+        block_names = list(self.block_specs.keys())
+        twin: dict = {}
+        for conn in self.interface_connections:
+            spec_a = self.block_specs[conn.face_a.block_name]
+            spec_b = self.block_specs[conn.face_b.block_name]
+            axis_a, side_a = conn.face_a.axis, conn.face_a.side
+            axis_b, side_b = conn.face_b.axis, conn.face_b.side
+            free_a = [k for k in range(self.d) if k != axis_a]
+            free_b = [k for k in range(self.d) if k != axis_b]
+            _, _, axis_map = self._interface_axis_map(conn)
+            shape_a, shape_b = spec_a.logical_shape, spec_b.logical_shape
+            fixed_a = 0 if side_a == 0 else shape_a[axis_a] - 1
+            fixed_b = 0 if side_b == 0 else shape_b[axis_b] - 1
+
+            def fwd(
+                logical,
+                *,
+                _free_a=free_a,
+                _free_b=free_b,
+                _map=axis_map,
+                _shape_b=shape_b,
+                _axis_b=axis_b,
+                _fixed_b=fixed_b,
+                _d=self.d,
+            ):
+                out = [0] * _d
+                out[_axis_b] = _fixed_b
+                for p, (q, rev) in enumerate(_map):
+                    kb = _free_b[q]
+                    v = logical[_free_a[p]]
+                    out[kb] = _shape_b[kb] - 1 - v if rev else v
+                return tuple(out)
+
+            def bwd(
+                logical,
+                *,
+                _free_a=free_a,
+                _free_b=free_b,
+                _map=axis_map,
+                _shape_b=shape_b,
+                _axis_a=axis_a,
+                _fixed_a=fixed_a,
+                _d=self.d,
+            ):
+                out = [0] * _d
+                out[_axis_a] = _fixed_a
+                for p, (q, rev) in enumerate(_map):
+                    kb = _free_b[q]
+                    v = logical[kb]
+                    out[_free_a[p]] = _shape_b[kb] - 1 - v if rev else v
+                return tuple(out)
+
+            bi_a = block_names.index(conn.face_a.block_name)
+            bi_b = block_names.index(conn.face_b.block_name)
+            twin[(conn.face_a.block_name, axis_a, side_a)] = (bi_b, axis_b, side_b, fwd)
+            twin[(conn.face_b.block_name, axis_b, side_b)] = (bi_a, axis_a, side_a, bwd)
+        return twin
+
+    def _walk_column(
+        self, bi: int, logical, axis: int, direction: int, target_faces, twin
+    ):
+        """From node ``logical`` of block ``bi``, walk along ``axis`` in
+        ``direction`` to the block face, crossing shared interfaces, until a
+        face in ``target_faces``. Returns ``(boundary_dof, steps)`` with
+        ``steps`` the fine cells traversed, or ``None`` (dead end / cycle)."""
+        block_names = list(self.block_specs.keys())
+        cur = list(logical)
+        steps = 0
+        seen: set = set()
+        while True:
+            name = block_names[bi]
+            shape = self.block_specs[name].logical_shape
+            side = 1 if direction > 0 else 0
+            face = shape[axis] - 1 if direction > 0 else 0
+            steps += abs(face - cur[axis])
+            cur[axis] = face
+            key = (name, axis, side)
+            if key in target_faces:
+                return int(self.grid.block_dof_maps[bi][tuple(cur)]), steps
+            hop = twin.get(key)
+            if hop is None or key in seen:
+                return None
+            seen.add(key)
+            bi, axis, other_side, mapper = hop
+            cur = list(mapper(tuple(cur)))
+            direction = -1 if other_side == 1 else 1
+
+    def _resolve_parallel_chains(self, declared: tuple) -> list[ParallelChain]:
+        """Validate and resolve parallel-chain declarations against the DOF map.
+
+        Each consecutive corner pair must be a block edge; the boundary must
+        be associated to at least one face. Correspondence is the logical
+        column walk: from every block home of a chain node, walk each
+        non-chain direction to a boundary face, crossing interfaces; the
+        nearest hit wins. Nodes no walk reaches get ``-1`` (projection
+        fallback) and a :class:`ParallelWalkWarning`.
+        """
+        if not declared:
+            return []
+        block_names = list(self.block_specs.keys())
+
+        resolved: list[tuple[dict, tuple[int, ...]]] = []
+        for p in declared:
+            chain = tuple(str(c) for c in p["chain"])
+            if len(chain) < 2:
+                raise ValueError("parallel_to: 'chain' needs at least two corners")
+            dofs: list[int] = []
+            for ca, cb in zip(chain[:-1], chain[1:]):
+                if ca not in self.corners or cb not in self.corners:
+                    missing = ca if ca not in self.corners else cb
+                    raise ValueError(f"parallel_to: unknown corner {missing!r}")
+                rail = self._corner_leg_rails(ca).get(cb)
+                if rail is None:
+                    raise ValueError(f"parallel_to: no block edge {ca!r}-{cb!r}")
+                dofs.extend(rail if not dofs else rail[1:])
+            resolved.append((dict(p, chain=chain), tuple(dofs)))
+
+        # Occurrences of every chain node: global dof -> [(block_idx, logical)]
+        all_dofs = sorted({g for _, dofs in resolved for g in dofs})
+        occ: dict[int, list[tuple[int, tuple[int, ...]]]] = {g: [] for g in all_dofs}
+        lookup = np.array(all_dofs)
+        for bi in range(len(block_names)):
+            dof_map = self.grid.block_dof_maps[bi]
+            for idx in np.argwhere(np.isin(dof_map, lookup)):
+                t = tuple(int(v) for v in idx)
+                occ[int(dof_map[t])].append((bi, t))
+        twin = self._face_twin_map()
+
+        def faces_of(to):
+            tname = getattr(to, "name", None)
+            return {
+                (a.face.block_name, a.face.axis, a.face.side)
+                for a in self.associations
+                if a.entity is to
+                or (tname is not None and getattr(a.entity, "name", None) == tname)
+            }
+
+        chains: list[ParallelChain] = []
+        for p, dofs in resolved:
+            to = p["to"]
+            target = faces_of(to)
+            label = getattr(to, "name", None) or repr(to)
+            if not target:
+                raise ValueError(f"parallel_to: {label} is not an associated boundary")
+            dof_set = set(dofs)
+            wall: list[int] = []
+            for g in dofs:
+                best = None  # (steps, tie-break order, wall_dof)
+                order = 0
+                for bi, logical in occ[g]:
+                    dof_map = self.grid.block_dof_maps[bi]
+                    shape = self.block_specs[block_names[bi]].logical_shape
+                    for axis in range(self.d):
+                        for direction in (-1, 1):
+                            ni = logical[axis] + direction
+                            if 0 <= ni < shape[axis]:
+                                step = list(logical)
+                                step[axis] = ni
+                                if int(dof_map[tuple(step)]) in dof_set:
+                                    continue  # runs along the chain itself
+                            hit = self._walk_column(
+                                bi, logical, axis, direction, target, twin
+                            )
+                            order += 1
+                            if hit is not None and (
+                                best is None or (hit[1], order) < best[:2]
+                            ):
+                                best = (hit[1], order, hit[0])
+                wall.append(-1 if best is None else best[2])
+            n_missing = sum(1 for w in wall if w < 0)
+            if n_missing:
+                warnings.warn(
+                    f"parallel_to {label}: {n_missing} of {len(wall)} chain "
+                    "nodes have no logical column to the boundary; frozen "
+                    "nearest-foot projection will be used for them",
+                    ParallelWalkWarning,
+                    stacklevel=2,
+                )
+            chains.append(
+                ParallelChain(
+                    to=to,
+                    chain=p["chain"],
+                    weight=float(p.get("weight", 1.0)),
+                    taper=p.get("taper"),
+                    dofs=dofs,
+                    wall_dofs=tuple(wall),
+                )
+            )
+        return chains
 
     # ---- Grid initialization ----
 

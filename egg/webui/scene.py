@@ -499,6 +499,23 @@ def _format_blocking(blocking: dict, indent: int) -> str:
     for e in blocking.get("edges") or []:
         out.append(f"{p2}{_py_literal(e)},")
     out.append(f"{p1}],")
+    # Sections beyond nodes/edges/res (fan_frames, parallel, 3D blocks)
+    # survive the rewrite verbatim: dicts and lists break one entry per line,
+    # sorted key order.
+    for key in sorted(k for k in blocking if k not in ("nodes", "edges", "res")):
+        v = blocking[key]
+        if isinstance(v, dict):
+            out.append(f"{p1}{json.dumps(str(key))}: {{")
+            for k2, v2 in v.items():
+                out.append(f"{p2}{json.dumps(str(k2))}: {_py_literal(v2)},")
+            out.append(f"{p1}}},")
+        elif isinstance(v, list):
+            out.append(f"{p1}{json.dumps(str(key))}: [")
+            for v2 in v:
+                out.append(f"{p2}{_py_literal(v2)},")
+            out.append(f"{p1}],")
+        else:
+            out.append(f"{p1}{json.dumps(str(key))}: {_py_literal(v)},")
     if blocking.get("res") is not None:
         out.append(f'{p1}"res": {_py_literal(blocking["res"])},')
     out.append(f"{pad}}}")
@@ -757,7 +774,12 @@ def validate_blocking(code: str, blocking: dict, path: str | None = None) -> dic
             ]
         }
     et = ExplicitTopology(
-        base=h.editable.base, geometry=h.editable.geometry, connectivity=blocking
+        base=h.editable.base,
+        geometry=h.editable.geometry,
+        connectivity=blocking,
+        relax_orthogonality=getattr(h.editable, "relax_orthogonality", ()),
+        fan_frames=getattr(h.editable, "fan_frames", None),
+        parallel=getattr(h.editable, "parallel", None),
     )
     topo, diags = et.flatten()
     _debug_blocking(blocking, diags)

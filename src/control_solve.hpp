@@ -553,6 +553,10 @@ template <int D> class ControlSessionT
             // Reduced gradient G = M_f^T g (sample dmu -> node gather -> pullback).
             control_sample_g_kernel<D>(q_, es_, X_, z_samples_.data(), objective);
             gather_to(y_.data());
+            // The directional soft-energy nodal gradient joins the fine
+            // gradient before the pullback — the accept energies already
+            // compose the term, so the model gradient must see it too.
+            scatter_directional_grad<D>(q_, es_.dir, X_, y_.data());
             pullback_to(G_.data());
             vec_amax(q_, nfd, G_.data(), scal_.data());
             download(1, s);
@@ -1352,6 +1356,7 @@ template <int D> class ControlSessionT
             // Reduced gradient Gq = Rᵀ(M_fᵀ g + A_pen·C_free).
             control_sample_g_kernel<D>(q_, es_, X_, z_samples_.data(), objective);
             gather_to(y_.data());
+            scatter_directional_grad<D>(q_, es_.dir, X_, y_.data());
             pullback_to(G_.data());
             gather_free_kernel<D>(q_, meta_.n_free, free_idx_.data(), C_.data(), cfree_.data());
             pen_apply_kernel<D>(q_,
@@ -1926,11 +1931,11 @@ template <int D> class ControlTopoSessionT
                 dbn_net_ = UsmBuffer<int> {q_, fnet.empty() ? std::vector<int> {0} : fnet};
                 dbn_flat_all_ = UsmBuffer<int> {q_, fflat.empty() ? std::vector<int> {0} : fflat};
                 dbn_has_ = UsmBuffer<int> {q_, fhas};
-                dbn_P_all_ = UsmBuffer<real> {
-                  q_,
-                  std::vector<real>(std::max<std::size_t>(1, n_face_total_) *
-                                      static_cast<std::size_t>(D * D),
-                                    0.0_r)};
+                dbn_P_all_ =
+                  UsmBuffer<real> {q_,
+                                   std::vector<real>(std::max<std::size_t>(1, n_face_total_) *
+                                                       static_cast<std::size_t>(D * D),
+                                                     0.0_r)};
                 if (n_face_total_) {
                     db_delta_all_ = UsmBuffer<real> {
                       q_,
@@ -2237,6 +2242,10 @@ template <int D> class ControlTopoSessionT
             // Reduced gradient qG = Rᵀ(M + db/dC)ᵀ g + penalty terms.
             control_sample_g_kernel<D>(q_, es_, X_, z_samples_.data(), objective);
             gather_alias_to(y_.data());
+            // The directional soft-energy nodal gradient joins the fine
+            // gradient before the pullback (accept energies compose the term
+            // via the reductions; the GN model keeps the plain shape Hessian).
+            scatter_directional_grad<D>(q_, es_.dir, X_, y_.data());
             db_adjoint_add(y_.data());
             pullback_all(wfull_.data());
             if (n_pen_) {
@@ -2705,10 +2714,9 @@ template <int D> class ControlTopoSessionT
                                    Xs,
                                    with_db,
                                    with_db ? dbn_idx_d_[ni].data() : nullptr,
-                                   with_db
-                                     ? dbn_P_all_.data() +
-                                         (face_pfx_h_[ni] * static_cast<std::size_t>(D * D))
-                                     : nullptr,
+                                   with_db ? dbn_P_all_.data() +
+                                               (face_pfx_h_[ni] * static_cast<std::size_t>(D * D))
+                                           : nullptr,
                                    db_delta_.data());
         tfi_ext_fill_block_kernel<D>(q_, nets_[ni].meta, db_delta_.data(), nets_[ni].b.data());
     }
