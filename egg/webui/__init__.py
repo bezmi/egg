@@ -45,7 +45,7 @@ def print(*args, **kwargs) -> None:  # noqa: A001 — ambient UI print, shadows 
     webui_print(*args, **kwargs)
 
 
-def editable(value, *, choices=None, label=None):
+def editable(value, *, choices=None, label=None, show_if=None):
     """Mark a literal as editable from the UI's run-parameters panel.
 
     Returns ``value`` unchanged — at runtime this is an identity function.
@@ -66,6 +66,17 @@ def editable(value, *, choices=None, label=None):
     the same type) renders a dropdown instead. ``label`` overrides the
     name shown in the panel, which otherwise comes from the assignment
     target, dict key, or keyword argument the call sits in.
+
+    ``show_if`` hides this parameter unless other parameters have the given
+    values, so the panel shows only what applies to the current choices. It
+    maps a parameter name to an allowed value or a list of allowed values;
+    the parameter appears only when every named parameter currently matches::
+
+        c2_weight=egg_webui.editable(0.0, label="interface C2 weight",
+                                     show_if={"smoother": ["jacobi", "fas"]}),
+
+    Here the C2 weight is shown for the jacobi / fas smoothers and hidden for
+    control_point (which has its own seam dials).
     """
     return value
 

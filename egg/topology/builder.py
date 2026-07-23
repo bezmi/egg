@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -24,8 +25,9 @@ from .block_topology import (
     FaceSpec,
     InterfaceConnection,
 )
+from .faces import FACE_NAMES, Face, as_face, is_face
 
-__all__ = ["TopologyBuilder"]
+__all__ = ["TopologyBuilder", "Block", "BlockFace", "BlockArray", "Face"]
 
 
 class TopologyBuilder:
@@ -58,6 +60,16 @@ class TopologyBuilder:
         self._corner_ids: dict[int, str] = {}
         self._corner_objs: dict[str, Any] = {}
         self._boundary_tags: dict[str, list[FaceSpec]] = {}
+        # Boundaries declared via relax_orthogonality() — entities, Edges, or
+        # names; resolved at build() against the associated entities.
+        self._relax_orthogonality: list = []
+        # Fan frames declared via fan_frame() — corner-name dicts, resolved
+        # and validated by BlockTopology at build().
+        self._fan_frames: list[dict] = []
+        # Parallel chains declared via parallel_to() — corner-name dicts with
+        # the boundary as given (entity, Edge, or name; names resolve at
+        # build()), resolved and validated by BlockTopology.
+        self._parallel_chains: list[dict] = []
 
     def add_corner(
         self, name: str, position: Any, *, fixed: bool = True
@@ -177,14 +189,39 @@ class TopologyBuilder:
         )
         return self
 
+    def block(
+        self,
+        name: str | None = None,
+        corners: tuple | None = None,
+        resolutions: tuple[int, ...] | None = None,
+        *,
+        sw: Any = None,
+        se: Any = None,
+        nw: Any = None,
+        ne: Any = None,
+        res: tuple[int, ...] | None = None,
+    ) -> "Block":
+        """Like :meth:`add_block`, but return a :class:`Block` handle for fluent
+        face operations (``.north.on(edge)``, ``.east.tag("wall")``,
+        ``.west.join(other.east)``) instead of the builder itself."""
+        self.add_block(name, corners, resolutions, sw=sw, se=se, nw=nw, ne=ne, res=res)
+        actual = name if name is not None else next(reversed(self._block_specs))
+        return Block(self, actual)
+
+    def __getitem__(self, name: str) -> "Block":
+        """``builder[name]`` -> a :class:`Block` handle for an existing block."""
+        if name not in self._block_specs:
+            raise KeyError(f"no block named {name!r}")
+        return Block(self, name)
+
     def connect(
         self,
         block_a: str,
-        axis_a: int,
-        side_a: int,
-        block_b: str,
-        axis_b: int,
-        side_b: int,
+        axis_a: Any = None,
+        side_a: Any = None,
+        block_b: Any = None,
+        axis_b: Any = None,
+        side_b: Any = None,
     ) -> "TopologyBuilder":
         """Declare that two block faces are shared.
 
@@ -192,15 +229,23 @@ class TopologyBuilder:
         corners. Orientation is auto-detected by corner-name matching at
         build time.
 
-        Parameters
-        ----------
-        block_a, block_b : str
-            Block names.
-        axis_a, axis_b : int
-            Logical axis the face lies on (0..d-1).
-        side_a, side_b : int
-            0 = low side, 1 = high side.
+        Two call forms:
+
+        - integer faces — ``connect(block_a, axis_a, side_a, block_b, axis_b, side_b)``
+        - named faces — ``connect(block_a, "east", block_b, "west")`` (a
+          :class:`Face` or its name in each ``axis`` slot)
         """
+        if is_face(axis_a):
+            # named form: connect(block_a, face_a, block_b, face_b)
+            fa, fb = as_face(axis_a), as_face(block_b)
+            self._check_face(fa.axis, fa.side, "connect", fa)
+            self._check_face(fb.axis, fb.side, "connect", fb)
+            block_b, axis_a, side_a, axis_b, side_b = (
+                side_a, fa.axis, fa.side, fb.axis, fb.side
+            )
+        else:
+            self._check_face(axis_a, side_a, "connect")
+            self._check_face(axis_b, side_b, "connect")
         for name in (block_a, block_b):
             if name not in self._block_specs:
                 raise ValueError(f"connect() references unknown block '{name}'")
@@ -215,26 +260,54 @@ class TopologyBuilder:
 
     def associate(
         self,
-        block_name: str,
-        axis: int,
-        side: int,
-        entity: Any,
+        block_name: Any = None,
+        axis: Any = None,
+        side: Any = None,
+        entity: Any = None,
+        *,
+        west: Sequence[str] | None = None,
+        east: Sequence[str] | None = None,
+        south: Sequence[str] | None = None,
+        north: Sequence[str] | None = None,
+        bottom: Sequence[str] | None = None,
+        top: Sequence[str] | None = None,
     ) -> "TopologyBuilder":
-        """Tag a block face as lying on a geometry entity.
+        """Tag block faces as lying on a geometry entity.
+
+        Three equivalent call forms:
+
+        - integer face — ``associate(block, axis, side, entity)``
+        - named face — ``associate(block, "north", entity)`` (or ``Face.NORTH``)
+        - batch — ``associate(entity, west=[...], north=[...], ...)`` attaches
+          one entity to a whole set of blocks on the named face(s), replacing a
+          per-block loop.
 
         Face nodes are snapped/slid on the entity during initialisation and
-        smoothing.
-
-        Parameters
-        ----------
-        block_name : str
-        axis, side : int
-            Face selector (axis 0..d-1; side 0 = low, 1 = high).
-        entity : GeometryEntity or Edge
-            An :class:`~egg.geometry.frontend2d.Edge` is unwrapped to its
-            underlying entity, so the pure-Python wrapper never reaches the
-            entity-encoding path.
+        smoothing. An :class:`~egg.geometry.frontend2d.Edge` is unwrapped to its
+        underlying entity.
         """
+        batch = {
+            Face.WEST: west,
+            Face.EAST: east,
+            Face.SOUTH: south,
+            Face.NORTH: north,
+            Face.BOTTOM: bottom,
+            Face.TOP: top,
+        }
+        if any(v is not None for v in batch.values()):
+            # batch form: the first positional is the entity, not a block name
+            for face, blocks in batch.items():
+                if blocks is None:
+                    continue
+                self._check_face(face.axis, face.side, "associate", face)
+                for b in blocks:
+                    self._associate_one(b, face.axis, face.side, block_name)
+            return self
+        ax, sd, ent = self._face_args(axis, side, entity, "associate")
+        self._associate_one(block_name, ax, sd, ent)
+        return self
+
+    def _associate_one(self, block_name, axis, side, entity) -> None:
         if isinstance(entity, Edge):
             entity = entity.entity
         if block_name not in self._block_specs:
@@ -242,14 +315,37 @@ class TopologyBuilder:
         self._associations.append(
             Association(face=FaceSpec(block_name, axis, side), entity=entity)
         )
-        return self
+
+    def _face_args(self, axis, side, entity, who):
+        """Normalise a single-face selector to ``(axis:int, side:int, entity)``.
+
+        Accepts the integer pair, or a named face (:class:`Face` or its name) in
+        the ``axis`` slot — in which case the entity was passed in the ``side``
+        slot, one argument earlier.
+        """
+        if is_face(axis):
+            face = as_face(axis)
+            self._check_face(face.axis, face.side, who, face)
+            return face.axis, face.side, side
+        self._check_face(axis, side, who)
+        return axis, side, entity
+
+    def _check_face(self, axis, side, who: str, face: Face | None = None) -> None:
+        """Reject an out-of-range face selector before it reaches the grid build."""
+        if not isinstance(axis, int) or not 0 <= axis < self._d:
+            extra = f" (face {face.value!r} needs d>{axis})" if face is not None else ""
+            raise ValueError(
+                f"{who}() axis must be in 0..{self._d - 1}, got {axis!r}{extra}"
+            )
+        if side not in (0, 1):
+            raise ValueError(f"{who}() side must be 0 (low) or 1 (high), got {side!r}")
 
     def tag_boundary(
         self,
         name: str,
         block_name: str,
-        axis: int,
-        side: int,
+        axis: Any = None,
+        side: Any = None,
     ) -> "TopologyBuilder":
         """Tag a block face with a named boundary marker (e.g. for export).
 
@@ -262,14 +358,14 @@ class TopologyBuilder:
         name : str
             Marker name, e.g. ``"inlet"`` or ``"wall"``.
         block_name : str
-        axis, side : int
-            Face selector (side 0 = low, 1 = high).
+        axis, side : int or Face
+            Face selector: the integer pair (side 0 = low, 1 = high), or a named
+            face (``"north"`` / :class:`Face.NORTH`) in the ``axis`` slot.
         """
+        ax, sd, _ = self._face_args(axis, side, None, "tag_boundary")
         if block_name not in self._block_specs:
             raise ValueError(f"tag_boundary() references unknown block '{block_name}'")
-        self._boundary_tags.setdefault(name, []).append(
-            FaceSpec(block_name, axis, side)
-        )
+        self._boundary_tags.setdefault(name, []).append(FaceSpec(block_name, ax, sd))
         return self
 
     def add_block_array(
@@ -286,7 +382,7 @@ class TopologyBuilder:
         corner_prefix: str = "c",
         block_prefix: str = "b",
         skip: set[tuple[int, int]] | None = None,
-    ) -> tuple[dict, list[list[str]]]:
+    ) -> "BlockArray":
         """Add an ``nib x njb`` array of blocks over a four-edge patch.
 
         The Eilmer ``registerFluidGridArray`` analogue: sub-block corners
@@ -321,12 +417,14 @@ class TopologyBuilder:
 
         Returns
         -------
-        corner : dict
-            Shared corner objects keyed ``(i, j)``.
-        block_names : list of list of str
-            Block-name grid ``block_names[i][j]``, for tagging boundaries
-            or attaching further structure. Skipped cells keep their name
-            in the grid but no block is declared for them.
+        BlockArray
+            A handle over the array: ``.block(i, j)`` / ``.name(i, j)`` /
+            ``.corner(i, j)`` and ``.edge("west"|"east"|"south"|"north")`` (the
+            outer blocks on a side, as :class:`Block` handles, skipped cells
+            omitted). It also unpacks as ``corner, names = add_block_array(...)``
+            for backward compatibility: ``corner`` is the shared-corner dict
+            keyed ``(i, j)`` and ``names`` the block-name grid ``names[i][j]``
+            (skipped cells keep their name but declare no block).
 
         Notes
         -----
@@ -382,7 +480,7 @@ class TopologyBuilder:
                 self.associate(names[0][j], 0, 0, west)
             if (nib - 1, j) not in skip:
                 self.associate(names[nib - 1][j], 0, 1, east)
-        return corner, names
+        return BlockArray(self, corner, names, nib, njb)
 
     def set_boundary_layer(
         self,
@@ -394,7 +492,8 @@ class TopologyBuilder:
         max_height: float | None = None,
         tangential_spacing: float | None = None,
         n_fixed: int = 1,
-        relax_orthogonality: tuple = (),
+        relax_orthogonality: Sequence = (),
+        blocks: tuple | None = None,
     ) -> "TopologyBuilder":
         """Request wall-normal clustering on every block face lying on ``entity``.
 
@@ -426,15 +525,45 @@ class TopologyBuilder:
             exact cumulative heights and leave the optimisation, so a
             follow-up TMOP pass smooths only the grid above them.
         relax_orthogonality : tuple of entities or Edges, optional
-            Domain-boundary entities that meet this wall obliquely: near
-            each, the clustering target shears the wall-normal direction
-            into the boundary's own direction, so the smoother follows it
-            with sheared parallelograms instead of rotating the near-wall
-            cells orthogonal to it and trading away the layer heights (see
-            :func:`~egg.smoothing.targets.build_topology_target`).
+            Deprecated — declare relaxed boundaries on the topology itself
+            via :meth:`relax_orthogonality`; entries given here are
+            forwarded there (with a :class:`DeprecationWarning`).
+        blocks : tuple of str, optional
+            Restrict the spec to the faces of these blocks. By default the
+            clustering applies to every face associated with ``entity`` —
+            on an internal interface (associated from both flanking
+            strips) that means both sides; name the blocks of one side to
+            cluster only there.
         """
         if isinstance(entity, Edge):
             entity = entity.entity
+        if not (isinstance(first_height, (int, float)) and first_height > 0):
+            raise ValueError(
+                f"set_boundary_layer() first_height must be > 0, got {first_height!r}"
+            )
+        if not (isinstance(growth, (int, float)) and growth >= 1):
+            raise ValueError(
+                f"set_boundary_layer() growth must be >= 1, got {growth!r}"
+            )
+        if not (isinstance(n_layers, int) and n_layers > 0):
+            raise ValueError(
+                f"set_boundary_layer() n_layers must be an int > 0, got {n_layers!r}"
+            )
+        if not (isinstance(n_fixed, int) and 0 <= n_fixed <= n_layers):
+            raise ValueError(
+                f"set_boundary_layer() n_fixed must be an int in 0..n_layers "
+                f"({n_layers}), got {n_fixed!r}"
+            )
+        if relax_orthogonality:
+            import warnings
+
+            warnings.warn(
+                "set_boundary_layer(relax_orthogonality=...) is deprecated; "
+                "use TopologyBuilder.relax_orthogonality(...)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._relax_orthogonality.extend(relax_orthogonality)
         self._boundary_layer_specs[id(entity)] = dict(
             first_height=first_height,
             growth=growth,
@@ -442,11 +571,91 @@ class TopologyBuilder:
             max_height=max_height,
             tangential_spacing=tangential_spacing,
             n_fixed=int(n_fixed),
-            relax_orthogonality=tuple(
-                e.entity if isinstance(e, Edge) else e for e in relax_orthogonality
-            ),
+            relax_orthogonality=(),
+            blocks=tuple(blocks) if blocks is not None else None,
         )
         self._bl_entities[id(entity)] = entity
+        return self
+
+    def relax_orthogonality(self, *boundaries: Any) -> "TopologyBuilder":
+        """Relax the smoother's orthogonality requirements at these domain
+        boundaries; return ``self`` (fluent).
+
+        Near a listed boundary the mesh may follow the boundary's own
+        direction instead of being held orthogonal to whatever structure
+        (e.g. a boundary-layer clustering target) would otherwise rotate
+        cells against it — a wall-normal column shears into the boundary
+        rather than trading away its layer heights (see
+        :func:`~egg.smoothing.targets.build_topology_target`). The
+        declaration is independent of any clustering spec; consumers that
+        need it pick it up from the built topology's
+        ``relax_orthogonality`` tuple.
+
+        ``boundaries`` may be geometry entities, :class:`Edge`\\ s, or the
+        *names* of named associated geometry (resolved at :meth:`build`;
+        an unknown name raises there).
+        """
+        self._relax_orthogonality.extend(boundaries)
+        return self
+
+    def fan_frame(
+        self, corner: Any, *, through: tuple, normal: Any
+    ) -> "TopologyBuilder":
+        """Frame a singular fan corner; return ``self`` (fluent).
+
+        The two ``through`` legs are held smoothly collinear across the fan
+        — one continuous rail passing through the singular node — and the
+        ``normal`` leg orthogonal to them, so the fan's angular defect lands
+        in the remaining legs. ``corner`` and each leg's far corner may be
+        registered names or the Vector3/Node objects the corners were
+        declared with. Validation happens at :meth:`build`: the corner must
+        be a singular node and every leg one of its block edges.
+        """
+        thr = tuple(through)
+        if len(thr) != 2:
+            raise ValueError("fan_frame: 'through' must name exactly two corners")
+        self._fan_frames.append(
+            dict(
+                corner=self._corner_ref(corner),
+                through=(self._corner_ref(thr[0]), self._corner_ref(thr[1])),
+                normal=self._corner_ref(normal),
+            )
+        )
+        return self
+
+    def parallel_to(
+        self,
+        boundary: Any,
+        *,
+        chain: tuple,
+        weight: float = 1.0,
+        taper: float | None = None,
+    ) -> "TopologyBuilder":
+        """Hold a line of block edges loosely parallel to a boundary; return
+        ``self`` (fluent).
+
+        ``chain`` is an ordered corner list whose consecutive pairs must be
+        block edges (corners may be registered names or the Vector3/Node
+        objects they were declared with); ``boundary`` a geometry entity, an
+        :class:`Edge`, or the *name* of a named associated entity (resolved
+        at :meth:`build`). The smoother adds a soft directional energy on
+        each chain segment against the boundary's frozen normal — orientation
+        only, spacing stays free. ``weight`` scales the term; ``taper``, when
+        given, is the arclength scale of a Gaussian falloff from the chain's
+        singular vertices (default: uniform over the whole chain).
+        Validation happens at :meth:`build`: every consecutive pair must be a
+        block edge and the boundary must be associated to at least one face.
+        """
+        ch = tuple(self._corner_ref(c) for c in chain)
+        if len(ch) < 2:
+            raise ValueError("parallel_to: 'chain' needs at least two corners")
+        w = float(weight)
+        if not w > 0.0:
+            raise ValueError("parallel_to: weight must be positive")
+        t = None if taper is None else float(taper)
+        if t is not None and not t > 0.0:
+            raise ValueError("parallel_to: taper must be positive")
+        self._parallel_chains.append(dict(to=boundary, chain=ch, weight=w, taper=t))
         return self
 
     def _infer_connections(self) -> list[InterfaceConnection]:
@@ -523,10 +732,11 @@ class TopologyBuilder:
                         self._corner_objs.get(n)
                         for n in spec.face_corner_names(axis, side, self._d)
                     ]
-                    if not objs or not all(isinstance(o, Node) for o in objs):
+                    node_objs = [o for o in objs if isinstance(o, Node)]
+                    if not node_objs or len(node_objs) != len(objs):
                         continue
-                    edge = objs[0].edge
-                    if not all(o.edge is edge for o in objs[1:]):
+                    edge = node_objs[0].edge
+                    if not all(o.edge is edge for o in node_objs[1:]):
                         continue
                     key = (spec.name, axis, side, id(edge.entity))
                     if key in declared:
@@ -549,8 +759,14 @@ class TopologyBuilder:
         """
         connections = self._connections + self._infer_connections()
         associations = self._associations + self._infer_associations(connections)
-        boundary_tags = self._auto_boundary_tags(associations)
-        boundary_layer_specs = self._collect_boundary_layers(associations)
+        boundary_tags = self._auto_boundary_tags(associations, connections)
+        boundary_layer_specs, carried_relax = self._collect_boundary_layers(
+            associations
+        )
+        relax: list = []
+        for e in self._resolve_relax(associations) + carried_relax:
+            if not any(e is r for r in relax):
+                relax.append(e)
         return BlockTopology(
             d=self._d,
             corners=self._corners,
@@ -559,21 +775,61 @@ class TopologyBuilder:
             associations=associations,
             boundary_layer_specs=boundary_layer_specs,
             boundary_tags=boundary_tags,
+            relax_orthogonality=tuple(relax),
+            fan_frames=tuple(self._fan_frames),
+            parallel_chains=tuple(
+                dict(p, to=self._resolve_boundary(p["to"], associations))
+                for p in self._parallel_chains
+            ),
         )
+
+    def _resolve_relax(self, associations: list[Association]) -> list:
+        """The relax_orthogonality() declarations as resolved entities: Edges
+        unwrap, names look up the named associated entities (unknown -> raise)."""
+        by_name: dict[str, Any] = {}
+        for assoc in associations:
+            nm = getattr(assoc.entity, "name", None)
+            if nm is not None:
+                by_name.setdefault(nm, assoc.entity)
+        out = []
+        for o in self._relax_orthogonality:
+            if isinstance(o, str):
+                if o not in by_name:
+                    raise ValueError(
+                        f"relax_orthogonality: no associated entity is named {o!r}"
+                    )
+                out.append(by_name[o])
+            else:
+                out.append(o.entity if isinstance(o, Edge) else o)
+        return out
+
+    @staticmethod
+    def _resolve_boundary(o: Any, associations: list[Association]) -> Any:
+        """A parallel_to boundary reference as a resolved entity: Edges
+        unwrap, names look up the named associated entities (unknown -> raise)."""
+        if isinstance(o, str):
+            for assoc in associations:
+                if getattr(assoc.entity, "name", None) == o:
+                    return assoc.entity
+            raise ValueError(f"parallel_to: no associated entity is named {o!r}")
+        return o.entity if isinstance(o, Edge) else o
 
     def _collect_boundary_layers(
         self, associations: list[Association]
-    ) -> dict[int, dict]:
+    ) -> tuple[dict[int, dict], list]:
         """Explicit :meth:`set_boundary_layer` specs plus any carried on an
-        associated entity via :meth:`~egg.geometry.base.GeometryEntity.clustered`.
+        associated entity via :meth:`~egg.geometry.base.GeometryEntity.clustered`,
+        and the (deprecated) ``relax_orthogonality`` entries those carried specs
+        declare — resolved against the named associated entities, returned
+        separately so :meth:`build` folds them into the topology-level set.
 
         Keyed by ``id(entity)`` like the explicit specs (the smoother matches
         them against the associations the same way). An explicit
         ``set_boundary_layer`` for an entity wins over its carried spec, so the
-        builder method stays the override. ``relax_orthogonality`` entries given
-        by *name* are resolved here against the named associated entities.
+        builder method stays the override.
         """
         specs = dict(self._boundary_layer_specs)
+        carried_relax: list = []
         by_name: dict[str, Any] = {}
         for assoc in associations:
             nm = getattr(assoc.entity, "name", None)
@@ -591,17 +847,18 @@ class TopologyBuilder:
             if bl is None or id(ent) in specs:  # explicit set_boundary_layer wins
                 continue
             spec = dict(bl)
-            spec["relax_orthogonality"] = tuple(
+            carried_relax += [
                 r
                 for r in map(_resolve, bl.get("relax_orthogonality", ()))
                 if r is not None
-            )
+            ]
+            spec["relax_orthogonality"] = ()
             specs[id(ent)] = spec
             self._bl_entities.setdefault(id(ent), ent)
-        return specs
+        return specs, carried_relax
 
     def _auto_boundary_tags(
-        self, associations: list[Association]
+        self, associations: list[Association], connections: list
     ) -> dict[str, list[FaceSpec]]:
         """Explicit :meth:`tag_boundary` tags plus an auto-derived marker for
         every associated face whose entity carries a
@@ -611,14 +868,143 @@ class TopologyBuilder:
         A face already carrying an explicit tag keeps it — a hand-written
         ``tag_boundary`` overrides the entity's tag on that face. An entity
         whose ``tag`` is ``None`` emits no marker (associated/drawn only).
+        A face that is a shared interface (connected to another block) never
+        receives an auto-derived marker: markers describe domain-boundary
+        faces, while an associated internal interface (e.g. a shock-fitted
+        band sliding on its spline) is a constraint only. An explicit
+        ``tag_boundary`` on such a face still fails validation.
         """
         tags = {name: list(faces) for name, faces in self._boundary_tags.items()}
         tagged = {(f.block_name, f.axis, f.side) for fs in tags.values() for f in fs}
+        shared = {
+            (f.block_name, f.axis, f.side)
+            for conn in connections
+            for f in (conn.face_a, conn.face_b)
+        }
         for assoc in associations:
             tag = getattr(assoc.entity, "tag", None)
             face = assoc.face
             key = (face.block_name, face.axis, face.side)
-            if tag is not None and key not in tagged:
+            if tag is not None and key not in tagged and key not in shared:
                 tags.setdefault(tag, []).append(face)
                 tagged.add(key)
         return tags
+
+
+class BlockFace:
+    """A ``(block, face)`` pair, from :attr:`Block.west` etc. Lowers to the
+    builder's :meth:`~TopologyBuilder.associate` / :meth:`tag_boundary` /
+    :meth:`connect`, returning the :class:`Block` so calls chain."""
+
+    def __init__(self, builder: "TopologyBuilder", block_name: str, face: Face):
+        self._b = builder
+        self.block_name = block_name
+        self.face = face
+
+    def on(self, entity: Any) -> "Block":
+        """Associate this face with the geometry ``entity`` it lies on."""
+        self._b.associate(self.block_name, self.face, entity)
+        return Block(self._b, self.block_name)
+
+    def tag(self, name: str) -> "Block":
+        """Tag this face with a named boundary marker."""
+        self._b.tag_boundary(name, self.block_name, self.face)
+        return Block(self._b, self.block_name)
+
+    def join(self, other: "BlockFace") -> "Block":
+        """Declare this face shared with ``other`` (another block's face)."""
+        self._b.connect(self.block_name, self.face, other.block_name, other.face)
+        return Block(self._b, self.block_name)
+
+    def __repr__(self) -> str:
+        return f"BlockFace({self.block_name!r}, {self.face.value!r})"
+
+
+class Block:
+    """A handle to a declared block. Its compass properties (:attr:`west`,
+    :attr:`east`, :attr:`south`, :attr:`north`, and in 3D :attr:`bottom` /
+    :attr:`top`) return a :class:`BlockFace` for fluent face operations; a face
+    invalid for the grid dimension (e.g. ``top`` on a 2D grid) raises."""
+
+    def __init__(self, builder: "TopologyBuilder", name: str):
+        self._b = builder
+        self.name = name
+
+    def face(self, face: Face | str) -> BlockFace:
+        """The named :class:`BlockFace` (validated against the grid dimension)."""
+        f = as_face(face)
+        self._b._check_face(f.axis, f.side, "block", f)
+        return BlockFace(self._b, self.name, f)
+
+    @property
+    def west(self) -> BlockFace:
+        return self.face(Face.WEST)
+
+    @property
+    def east(self) -> BlockFace:
+        return self.face(Face.EAST)
+
+    @property
+    def south(self) -> BlockFace:
+        return self.face(Face.SOUTH)
+
+    @property
+    def north(self) -> BlockFace:
+        return self.face(Face.NORTH)
+
+    @property
+    def bottom(self) -> BlockFace:
+        return self.face(Face.BOTTOM)
+
+    @property
+    def top(self) -> BlockFace:
+        return self.face(Face.TOP)
+
+    def __repr__(self) -> str:
+        return f"Block({self.name!r})"
+
+
+class BlockArray:
+    """The result of :meth:`TopologyBuilder.add_block_array`: a named ``nib x
+    njb`` grid of blocks with lookup and outer-edge helpers. Unpacks as
+    ``corner, names = ...`` for backward compatibility."""
+
+    def __init__(self, builder: "TopologyBuilder", corners, names, nib: int, njb: int):
+        self._b = builder
+        self.corners = corners
+        self.names = names
+        self.nib = nib
+        self.njb = njb
+
+    def __iter__(self):
+        # legacy unpacking: corner, names = add_block_array(...)
+        return iter((self.corners, self.names))
+
+    def name(self, i: int, j: int) -> str:
+        """Block name at grid cell ``(i, j)`` (i: west->east, j: south->north)."""
+        return self.names[i][j]
+
+    def corner(self, i: int, j: int):
+        """Shared corner object at ``(i, j)``."""
+        return self.corners[i, j]
+
+    def block(self, i: int, j: int) -> Block:
+        """:class:`Block` handle at grid cell ``(i, j)``."""
+        return Block(self._b, self.names[i][j])
+
+    def edge(self, face: Face | str) -> list[Block]:
+        """The array's outer blocks on ``face`` (``west`` / ``east`` / ``south``
+        / ``north``), as :class:`Block` handles, skipped cells omitted."""
+        f = as_face(face)
+        if f is Face.WEST or f is Face.EAST:
+            i = 0 if f is Face.WEST else self.nib - 1
+            row = [self.names[i][j] for j in range(self.njb)]
+        elif f is Face.SOUTH or f is Face.NORTH:
+            j = 0 if f is Face.SOUTH else self.njb - 1
+            row = [self.names[i][j] for i in range(self.nib)]
+        else:
+            raise ValueError(f"a 2D block array has no {f.value!r} outer edge")
+        return [Block(self._b, n) for n in row if n in self._b._block_specs]
+
+    def __repr__(self) -> str:
+        return f"BlockArray({self.nib}x{self.njb})"

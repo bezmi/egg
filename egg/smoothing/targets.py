@@ -85,8 +85,12 @@ class BoundaryLayerTarget:
     wall_side : int
         0 = low face, 1 = high face of ``wall_axis``.
     n_layers : int
-        Unused; retained for backwards compatibility (the geometric growth now
-        runs until it is capped by ``interior_spacing``).
+        Declared extent of the boundary layer. The geometric growth runs until
+        capped by ``interior_spacing``; beyond ``n_layers`` the profile
+        additionally blends to the isotropic interior spacing over another
+        ``n_layers`` (see :meth:`normal_spacing`), so a band whose growth never
+        reaches the cap (e.g. uniform layers with ``growth=1.0``) hands over to
+        the far field instead of demanding its layer height forever.
     interior_spacing : float
         Cap on the wall-normal spacing; defaults to ``tangential_spacing`` so
         the far field is isotropic.
@@ -144,9 +148,11 @@ class BoundaryLayerTarget:
         self.wall_axis = int(wall_axis)
         self.wall_side = int(wall_side)
         self.n_layers = int(n_layers)
-        self.tangential_spacing = float(
+        ts_val = (
             tangential_spacing if tangential_spacing is not None else interior_spacing
         )
+        assert ts_val is not None  # the check above guarantees one is set
+        self.tangential_spacing = float(ts_val)
         self.interior_spacing = float(
             interior_spacing
             if interior_spacing is not None
@@ -163,7 +169,13 @@ class BoundaryLayerTarget:
         # re-projecting ~80 distinct anchors 5000+ times. Keyed by position,
         # so anchors that slid along the wall between context builds miss
         # naturally; the entity itself never moves during smoothing.
+        # ``_warm_frames`` batch-fills the cache from a block's whole wall
+        # face in one ``project_many`` — the remaining per-anchor cost of a
+        # scalar projection each is what made many-segment composite walls
+        # (a spline through a dense point file) stall the first context
+        # build for minutes.
         self._frame_cache: dict[bytes, tuple] = {}
+        self._warmed_blocks: set[int] = set()
         # Layer index where the geometric growth reaches the isotropic
         # interior spacing — the extent of the anisotropic band. Boundary
         # shear fades above it (see __call__).
@@ -181,11 +193,23 @@ class BoundaryLayerTarget:
             self._k_iso = max(1, self.n_layers)
 
     def normal_spacing(self, k: int) -> float:
-        """Wall-normal target spacing at layer index ``k`` (capped growth)."""
+        """Wall-normal target spacing at layer index ``k``.
+
+        The geometric profile is capped at ``interior_spacing`` (and
+        ``max_height``); beyond ``n_layers`` it BLENDS to the isotropic
+        interior spacing over another ``n_layers``, so a band whose growth
+        never reaches the cap (e.g. uniform layers, growth 1.0) still hands
+        over to the far field instead of demanding its layer height through
+        the whole block and collapsing the band.
+        """
         s_geo = self.first_height * self.growth**k
         if self.max_height is not None:
             s_geo = min(s_geo, self.max_height)
-        return min(s_geo, self.interior_spacing)
+        s = min(s_geo, self.interior_spacing)
+        if k > self.n_layers:
+            w = _smoothstep((k - self.n_layers) / max(self.n_layers, 1))
+            s = ((1.0 - w) * s) + (w * self.interior_spacing)
+        return s
 
     def _layer_index(self, block, cell_base) -> int:
         """Off-wall layer index of a cell (plus ``k_offset``)."""
@@ -208,6 +232,46 @@ class BoundaryLayerTarget:
             idx[a] = min(max(idx[a], 0), block.logical_shape[a] - 1)
         return np.asarray(block.nodes[tuple(idx)], dtype=float)
 
+    def _warm_frames(self, block) -> None:
+        """Batch-fill the frame cache for every node of ``block``.
+
+        ``_wall_anchor`` anchors a cell at its own layer's node (not the
+        wall-face node of its column), so every block node is a potential
+        anchor. One C++ ``project_frame_batch`` call over all of them (feet
+        and tangents from the same Newton) replaces a scalar projection per
+        anchor (2D only; the normal is the tangent rotated 90 deg CCW,
+        matching ``entity.normal``). Entities without a SoA encoder fall
+        back to the Python batch methods; anchors the batch misses still
+        resolve through the scalar path.
+        """
+        if id(block) in self._warmed_blocks:
+            return
+        self._warmed_blocks.add(id(block))
+        d = block.nodes.ndim - 1
+        if d != 2 or not (
+            hasattr(self.entity, "project_many")
+            and hasattr(self.entity, "tangent_space_many")
+        ):
+            return
+        anchors = np.asarray(block.nodes, dtype=float).reshape(-1, d)
+        from egg.geometry.base import GeometryEntity
+
+        if type(self.entity).project_many is GeometryEntity.project_many:
+            from egg.geometry.entity_soa import project_frame_batch
+
+            feet, basis = project_frame_batch(self.entity, anchors)
+            t_hats = basis[:, :, 0]
+        else:
+            # An entity with its own projector (e.g. the OCCT-backed CAD
+            # surface) keeps owning it.
+            feet = np.asarray(self.entity.project_many(anchors), dtype=float)
+            t_hats = np.asarray(self.entity.tangent_space_many(feet), dtype=float)[
+                :, :, 0
+            ]
+        n_hats = np.stack([-t_hats[:, 1], t_hats[:, 0]], axis=1)
+        for a, q, n_hat, t_hat in zip(anchors, feet, n_hats, t_hats):
+            self._frame_cache.setdefault(a.tobytes(), (q, n_hat, t_hat))
+
     def _wall_frame(self, anchor: np.ndarray) -> tuple:
         """Memoized (foot point, normal, tangent) of the wall at ``anchor``."""
         key = anchor.tobytes()
@@ -225,6 +289,7 @@ class BoundaryLayerTarget:
         s_n = self.normal_spacing(k)
         s_t = self.tangential_spacing
 
+        self._warm_frames(block)
         anchor = self._wall_anchor(block, cell_base)
         q, n_hat, t_hat = self._wall_frame(anchor)
 
@@ -481,9 +546,10 @@ def build_topology_target(
         optimiser follows the boundary with uniformly sheared
         parallelograms instead of rotating the near-wall cells orthogonal
         to it and losing the layer heights. Unlisted boundaries keep the
-        plain orthogonal target. Defaults to the entities declared via
-        ``builder.set_boundary_layer(relax_orthogonality=...)``; passing
-        the argument here overrides that declaration.
+        plain orthogonal target. Defaults to the topology-level declaration
+        (``TopologyBuilder.relax_orthogonality`` /
+        ``ExplicitTopology(relax_orthogonality=...)``); passing the argument
+        here overrides it.
 
     Returns
     -------
@@ -532,6 +598,8 @@ def build_topology_target(
         if spec is None:
             continue
         face = assoc.face
+        if spec.get("blocks") is not None and face.block_name not in spec["blocks"]:
+            continue
         bi = block_names.index(face.block_name)
         s_t = spec["tangential_spacing"]
         if s_t is None:
@@ -584,7 +652,14 @@ def build_topology_target(
     if relax_orthogonality:
         relax_ids = {id(getattr(e, "entity", e)) for e in relax_orthogonality}
     else:
+        # The topology-level declaration (TopologyBuilder.relax_orthogonality /
+        # ExplicitTopology(relax_orthogonality=...)); per-spec entries remain
+        # only for hand-built topologies that never went through build().
         relax_ids = {
+            id(getattr(e, "entity", e))
+            for e in getattr(topology, "relax_orthogonality", ())
+        }
+        relax_ids |= {
             id(getattr(e, "entity", e))
             for spec in specs.values()
             for e in spec.get("relax_orthogonality", ())

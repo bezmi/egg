@@ -8,7 +8,7 @@
 
 """FastHTML "code as CAD" prototype: live SVG view of an egg geometry script.
 
-Run (after ``uv sync --group webui``)::
+Run (after ``uv sync --group ui``)::
 
     egg-webui [path/to/script.py]
 
@@ -45,10 +45,10 @@ import tempfile
 import threading
 import urllib.parse
 import time
+from typing import Any
 from pathlib import Path
 
-import numpy as np
-from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
 
@@ -64,6 +64,7 @@ from fasthtml.common import (
     Input,
     Label,
     Link,
+    Meta,
     NotStr,
     Option,
     Pre,
@@ -94,6 +95,7 @@ from .scene import (
     scene_bounds,
     set_editable_blocking,
     set_guard_param,
+    visible_params,
 )
 
 from egg.pipeline import PipelineConfig
@@ -111,6 +113,8 @@ def _find_repo_root(start: Path) -> Path | None:
 
 _REPO_ROOT = _find_repo_root(Path(__file__).resolve())
 EXAMPLES_DIR = _REPO_ROOT / "examples" / "2D" if _REPO_ROOT else None
+# Examples root (2D + 3D); the landing "examples" shortcut opens here.
+EXAMPLES_ROOT = _REPO_ROOT / "examples" if _REPO_ROOT else None
 DEFAULT_SCRIPT = EXAMPLES_DIR / "egg" / "egg.py" if EXAMPLES_DIR else None
 
 # The page's CSS / JS / static SVG live under static/ (loaded here, embedded
@@ -166,6 +170,48 @@ JS = _static("app.js")
 # the introspected /api/completions list as a fallback source.
 EDITOR_JS = _static("editor.js")
 
+# The user's deep config (delays, keybinds, auto-run policy) exposed to the
+# browser as window.eggConfig, read at import so it is set before app.js runs.
+# app.js / editor.js read it with defaults, so a missing key changes nothing.
+# Config changes take effect on the next server start.
+from .config import client_config as _client_config
+from .config import load_config
+from .security import SecurityMiddleware, canonical_path, configured_token
+
+CONFIG_JS = f"window.eggConfig = {json.dumps(_client_config())};"
+
+
+def _font_css() -> str:
+    """A ``:root`` override for the interface/editor fonts and base sizes from
+    ``[fonts]`` in config.toml: ``--font-ui`` / ``--font-editor`` (families) and
+    ``--fs-ui`` / ``--fs-editor`` (base px sizes that every other UI/editor size
+    is a factor of). Each configured family name is quoted and placed before
+    ``--font-mono-fallback`` so a font that is not installed falls back to the
+    built-in stack. Emitted into the head after app.css (which defines the
+    defaults) so it wins. Only a plain family name is honored (``[A-Za-z0-9 ._-]``)
+    and sizes must be a number in ``[6, 40]`` px, so nothing can break out of the
+    CSS string; unset or invalid values are skipped, and an empty string is
+    returned when nothing is set."""
+    fonts = load_config().get("fonts", {})
+    rules = []
+    for key, var in (("interface", "--font-ui"), ("editor", "--font-editor")):
+        name = str(fonts.get(key, "")).strip()
+        if name and re.fullmatch(r"[A-Za-z0-9 ._-]+", name):
+            rules.append(f'{var}: "{name}", var(--font-mono-fallback);')
+    for key, var in (("interface_size", "--fs-ui"), ("editor_size", "--fs-editor")):
+        size = fonts.get(key)
+        if isinstance(size, (int, float)) and not isinstance(size, bool) and 6 <= size <= 40:
+            rules.append(f"{var}: {size:g}px;")
+    return f":root {{ {' '.join(rules)} }}" if rules else ""
+
+
+FONT_CSS = _font_css()
+# The launch auth token, exposed to the page so JS can append it when it opens a
+# local URL in a separate browser (documentation in the system browser has no
+# cookie yet). Only an already-authenticated client can load this page, so this
+# does not widen exposure. Empty string when auth is off.
+TOKEN_JS = f"window.eggToken = {json.dumps(configured_token() or '')};"
+
 # All browser assets are served locally from /vendor (no CDN fallback, by
 # design). They are produced offline by tools/vendor_webui.py — at wheel-build
 # time, or via `egg-webui --dev` in a checkout. If they are absent there is no
@@ -173,8 +219,6 @@ EDITOR_JS = _static("editor.js")
 # reaching out to the network.
 if not vendor_ready():
     raise SystemExit(MISSING_MSG)
-
-_SPLIT_SRC = "/vendor/split.min.js"
 
 # prism-code-editor stylesheets (served locally from /vendor): the required
 # layout plus the enabled extensions. The catppuccin token/chrome theme lives
@@ -187,15 +231,28 @@ _PCE_CSS = (
     "cursor.css",
 )
 
+# default_hdrs=False: FastHTML's defaults pull htmx / fasthtml.js / surreal /
+# css-scope-inline from a CDN. We serve vendored copies from /vendor instead, so
+# the page never reaches the network at runtime and the CSP can stay 'self'.
+# htmx loads before the inline app.js that uses it. The ws htmx extension is not
+# used (the frame socket is a manual WebSocket), so it is not included.
 app, rt = fast_app(
-    pico=False,
-    exts="ws",
+    default_hdrs=False,
     hdrs=(
+        Meta(charset="utf-8"),
+        Meta(name="viewport",
+             content="width=device-width, initial-scale=1, viewport-fit=cover"),
+        Script(src="/vendor/htmx.min.js"),
+        Script(src="/vendor/fasthtml.js"),
+        Script(src="/vendor/surreal.js"),
+        Script(src="/vendor/scope.js"),
         Link(rel="icon", type="image/svg+xml", href=FAVICON, id="favicon"),
         *(Link(rel="stylesheet", href=f"/vendor/{c}") for c in _PCE_CSS),
         Style(CSS),
         Style(CATPPUCCIN),
-        Script(src=_SPLIT_SRC),
+        Style(NotStr(FONT_CSS)),  # [fonts] family/size overrides; inert when unset
+        Script(CONFIG_JS),  # window.eggConfig, before app.js reads it (Script leaves JS unescaped)
+        Script(TOKEN_JS),  # window.eggToken, for local links opened elsewhere
         Script(JS),
         Script(EDITOR_JS, type="module"),
     ),
@@ -213,7 +270,7 @@ app.router.routes.insert(
 # The Sphinx site. In an installed wheel it ships under egg/webui/docs
 # (built at wheel time by tools/vendor_webui.py --docs). In a checkout it is
 # whatever `egg-webui` refreshed into docs/_build/html at startup (also
-# `uv run --group docs sphinx-build -b html docs docs/_build/html`).
+# `uv run sphinx-build -b html docs docs/_build/html`).
 _PACKAGED_DOCS = _STATIC.parent / "docs"
 if _PACKAGED_DOCS.is_dir():
     DOCS_DIR = _PACKAGED_DOCS
@@ -226,26 +283,92 @@ if DOCS_DIR and DOCS_DIR.is_dir():
         0, Mount("/docs", app=StaticFiles(directory=DOCS_DIR, html=True), name="docs")
     )
 
-# --- websocket fan-out (server -> client frames pushed by the worker) ---
+# Treat the client/server link as privileged local IPC: enforce the launch auth
+# token, the Host/Origin allowlists, and the CSP on every request (HTTP and
+# WebSocket). Inert when no token is configured (a bare import or the tests).
+app.add_middleware(SecurityMiddleware)
 
-_clients: dict[int, tuple] = {}
-# "svg"/"quality": the latest streamed frame, so editor renders during a
-# run can keep the relaxing mesh in the canvas instead of flashing back
-# to a static TFI render. "log": the script's egg.webui_print lines this
-# run (streamed to the #runlog panel; bounded to the last LOG_MAX lines).
-_run: dict = {
-    "proc": None,
-    "reader": None,
-    "stop": False,
-    "tmp": None,
-    "svg": None,
-    "quality": None,
-    "log": [],
-}
-# Last completed smoothing run: {"code": str, "harvest": Harvest, "hist":
-# convergence series}. The SU2 export uses it so "what you see is what you
-# export" after a run; "hist" draws faded under the next run's chart.
-_last: dict = {"code": None, "harvest": None, "hist": None, "net": None}
+# --- per-session state (server pushes frames to the client) ---
+# A solver run's state is keyed by a session id: one per open UI (a browser tab,
+# the desktop window, another browser). The client makes the id and sends it with
+# every request and on the frame socket. So sessions stay separate: a run's frames
+# go only to the UI that started it, and several runs can go at once, one worker
+# each. The id is an opaque token, so any frontend that keeps a stable id works.
+
+_clients: dict[str, tuple] = {}  # sid -> (ws, loop): the frame socket
+_ws_sid: dict[int, str] = {}     # id(ws) -> sid, so a disconnect knows its session
+_sessions: dict[str, dict] = {}
+
+# A run survives its client disconnecting this long (a page reload reconnects
+# with the same sid inside the window); a closed tab is cleaned up after it.
+_ORPHAN_GRACE = 20.0
+
+
+def _new_run_state() -> dict:
+    # "svg"/"quality": the latest streamed frame, so editor renders during a run
+    # keep the relaxing mesh instead of flashing back to a static render. "log":
+    # this run's egg.webui_print lines (streamed to #runlog, bounded to LOG_MAX).
+    return {
+        "proc": None,
+        "reader": None,
+        "stop": False,
+        "tmp": None,
+        "resume_tmp": None,
+        "svg": None,
+        "quality": None,
+        "log": [],
+    }
+
+
+def _session(sid: str) -> dict:
+    """The state bag for a session id, created on first use."""
+    s = _sessions.get(sid)
+    if s is None:
+        s = _sessions[sid] = {
+            "run": _new_run_state(),
+            # Last completed run: {code, harvest, hist, net}. The SU2/net export
+            # uses it ("what you see is what you export"); hist draws faded under
+            # the next run's chart.
+            "last": {"code": None, "harvest": None, "hist": None, "net": None},
+            # Resume cache: node coords + code of the latest *stopped* run. While
+            # present the run button shows "resume" (a fresh run re-execs the
+            # script and seeds the grid to this cache). Cleared by a full
+            # completion or the reset button.
+            "resume": {"X": None, "code": None},
+        }
+    return s
+
+
+def _is_resumable(sess: dict | None) -> bool:
+    return bool(sess and sess["resume"]["X"] is not None)
+
+
+def _set_resume(sess: dict, X, code: str) -> None:
+    sess["resume"].update(X=X, code=code)
+
+
+def _clear_resume(sess: dict) -> None:
+    sess["resume"].update(X=None, code=None)
+
+
+def _kill_run(run: dict) -> None:
+    """Stop a session's worker if it is still alive."""
+    proc = run.get("proc")
+    if proc is not None and proc.poll() is None:
+        run["stop"] = True
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _cleanup_session(sid: str) -> None:
+    """Drop a session (and kill its run) once its client is gone for good."""
+    if sid in _clients:
+        return  # reconnected within the grace window
+    sess = _sessions.pop(sid, None)
+    if sess:
+        _kill_run(sess["run"])
 
 # Editor renders exec the script in this persistent worker process, not in
 # the server: the event loop only awaits, a script stuck in a loop is
@@ -255,18 +378,38 @@ _last: dict = {"code": None, "harvest": None, "hist": None, "net": None}
 _render_worker = RenderWorker()
 
 
-async def _render_scene(code: str, mode: str, path: str) -> SceneResult:
-    return await asyncio.wrap_future(_render_worker.submit(code, mode, path))
+async def _render_scene(code: str, mode: str, path: str, sid: str = "") -> SceneResult:
+    return await asyncio.wrap_future(_render_worker.submit(code, mode, path, sid=sid))
+
+
+def _ws_sid_of(ws) -> str:
+    """The session id a frame socket connected with (``/ws?sid=...``)."""
+    try:
+        return ws.query_params.get("sid") or ""
+    except Exception:
+        return ""
 
 
 # NB: async on purpose — fasthtml runs sync handlers in a threadpool,
 # where get_running_loop() has nothing to return.
 async def _on_conn(ws):
-    _clients[id(ws)] = (ws, asyncio.get_running_loop())
+    sid = _ws_sid_of(ws)
+    _ws_sid[id(ws)] = sid
+    _clients[sid] = (ws, asyncio.get_running_loop())
 
 
 async def _on_disconn(ws):
-    _clients.pop(id(ws), None)
+    sid = _ws_sid.pop(id(ws), None)
+    if sid is None:
+        return
+    # Only drop the client if this exact socket is still the current one (a fast
+    # reconnect may already have replaced it).
+    cur = _clients.get(sid)
+    if cur and cur[0] is ws:
+        _clients.pop(sid, None)
+    # A closed instance must not leave its worker running forever; a reload
+    # reconnects with the same sid inside the grace window and is spared.
+    threading.Timer(_ORPHAN_GRACE, _cleanup_session, args=(sid,)).start()
 
 
 @app.ws("/ws", conn=_on_conn, disconn=_on_disconn)
@@ -319,22 +462,24 @@ async def lsp_ws(ws, data):
         bridge.from_client(data)
 
 
-def _broadcast(html: str) -> None:
-    """Push pre-rendered HTML (OOB fragments) to every connected client."""
-    if not _clients:
-        print("webui: no websocket clients connected, frame dropped", flush=True)
-    for ws, loop in list(_clients.values()):
-        fut = asyncio.run_coroutine_threadsafe(ws.send_text(html), loop)
-        fut.add_done_callback(
-            lambda f: (
-                f.exception()
-                and print(f"webui: frame send failed: {f.exception()!r}", flush=True)
-            )
+def _broadcast(sid: str, html: str) -> None:
+    """Push pre-rendered HTML (OOB fragments) to one session's frame socket."""
+    client = _clients.get(sid)
+    if client is None:
+        print(f"webui: no client for session {sid!r}, frame dropped", flush=True)
+        return
+    ws, loop = client
+    fut = asyncio.run_coroutine_threadsafe(ws.send_text(html), loop)
+    fut.add_done_callback(
+        lambda f: (
+            f.exception()
+            and print(f"webui: frame send failed: {f.exception()!r}", flush=True)
         )
+    )
 
 
-def _running() -> bool:
-    p = _run["proc"]
+def _running(sess: dict) -> bool:
+    p = sess["run"]["proc"]
     return p is not None and p.poll() is None
 
 
@@ -357,18 +502,28 @@ _REFRESH_SVG = (
 )
 
 
-def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid"):
+def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid",
+             resumable: bool = False):
     runner = (
         [
             Button(
-                "run",
+                "resume" if resumable else "run",
+                id="run-btn",
                 cls="primary",
                 hx_post="/run",
                 hx_include="[name='code'],[name='path']",
                 hx_target="#viewbar",
                 hx_swap="outerHTML",
+                # A resume passes resume=1 so the worker seeds the grid from the
+                # cache; JS warns first if the file changed (see htmx:confirm).
+                hx_vals='{"resume": "1"}' if resumable else None,
+                data_resume="1" if resumable else None,
                 disabled=running or None,
-                title="run (Ctrl+Enter)",
+                title=(
+                    "resume from the stopped result (Ctrl+Enter)"
+                    if resumable
+                    else "run (Ctrl+Enter)"
+                ),
             ),
             Button(
                 "stop",
@@ -498,12 +653,13 @@ def _params_panel(code: str):
     between the view bar and the canvas). Edits post to /api/param, which
     rewrites the value's exact source span in the code buffer — the code
     stays the single source of truth, the panel is just a lens on it."""
-    params = guard_params(code)
+    params = visible_params(guard_params(code))
     if not params:
         return Div(id="params")
     fields = []
     for p in params:
-        common = dict(cls="param-input", data_param=p.name)
+        # A bag of dynamic DOM/htmx attributes splatted into the FT components.
+        common: dict[str, Any] = dict(cls="param-input", data_param=p.name)
         cur = (
             p.text[1:-1] if p.kind == "str" and len(p.text) >= 2 else p.text
         )  # unquoted current value, as posted back
@@ -553,9 +709,26 @@ def _edit_disabled_note(r: SceneResult):
     )
 
 
-def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
+def _err_box(text: str):
+    """The runtime-error overlay: a red egg-pane fixed across the whole bottom of
+    the app (the same system as the docs / warning panes), with a one-click copy
+    button. The text stays a selectable <pre>. A docs/warning pane covers it
+    while open (body.egg-pane-open in app.css)."""
+    return Div(
+        Div(
+            Span("error", cls="egg-pane-title"),
+            Button("copy", cls="copybtn", type="button", title="copy the error text"),
+            cls="egg-pane-head",
+        ),
+        Pre(text, cls="egg-pane-body copytext egg-pane-pre"),
+        cls="egg-pane egg-pane-error copybox",
+    )
+
+
+def view_fragment(r: SceneResult, code: str, mode: str = "grid", sess: dict | None = None):
     """Build the #view contents from a worker-rendered scene."""
-    running = _running()
+    run = sess["run"] if sess else None
+    running = _running(sess) if sess else False
     chips = []
     if running:
         # page loaded mid-run: read as running right away — the next
@@ -569,9 +742,12 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
     # edit view: a green/red validity chip for an editable topology
     if r.edit_data is not None and r.edit_data["editable"]:
         n = len(r.edit_data["diagnostics"])
+        # id ed-validity: the client updates this one chip in place as the user
+        # edits (eggShowValidity), so no second validity chip is created.
         chips.append(
             Span(
                 "valid" if n == 0 else f"{n} issue{'' if n == 1 else 's'}",
+                id="ed-validity",
                 cls="q-tag" if n == 0 else "bad",
             )
         )
@@ -586,16 +762,16 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
                     f"error at line {lines[-1]}", cls="errline bad", data_line=lines[-1]
                 )
             )
-        extras.append(Pre(r.error, cls="err"))
+        extras.append(_err_box(r.error))
     # Editing (or reloading) mid-run must not flash the canvas back to a
     # static TFI render: keep the streaming mesh; the fresh exec still
     # supplies the chips, errors, and stdout above/below it.
-    run_svg = _run["svg"] if running else None
+    run_svg = run["svg"] if (running and run) else None
     svg = run_svg or r.svg
-    quality = _run["quality"] if running and run_svg else r.quality
+    quality = run["quality"] if (running and run and run_svg) else r.quality
     edit_note = _edit_disabled_note(r) if mode == "edit" else None
     parts = [
-        view_bar(*chips, running=running, mode=mode),
+        view_bar(*chips, running=running, mode=mode, resumable=_is_resumable(sess)),
         # edit view with nothing editable: say so (draw tools stay hidden)
         *([edit_note] if edit_note is not None else []),
         # run parameters only make sense in grid view (where the run happens);
@@ -606,14 +782,16 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
         Div(id="chart"),
         # live script output (egg.webui_print) — populated by the run reader's
         # OOB frames; seeded here so a mid-run reload keeps what was printed
-        _log_panel("".join(_run["log"]) if running else ""),
+        _log_panel("".join(run["log"]) if (running and run) else ""),
         Div(*extras, id="viewextra"),
     ]
     # the edit view's structured blocking, for the client draw tools to read
     if r.edit_data is not None:
         parts.append(
             Script(
-                NotStr(json.dumps(r.edit_data)),
+                # fasthtml's Script accepts a NotStr child (raw, unescaped) at
+                # runtime, but its typed signature only declares str.
+                NotStr(json.dumps(r.edit_data)),  # type: ignore[arg-type]
                 type="application/json",
                 id="egg-edit-data",
             )
@@ -634,23 +812,24 @@ QUALITY_INTERVAL = 1.0  # s; quality stats recompute at most this often mid-run
 
 
 def _frame(
-    h, chips: list, running: bool, bounds, hist=None, prev_hist=None, quality=True
+    sid, sess, h, chips: list, running: bool, bounds, hist=None, prev_hist=None,
+    quality=True
 ) -> None:
     refresh_grid_layer(h.scene, h.grid)
-    svg = _run["svg"] = render_svg(h.scene, bounds=bounds)
+    svg = sess["run"]["svg"] = render_svg(h.scene, bounds=bounds)
     # Mid-run frames refresh only the chips so the control buttons stay put; the
     # terminal frame (running=False) swaps the whole bar to re-enable run / grey
     # out stop.
     bar = (
         view_chips(*chips, oob=True)
         if running
-        else view_bar(*chips, running=False, oob=True)
+        else view_bar(*chips, running=False, oob=True, resumable=_is_resumable(sess))
     )
     msg = to_xml(bar) + to_xml(
         Div(NotStr(svg), id="canvas", cls="canvas", hx_swap_oob="true")
     )
     if quality:
-        q = _run["quality"] = grid_quality(h.scene.grid_blocks)
+        q = sess["run"]["quality"] = grid_quality(h.scene.grid_blocks)
         msg += to_xml(_quality_panel(q, oob=True))
     if hist is not None:
         msg += to_xml(
@@ -660,14 +839,17 @@ def _frame(
                 hx_swap_oob="true",
             )
         )
-    _broadcast(msg)
+    _broadcast(sid, msg)
 
 
-def _fail_frame(msg: str, detail: str | None = None) -> None:
-    parts = to_xml(view_bar(Span(msg, cls="warn"), running=False, oob=True))
+def _fail_frame(sid, sess, msg: str, detail: str | None = None) -> None:
+    parts = to_xml(
+        view_bar(Span(msg, cls="warn"), running=False, oob=True,
+                 resumable=_is_resumable(sess))
+    )
     if detail:
-        parts += to_xml(Div(Pre(detail, cls="err"), id="viewextra", hx_swap_oob="true"))
-    _broadcast(parts)
+        parts += to_xml(Div(_err_box(detail), id="viewextra", hx_swap_oob="true"))
+    _broadcast(sid, parts)
 
 
 NO_RUN_MSG = (
@@ -676,11 +858,13 @@ NO_RUN_MSG = (
 )
 
 
-def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
+def _run_reader(sid: str, code: str, path: str, proc: subprocess.Popen) -> None:
     """Server-side half of a run: render + fan out the frames the worker
-    process streams back; keep the harvest for the SU2 export at the end."""
+    process streams back to this session; keep the harvest for the SU2 export."""
     import traceback as tb
 
+    sess = _session(sid)
+    run = sess["run"]
     done = False
     try:
         # The server keeps its own exec of the same script purely for
@@ -690,19 +874,23 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
         ns, _out, err = exec_script(code, path or None)
         reg = ns.get("__egg_webui_run__")
         if err is not None or reg is None:
-            _fail_frame("script error — fix it first" if err else NO_RUN_MSG)
+            _fail_frame(sid, sess, "script error, fix it first" if err else NO_RUN_MSG)
             proc.kill()
             return
         h = harvest(ns, init_grid=False)
         h.grid = reg[0]
+        assert h.grid is not None  # a registered run always carries a grid
         bounds = scene_bounds(h.scene)
         hist: dict[str, list[float]] = {"energy": [], "min det": []}
-        prev_hist = _last["hist"]  # previous run, faded under the chart
+        prev_hist = sess["last"]["hist"]  # previous run, faded under the chart
         net_bytes: bytes | None = None
         last_emit = 0.0
         last_q = 0.0  # quality stats debounce off the frame hot path
         last_phase = None
+        last_stage = None
+        latest_X = None  # newest streamed node coords, for the resume cache
         chips: list = []
+        assert proc.stdout is not None  # spawned with stdout=PIPE
         while not done:
             try:
                 msg = pickle.load(proc.stdout)
@@ -710,19 +898,19 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                 break
             match msg[0]:
                 case "fatal":
-                    _fail_frame(msg[1])
+                    _fail_frame(sid, sess, msg[1])
                     done = True
                 case "error":
-                    _fail_frame("pipeline failed", detail=msg[1])
+                    _fail_frame(sid, sess, "pipeline failed", detail=msg[1])
                     done = True
                 case "print":
                     # a script/pipeline egg.webui_print — append and push the
                     # (bounded) log to #runlog; interleaves with step frames
-                    log = _run["log"]
+                    log = run["log"]
                     log.append(msg[1])
                     if len(log) > LOG_MAX:
                         del log[: len(log) - LOG_MAX]
-                    _broadcast(to_xml(_log_panel("".join(log), oob=True)))
+                    _broadcast(sid, to_xml(_log_panel("".join(log), oob=True)))
                 case "net_state":
                     # Streamed per-step control lattice: update the overlay so
                     # the net animates with the grid (the paired step frame
@@ -734,6 +922,7 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                     # It arrives after the final step frame, so re-emit one
                     # frame carrying the net overlay.
                     net_bytes = msg[1]
+                    assert isinstance(net_bytes, bytes)
                     try:
                         from egg.io import load_control_net
 
@@ -745,6 +934,8 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                         pass  # export still works from the raw bytes
                     else:
                         _frame(
+                            sid,
+                            sess,
                             h,
                             chips,
                             running=False,
@@ -754,13 +945,14 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                             quality=False,
                         )
                 case "done":
-                    _last["code"], _last["harvest"] = code, h
-                    _last["net"] = net_bytes
+                    sess["last"]["code"], sess["last"]["harvest"] = code, h
+                    sess["last"]["net"] = net_bytes
                     if any(len(v) >= 2 for v in hist.values()):
-                        _last["hist"] = {k: list(v) for k, v in hist.items()}
+                        sess["last"]["hist"] = {k: list(v) for k, v in hist.items()}
                     done = True
                 case "step":
                     phase, info, X = msg[1], msg[2], msg[3]
+                    latest_X = X  # newest result, seeds a resume
                     # Mirror of pipeline._sync on the server-side grid.
                     h.grid.global_nodes = X
                     for bi, blk in enumerate(h.grid.blocks):
@@ -769,29 +961,47 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                         hist["energy"].append(e)
                     if (m := info.get("min_det")) is not None:
                         hist["min det"].append(m)
-                    stopped = _run["stop"]
-                    chips = [Span(phase, cls="phase")]
+                    stopped = run["stop"]
+                    # The named stage is the headline chip; the raw phase is
+                    # the fallback for events with no stage label.
+                    stage_label = info.get("stage") or phase
+                    chips = [Span(stage_label, cls="phase")]
                     chips += [
                         Span(_fmt_chip(k, v))
                         for k, v in info.items()
                         # scalar chips only (diagnostics vectors like the
                         # control phase's frame_jumps stay off the bar)
-                        if k != "min_det" and not isinstance(v, (list, tuple))
+                        if k not in ("min_det", "stage")
+                        and not isinstance(v, (list, tuple))
                     ]
                     if (c := _mindet_chip(info.get("min_det"))) is not None:
                         chips.append(c)
                     if stopped:
                         chips.append(Span("stopped", cls="warn"))
                     final = stopped or phase == "final"
+                    # Decide the resume cache before rendering the terminal bar
+                    # so the run button in that frame reflects it: a stop caches
+                    # the latest result (button -> "resume"); a full completion
+                    # clears it (button -> "run").
+                    if final:
+                        if stopped and latest_X is not None:
+                            _set_resume(sess, latest_X, code)
+                        elif not stopped:
+                            _clear_resume(sess)
                     now = time.perf_counter()
-                    # Phase transitions always emit, so fast runs show each stage.
+                    # Emit on any phase OR named-stage transition, so fast runs
+                    # show each step (two stages can share a phase, e.g. two
+                    # smoothers both emitting "tmop").
                     if (
                         final
                         or phase != last_phase
+                        or stage_label != last_stage
                         or now - last_emit >= FRAME_INTERVAL
                     ):
                         with_q = final or now - last_q >= QUALITY_INTERVAL
                         _frame(
+                            sid,
+                            sess,
                             h,
                             chips,
                             running=not final,
@@ -804,32 +1014,43 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                         if with_q:
                             last_q = now
                     last_phase = phase
+                    last_stage = stage_label
         if not done:
             # Channel closed without a terminal message: crash or hard kill.
             rc = proc.wait()
-            if _run["stop"]:
-                _fail_frame("stopped")
+            if run["stop"]:
+                # A hard kill (double-click stop) can end mid-chunk with no
+                # terminal frame; still cache the last result for resume.
+                if latest_X is not None:
+                    _set_resume(sess, latest_X, code)
+                _fail_frame(sid, sess, "stopped")
             else:
-                _fail_frame(f"pipeline failed (worker exited {rc})")
+                _clear_resume(sess)
+                _fail_frame(sid, sess, f"pipeline failed (worker exited {rc})")
     except Exception:
-        _fail_frame("pipeline failed", detail=tb.format_exc())
+        _clear_resume(sess)
+        _fail_frame(sid, sess, "pipeline failed", detail=tb.format_exc())
     finally:
         for pipe in (proc.stdout, proc.stdin):
             try:
-                pipe.close()
+                if pipe is not None:
+                    pipe.close()
             except Exception:
                 pass
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        if _run["tmp"]:
-            Path(_run["tmp"]).unlink(missing_ok=True)
-        _run.update(
+        if run["tmp"]:
+            Path(run["tmp"]).unlink(missing_ok=True)
+        if run.get("resume_tmp"):
+            Path(run["resume_tmp"]).unlink(missing_ok=True)
+        run.update(
             proc=None,
             reader=None,
             stop=False,
             tmp=None,
+            resume_tmp=None,
             svg=None,
             quality=None,
             log=[],
@@ -837,32 +1058,50 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
 
 
 @rt("/run", methods=["post"])
-def run_route(code: str, path: str = ""):
-    if _running():
+def run_route(code: str, path: str = "", resume: int = 0, sid: str = ""):
+    sess = _session(sid)
+    run = sess["run"]
+    if _running(sess):
         return view_bar(Span("already running", cls="warn"), running=True)
     fd, tmp = tempfile.mkstemp(suffix=".py", prefix="egg-webui-run-")
     with os.fdopen(fd, "w") as f:
         f.write(code)
+    # Resume: hand the worker the cached node coordinates (a .npy) so it seeds
+    # the grid before running the freshly re-exec'd stages. A plain run drops any
+    # stale cache so the next stop starts a fresh resume point.
+    resume_tmp = None
+    argv = [sys.executable, "-m", WORKER_MODULE, tmp, path]
+    if resume and _is_resumable(sess):
+        import numpy as np
+
+        rfd, resume_tmp = tempfile.mkstemp(suffix=".npy", prefix="egg-webui-resume-")
+        os.close(rfd)
+        np.save(resume_tmp, sess["resume"]["X"])
+        argv.append(resume_tmp)
+    else:
+        _clear_resume(sess)
     proc = subprocess.Popen(
-        [sys.executable, "-m", WORKER_MODULE, tmp, path],
+        argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,  # the frame channel; stderr stays on the console
     )
-    t = threading.Thread(target=_run_reader, args=(code, path, proc), daemon=True)
-    _run.update(proc=proc, reader=t, stop=False, tmp=tmp, log=[])
+    t = threading.Thread(target=_run_reader, args=(sid, code, path, proc), daemon=True)
+    run.update(proc=proc, reader=t, stop=False, tmp=tmp, resume_tmp=resume_tmp, log=[])
     t.start()
-    return view_bar(Span("starting…", cls="phase"), running=True)
+    label = "resuming…" if resume_tmp else "starting…"
+    return view_bar(Span(label, cls="phase"), running=True)
 
 
 @rt("/stop", methods=["post"])
-def stop():
-    proc = _run["proc"]
+def stop(sid: str = ""):
+    run = _session(sid)["run"]
+    proc = run["proc"]
     if proc is None or proc.poll() is not None:
         return ""
-    if _run["stop"]:
+    if run["stop"]:
         proc.kill()  # second press: hard kill (worker hung mid-chunk)
         return ""
-    _run["stop"] = True
+    run["stop"] = True
     try:
         proc.stdin.write(b"stop\n")
         proc.stdin.flush()
@@ -928,114 +1167,395 @@ def completions():
     return JSONResponse(_completions_cache)
 
 
+def _write_out(out: str, data: bytes | str):
+    """Write an export to a chosen destination path (this is a local tool, so
+    the picker's path is a real filesystem path). Returns a JSONResponse."""
+    if not out:
+        return JSONResponse({"error": "no destination chosen"}, status_code=400)
+    try:
+        p = canonical_path(out)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(data, str):
+            p.write_text(data)
+        else:
+            p.write_bytes(data)
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": f"write failed: {exc}"}, status_code=400)
+    return JSONResponse({"path": str(p)})
+
+
 @rt("/export/su2", methods=["post"])
-async def export_su2_route(code: str, path: str = ""):
-    """SU2 export of the current mesh — the last smoothed grid if the script
-    hasn't changed since that run (exported straight from the resident grid,
-    no exec), else a fresh TFI-initialized one built in the render worker."""
-    if _last["harvest"] is not None and _last["code"] == code:
-        h = _last["harvest"]
+async def export_su2_route(code: str, path: str = "", out: str = "", sid: str = ""):
+    """Write the current mesh as SU2 to ``out`` — the last smoothed grid if the
+    script hasn't changed since that run (straight from the resident grid, no
+    exec), else a fresh TFI-initialized one built in the render worker."""
+    last = _session(sid)["last"]
+    if last["harvest"] is not None and last["code"] == code:
+        h = last["harvest"]
         if h.grid is None:
-            return PlainTextResponse("no grid to export", status_code=400)
+            return JSONResponse({"error": "no grid to export"}, status_code=400)
         try:
             text = grid_to_su2_text(h.grid)
         except Exception as exc:
-            return PlainTextResponse(f"export failed: {exc}", status_code=400)
+            return JSONResponse({"error": f"export failed: {exc}"}, status_code=400)
     else:
         # big grids TFI-init in the worker; give them room beyond the
         # editor-render timeout
         text, why = await asyncio.wrap_future(
-            _render_worker.su2(code, path, timeout=120.0)
+            _render_worker.su2(code, path, timeout=120.0, sid=sid)
         )
         if text is None:
-            return PlainTextResponse(why, status_code=400)
-    return PlainTextResponse(
-        text,
-        headers={"Content-Disposition": 'attachment; filename="mesh.su2"'},
-    )
+            return JSONResponse({"error": why}, status_code=400)
+    return _write_out(out, text)
+
+
+@rt("/export/lmr", methods=["post"])
+async def export_lmr_route(
+    code: str, path: str = "", out: str = "", sid: str = "", overwrite: str = ""
+):
+    """Write the current mesh as gdtk/Eilmer lmr structured blocks + grid.lua into
+    the chosen directory ``out`` — the last smoothed grid if the script hasn't
+    changed since that run (straight from the resident grid, no exec), else a
+    fresh TFI-initialized one built in the render worker. Multi-file, so the
+    export writes the files itself rather than returning text.
+
+    Refuses (409 ``conflict``) to overwrite a directory that already holds an
+    export unless ``overwrite`` is set, so a hand-edited grid.lua is not
+    silently clobbered."""
+    if not out:
+        return JSONResponse({"error": "no destination chosen"}, status_code=400)
+    try:
+        out_dir = str(canonical_path(out))
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": f"bad destination: {exc}"}, status_code=400)
+    force = overwrite.strip().lower() in ("1", "true", "yes", "on")
+    if not force and os.path.exists(os.path.join(out_dir, "grid.lua")):
+        return JSONResponse(
+            {
+                "conflict": True,
+                "message": "This folder already contains an exported grid "
+                "(grid.lua).",
+            },
+            status_code=409,
+        )
+    last = _session(sid)["last"]
+    if last["harvest"] is not None and last["code"] == code:
+        h = last["harvest"]
+        if h.grid is None:
+            return JSONResponse({"error": "no grid to export"}, status_code=400)
+        try:
+            from egg.io.lmr import export_lmr, untagged_external_faces
+
+            written = export_lmr(h.grid, out_dir, overwrite=True)
+            untagged = untagged_external_faces(h.grid)
+        except Exception as exc:
+            return JSONResponse({"error": f"export failed: {exc}"}, status_code=400)
+    else:
+        payload, why = await asyncio.wrap_future(
+            _render_worker.lmr(code, out_dir, path, timeout=120.0, sid=sid)
+        )
+        if payload is None:
+            return JSONResponse({"error": why}, status_code=400)
+        written, untagged = payload["written"], payload["untagged"]
+    return JSONResponse({"path": out_dir, "files": len(written), "untagged": untagged})
+
+
+@rt("/export/svg", methods=["post"])
+def export_svg_route(svg: str, out: str = ""):
+    """Write the client-serialized scene SVG to ``out`` (the SVG is built in the
+    browser from the live DOM, so it arrives as text here)."""
+    return _write_out(out, svg)
 
 
 @rt("/export/net", methods=["post"])
-async def export_net_route(code: str, path: str = ""):
-    """Download the control net the last run of this script solved (the
-    worker ships the persisted npz alongside the final frame)."""
-    if _last["harvest"] is None or _last["code"] != code:
-        return PlainTextResponse(
-            "no solved control net for this script — run it first "
-            '(tmop_smoother="control_point")',
+def export_net_route(code: str = "", path: str = "", out: str = "", sid: str = ""):
+    """Write the resident grid's control net as an ``.npz`` to ``out`` — the
+    escape hatch for a run whose pipeline had no :class:`~egg.pipeline.Save`
+    stage. Uses the last smoothed grid's net (no re-run) when the script is
+    unchanged; 400 when there is no net (a nodal run with no Refit produces none).
+    """
+    last = _session(sid)["last"]
+    if last["harvest"] is None or last["code"] != code:
+        return JSONResponse(
+            {"error": "run the pipeline first, then save the net"}, status_code=400
+        )
+    h = last["harvest"]
+    net = getattr(h.grid, "control_net", None) if h.grid is not None else None
+    if net is None:
+        return JSONResponse(
+            {
+                "error": "this run produced no control net; use the control-point "
+                "smoother or add a Refit stage, then run again"
+            },
             status_code=400,
         )
-    if not _last["net"]:
-        return PlainTextResponse(
-            "the last run produced no control net — it needs "
-            'tmop_smoother="control_point"',
-            status_code=400,
-        )
-    return Response(
-        _last["net"],
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": 'attachment; filename="control_net.npz"'},
-    )
+    try:
+        from egg.io import save_control_net
+
+        buf = io.BytesIO()
+        save_control_net(net, buf)
+    except Exception as exc:
+        return JSONResponse({"error": f"export failed: {exc}"}, status_code=400)
+    return _write_out(out, buf.getvalue())
 
 
-@rt("/import/net", methods=["post"])
-async def import_net_route(request):
-    """Load a saved control net onto the script's grid and show the result.
+@rt("/open/eggy", methods=["post"])
+async def open_eggy_route(archive: str, dest: str, name: str):
+    """Extract a ``.eggy`` case archive (a path on this machine) into
+    ``dest/name`` and load its entry script.
 
-    The script must build the same grid (topology, resolutions, constraints)
-    the net was solved on — :func:`egg.io.load_control_net` rejects
-    mismatches. The evaluated grid replaces the view and becomes the resident
-    state (SU2/net export see it)."""
-    form = await request.form()
-    code = form.get("code", "")
-    path = form.get("path", "") or None
-    up = form.get("file")
-    if up is None:
-        return PlainTextResponse("no file uploaded", status_code=400)
-    data = await up.read()
+    Nothing runs: the unpacked script + its saved net and assets sit on disk
+    (a regrid script can resample from them). Returns ``{path, code}``.
+    """
 
     def work():
-        from egg.io import load_control_net
+        from egg.io import eggy
 
-        ns, out, err = exec_script(code, path)
-        if err is not None:
-            raise ValueError("script error — fix it first")
-        h = harvest(ns, init_grid=True)
-        reg = ns.get("__egg_webui_run__")
-        if reg is not None:
-            h.grid = reg[0]
-        if h.grid is None:
-            raise ValueError("the script builds no grid")
-        topo = load_control_net(h.grid, io.BytesIO(data))
-        topo.write_to_grid()
-        h.grid.control_net = topo
-        refresh_grid_layer(h.scene, h.grid)
-        refresh_net_layer(h.scene, h.grid)
-        svg = render_svg(h.scene, mode="grid")
-        stats = {
-            "blocks": len(h.scene.grid_blocks),
-            "net controls": sum(
-                int(np.prod(c.shape[:-1])) for _n, c in h.scene.net_blocks
-            ),
-        }
-        r = SceneResult(
-            svg,
-            stats,
-            h.scene.warnings,
-            out,
-            None,
-            h.scene.min_det,
-            0,
-            grid_quality(h.scene.grid_blocks),
-        )
-        return h, r
+        arc = str(canonical_path(archive))
+        if not eggy.is_eggy(arc):
+            raise ValueError("not a .eggy archive (a zip holding a script)")
+        leaf = Path(name).name
+        if not leaf or leaf in (".", ".."):
+            raise ValueError("invalid destination name")
+        target = canonical_path(dest) / leaf
+        target.mkdir(parents=True, exist_ok=True)
+        eggy.unpack(arc, str(target))
+        script = eggy.entry_script(str(target))
+        return script, Path(script).read_text()
 
     try:
-        h, r = await asyncio.to_thread(work)
+        script, code = await asyncio.to_thread(work)
     except Exception as exc:
-        return PlainTextResponse(f"import failed: {exc}", status_code=400)
-    _last["code"], _last["harvest"], _last["net"] = code, h, data
-    return view_fragment(r, code, mode="grid")
+        return JSONResponse({"error": f"open failed: {exc}"}, status_code=400)
+    return JSONResponse({"path": script, "code": code})
+
+
+def _open_in_file_manager(p: Path) -> None:
+    """Open a directory in the OS file manager. Runs on the machine hosting the
+    server (localhost in a browser, the user's session in the desktop app)."""
+    p.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(p)])
+    elif os.name == "nt":
+        os.startfile(str(p))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(p)])
+
+
+@rt("/open/dir", methods=["post"])
+def open_dir_route(which: str = "config"):
+    """Open the egg config directory (``which=config``) or the logs directory
+    (``which=logs``) in the OS file manager. The path is resolved server-side
+    (never taken from the client) so this can't open an arbitrary directory."""
+    from .config import config_dir, logs_dir
+
+    target = logs_dir() if which == "logs" else config_dir()
+    try:
+        _open_in_file_manager(Path(target))
+    except Exception as exc:
+        return JSONResponse({"error": f"could not open: {exc}"}, status_code=400)
+    return JSONResponse({"ok": True, "path": str(target)})
+
+
+# The starter script a new project is seeded with: a tiny self-contained
+# single-block topology that untangles + smooths, so a fresh project runs at once.
+_NEW_PROJECT_STARTER = '''\
+"""A new egg project. Build a topology, then register a run for the web UI."""
+
+from egg.geometry import Vector3
+from egg.topology.builder import TopologyBuilder
+
+
+def build():
+    b = TopologyBuilder(d=2)
+    b.add_block(
+        "square",
+        sw=Vector3(0, 0, 0), se=Vector3(1, 0, 0),
+        nw=Vector3(0, 1, 0), ne=Vector3(1, 1, 0),
+        res=(21, 21),
+    )
+    return b.build()
+
+
+topology = build()
+
+if __name__ == "__egg_webui__":
+    import egg.webui as egg_webui
+    from egg.pipeline import Untangle, JacobiSmoother, generate_steps
+
+    grid = topology.initialize_grid()
+    egg_webui.run(
+        grid,
+        generate_steps(
+            grid,
+            stages=[Untangle(name="untangle folds"),
+                    JacobiSmoother(name="shape smoothing")],
+        ),
+    )
+'''
+
+
+@rt("/new/project", methods=["post"])
+def new_project_route(dest: str, name: str):
+    """Create a new project directory ``dest/name`` with a starter script and
+    return ``{path, code}`` so the client can open it. The script is the bundled
+    default example when present, otherwise a minimal runnable topology."""
+
+    def work():
+        # name is one directory component; strip any path separators so it can
+        # not escape dest with a slash or "..".
+        leaf = Path(name).name
+        if not leaf or leaf in (".", ".."):
+            raise ValueError("invalid project name")
+        base = canonical_path(dest) / leaf
+        base.mkdir(parents=True, exist_ok=True)
+        script = base / f"{leaf}.py"
+        if script.exists():
+            raise ValueError(f"{script} already exists")
+        script.write_text(_NEW_PROJECT_STARTER)
+        return str(script), _NEW_PROJECT_STARTER
+
+    try:
+        script, code = work()
+    except Exception as exc:
+        return JSONResponse({"error": f"could not create project: {exc}"}, status_code=400)
+    return JSONResponse({"path": script, "code": code})
+
+
+# --- documentation lookup: map the symbol at point to its Sphinx section ---
+# The editor's "show documentation" prefers the already-built Sphinx HTML (rich
+# signatures/params) over the raw LSP hover. objects.inv gives FQN -> page#anchor;
+# the object's <dl> is lifted out of the page and embedded in the docs pane.
+
+_DOC_ROLES = {
+    "class", "function", "method", "attribute", "data",
+    "exception", "property", "module",
+}
+_inventory_cache: list[tuple[str, str, str]] | None = None
+
+
+def _load_inventory() -> list[tuple[str, str, str]]:
+    """Parse Sphinx ``objects.inv`` into ``(fqn, role, uri)`` for py objects.
+    Cached; empty when docs (or the inventory) are absent."""
+    global _inventory_cache
+    if _inventory_cache is not None:
+        return _inventory_cache
+    import zlib
+
+    out: list[tuple[str, str, str]] = []
+    try:
+        data = (DOCS_DIR / "objects.inv").read_bytes()  # type: ignore[operator]
+        body = zlib.decompress(data.split(b"\n", 4)[4]).decode()
+        for line in body.splitlines():
+            m = re.match(r"(.+?)\s+py:(\S+)\s+-?\d+\s+(\S+)\s+", line)
+            if m:
+                out.append((m.group(1), m.group(2), m.group(3)))
+    except Exception:
+        out = []
+    _inventory_cache = out
+    return out
+
+
+def _find_doc_object(name: str) -> tuple[Path, str] | None:
+    """Map a bare identifier (or FQN) to ``(html_file, anchor)``: the shortest
+    documented py object whose last name part matches."""
+    cands = [
+        e for e in _load_inventory()
+        if e[1] in _DOC_ROLES and (e[0] == name or e[0].rsplit(".", 1)[-1] == name)
+    ]
+    if not cands:
+        return None
+    # Prefer a real object over a bare module, then the shortest FQN.
+    cands.sort(key=lambda e: (e[1] == "module", len(e[0])))
+    fqn, _role, uri = cands[0]
+    file_part, _, anchor = uri.partition("#")
+    anchor = anchor.replace("$", fqn)  # Sphinx abbreviates the anchor as "$"
+    return DOCS_DIR / file_part, anchor  # type: ignore[operator]
+
+
+def _extract_dl_fragment(html_path: Path, anchor: str) -> str | None:
+    """Return the ``<dl>…</dl>`` describing ``anchor`` (depth-matched so a class
+    keeps its methods), or ``None`` if the page/anchor is missing."""
+    try:
+        s = html_path.read_text()
+    except OSError:
+        return None
+    idpos = s.find(f'id="{anchor}"')
+    if idpos < 0:
+        return None
+    start = s.rfind("<dl", 0, idpos)
+    if start < 0:
+        return None
+    depth, i, n = 0, start, len(s)
+    while i < n:
+        no = s.find("<dl", i)
+        nc = s.find("</dl>", i)
+        if nc < 0:
+            return None
+        if no != -1 and no < nc:
+            depth += 1
+            i = no + 3
+        else:
+            depth -= 1
+            i = nc + 5
+            if depth == 0:
+                return s[start:i]
+    return None
+
+
+@rt("/api/docsym")
+def docsym_route(name: str):
+    """The Sphinx documentation fragment for the symbol ``name`` (a bare
+    identifier), or ``{found: False}`` to let the client fall back to the LSP
+    hover. Serves only from the locally built docs."""
+    if not name or not DOCS_DIR or not DOCS_DIR.is_dir():
+        return JSONResponse({"found": False})
+    try:
+        found = _find_doc_object(name)
+        if not found:
+            return JSONResponse({"found": False})
+        html = _extract_dl_fragment(found[0], found[1])
+        if not html:
+            return JSONResponse({"found": False})
+        return JSONResponse({"found": True, "html": html, "fqn": found[1]})
+    except Exception:
+        return JSONResponse({"found": False})
+
+
+@rt("/save/eggy", methods=["post"])
+def save_eggy_route(code: str, path: str = "", out: str = ""):
+    """Pack the current case (script + its folder) into the ``.eggy`` at ``out``.
+
+    The editor's script is written to ``path`` first, then that script's whole
+    folder (assets and the net a Save stage wrote) is zipped verbatim. Save the
+    script to a file before saving the archive, so it has a folder to pack.
+    """
+    if not path:
+        return JSONResponse(
+            {"error": "save the script to a file first, then save the .eggy"},
+            status_code=400,
+        )
+    if not out:
+        return JSONResponse({"error": "no destination chosen"}, status_code=400)
+
+    def work():
+        from egg.io import deps
+
+        p = canonical_path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(code)
+        outp = canonical_path(out)
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        # pack the case folder AND bundle any egg.file_import() deps of the
+        # script (copied under deps/, their paths rewritten in the archive).
+        deps.pack_case(str(outp), str(p.parent), str(p))
+        return str(outp)
+
+    try:
+        outp = work()
+    except Exception as exc:
+        return JSONResponse({"error": f"save failed: {exc}"}, status_code=400)
+    return JSONResponse({"path": outp})
 
 
 # --- open/save: the server's filesystem IS the user's filesystem (local
@@ -1043,9 +1563,13 @@ async def import_net_route(request):
 
 
 @rt("/api/files")
-def api_files(dir: str = ""):
-    """List one directory: subdirs + .py files (hidden/__pycache__ skipped)."""
-    d = (Path(dir).expanduser() if dir else (_REPO_ROOT or Path.home())).resolve()
+def api_files(dir: str = "", ext: str = ".py"):
+    """List one directory: subdirs + files matching ``ext`` (``*`` for all;
+    hidden/__pycache__ skipped)."""
+    try:
+        d = canonical_path(dir) if dir else (_REPO_ROOT or Path.home()).resolve()
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     if not d.is_dir():
         return JSONResponse({"error": f"not a directory: {d}"}, status_code=400)
     try:
@@ -1053,20 +1577,21 @@ def api_files(dir: str = ""):
     except PermissionError:
         return JSONResponse({"error": f"permission denied: {d}"}, status_code=400)
     skip = lambda n: n.startswith(".") or n == "__pycache__"  # noqa: E731
+    keep = lambda p: ext == "*" or p.suffix == ext  # noqa: E731
     return JSONResponse(
         {
             "dir": str(d),
             "parent": str(d.parent),
             "dirs": [p.name for p in entries if p.is_dir() and not skip(p.name)],
-            "files": [p.name for p in entries if p.is_file() and p.suffix == ".py"],
+            "files": [p.name for p in entries if p.is_file() and keep(p)],
         }
     )
 
 
 @rt("/api/file")
 async def api_file_read(path: str, check: str = "1"):
-    p = Path(path).expanduser()
     try:
+        p = canonical_path(path)
         code = p.read_text()
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1080,15 +1605,402 @@ async def api_file_read(path: str, check: str = "1"):
     return JSONResponse(resp)
 
 
+@rt("/api/syntax", methods=["post"])
+def api_syntax(code: str):
+    """Whether ``code`` is syntactically valid Python (compile only, no exec).
+
+    The editor's auto-run gates on this so a half-typed line never re-execs into
+    an error. Only real syntax errors block it; type-checker complaints (which
+    do not stop the code running) never reach here.
+    """
+    try:
+        compile(code, "<editor>", "exec")
+        return JSONResponse({"ok": True})
+    except SyntaxError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)})
+
+
+@rt("/api/exists")
+def api_exists(path: str):
+    """Whether a path exists (and is a dir) — the picker uses this to prompt
+    before overwriting a file."""
+    try:
+        p = canonical_path(path)
+        return JSONResponse({"exists": p.exists(), "is_dir": p.is_dir()})
+    except Exception:
+        return JSONResponse({"exists": False, "is_dir": False})
+
+
 @rt("/api/file/save", methods=["post"])
 def api_file_save(path: str, code: str):
-    p = Path(path).expanduser()
     try:
+        p = canonical_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(code)
-        return JSONResponse({"path": str(p.resolve())})
+        return JSONResponse({"path": str(p)})
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+# --- file-picker sidebar: quick locations + persistent favourites ---
+
+# Favourites live in the user's config dir (XDG-aware) so they persist across
+# sessions and installs. One small JSON: {"favourites": ["/abs/path", ...]}.
+_CONFIG_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "egg"
+)
+_FAVOURITES_FILE = _CONFIG_DIR / "filepicker.json"
+
+
+def _xdg_user_dir(key: str, default_rel: str) -> Path:
+    """A freedesktop user dir (e.g. ``DESKTOP`` -> ~/Desktop), honouring
+    ~/.config/user-dirs.dirs when present, else the conventional ~ subdir."""
+    home = Path.home()
+    cfg = (
+        Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config"))
+        / "user-dirs.dirs"
+    )
+    if cfg.is_file():
+        try:
+            for line in cfg.read_text().splitlines():
+                line = line.strip()
+                if line.startswith(f"XDG_{key}_DIR"):
+                    val = line.split("=", 1)[1].strip().strip('"')
+                    return Path(val.replace("$HOME", str(home)))
+        except Exception:
+            pass
+    return home / default_rel
+
+
+def _quick_places() -> list[dict]:
+    """Sidebar shortcuts: home + a few XDG user dirs, the egg examples (in a
+    checkout), and the filesystem root — only those that exist, de-duplicated.
+    Each carries an ``icon`` key the client maps to a small inline SVG."""
+    cand: list[tuple[str, str, Path | None]] = [
+        ("Home", "home", Path.home()),
+        ("Desktop", "desktop", _xdg_user_dir("DESKTOP", "Desktop")),
+        ("Documents", "documents", _xdg_user_dir("DOCUMENTS", "Documents")),
+        ("Downloads", "downloads", _xdg_user_dir("DOWNLOAD", "Downloads")),
+        ("egg examples", "folder", EXAMPLES_DIR),
+        ("/", "drive", Path("/")),
+    ]
+    out: list[dict] = []
+    seen: set[str] = set()
+    for name, icon, p in cand:
+        if p is None:
+            continue
+        try:
+            if p.is_dir():
+                rp = str(p.resolve())
+                if rp not in seen:
+                    seen.add(rp)
+                    out.append({"name": name, "path": rp, "icon": icon})
+        except OSError:
+            pass
+    return out
+
+
+def _load_favourites() -> list[str]:
+    try:
+        data = json.loads(_FAVOURITES_FILE.read_text())
+        return [f for f in data.get("favourites", []) if isinstance(f, str)]
+    except Exception:
+        return []
+
+
+def _save_favourites(favs: list[str]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _FAVOURITES_FILE.write_text(json.dumps({"favourites": favs}, indent=2))
+
+
+# Recently opened files / visited directories, most-recent-first, capped.
+_RECENT_FILE = _CONFIG_DIR / "recent.json"
+_RECENT_MAX = 25
+
+# Per-directory visit counts drive "automatic" favourites: a directory visited
+# at least _AUTOFAV_MIN times is promoted to a favourite (clock icon, still
+# removable); at most _AUTOFAV_MAX are kept, the oldest promotion dropped.
+_USAGE_FILE = _CONFIG_DIR / "usage.json"
+_AUTOFAV_MIN = 5
+_AUTOFAV_MAX = 5
+
+
+def _load_recent() -> list[str]:
+    try:
+        data = json.loads(_RECENT_FILE.read_text())
+        return [f for f in data.get("recent", []) if isinstance(f, str)]
+    except Exception:
+        return []
+
+
+def _save_recent(items: list[str]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _RECENT_FILE.write_text(json.dumps({"recent": items[:_RECENT_MAX]}, indent=2))
+
+
+def _recent_entries() -> list[dict]:
+    """Recent paths that still exist, resolved to {path, name, is_dir}; stale
+    entries are silently dropped from the view (kept in the file until pushed
+    out by newer ones)."""
+    out: list[dict] = []
+    for p in _load_recent():
+        try:
+            pp = Path(p)
+            if pp.exists():
+                out.append({"path": p, "name": pp.name or p, "is_dir": pp.is_dir()})
+        except OSError:
+            pass
+    return out
+
+
+def _load_usage() -> dict:
+    try:
+        data = json.loads(_USAGE_FILE.read_text())
+        return {
+            "counts": {
+                k: v for k, v in data.get("counts", {}).items() if isinstance(v, int)
+            },
+            "auto": [a for a in data.get("auto", []) if isinstance(a, str)],
+        }
+    except Exception:
+        return {"counts": {}, "auto": []}
+
+
+def _save_usage(usage: dict) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _USAGE_FILE.write_text(json.dumps(usage, indent=2))
+
+
+def _record_visit(path: str) -> None:
+    """Front the recents with ``path``; for a directory, bump its visit count
+    and auto-promote it to a favourite past the threshold (unless it is already
+    a manual favourite)."""
+    try:
+        p = str(Path(path).expanduser().resolve())
+    except OSError:
+        return
+    _save_recent([p] + [x for x in _load_recent() if x != p])
+    try:
+        is_dir = Path(p).is_dir()
+    except OSError:
+        is_dir = False
+    if not is_dir:
+        return
+    usage = _load_usage()
+    counts, auto = usage["counts"], usage["auto"]
+    counts[p] = counts.get(p, 0) + 1
+    if counts[p] >= _AUTOFAV_MIN and p not in auto and p not in _load_favourites():
+        auto.append(p)
+        while len(auto) > _AUTOFAV_MAX:
+            auto.pop(0)
+    _save_usage({"counts": counts, "auto": auto})
+
+
+def _favourite_entries() -> list[dict]:
+    """Manual favourites (``auto: false``) then automatic ones (``auto: true``),
+    existing directories only, de-duplicated."""
+    manual = _load_favourites()
+    out = [{"path": p, "name": Path(p).name or p, "auto": False} for p in manual]
+    for p in _load_usage()["auto"]:
+        if p in manual:
+            continue
+        try:
+            if Path(p).is_dir():
+                out.append({"path": p, "name": Path(p).name or p, "auto": True})
+        except OSError:
+            pass
+    return out
+
+
+@rt("/api/places")
+def api_places():
+    return JSONResponse(
+        {
+            "quick": _quick_places(),
+            "recent": _recent_entries(),
+            "favourites": _favourite_entries(),
+        }
+    )
+
+
+@rt("/api/recent", methods=["post"])
+def api_recent(path: str):
+    """Record a visit (recents + usage/auto-favourite); returns both lists."""
+    _record_visit(path)
+    return JSONResponse(
+        {"recent": _recent_entries(), "favourites": _favourite_entries()}
+    )
+
+
+@rt("/api/clientlog", methods=["post"])
+def api_clientlog(level: str = "error", msg: str = "", src: str = ""):
+    """Log a browser-side error to this process's stderr, so the tee writes it
+    to the logfile. JS console errors (browser devtools or the desktop webview)
+    are otherwise lost. Truncated to keep a runaway page from flooding the log."""
+    tag = level.strip()[:16] or "error"
+    text = (msg or "").replace("\r", " ")[:2000]
+    where = (" @ " + src[:300]) if src else ""
+    try:
+        print(f"js {tag}: {text}{where}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+    return JSONResponse({"ok": True})
+
+
+@rt("/api/favourites", methods=["post"])
+def api_favourites(path: str, action: str = "add"):
+    """Add/remove one directory from the favourites; returns the updated
+    favourite entries (manual + automatic) for the sidebar. Removing an
+    automatic favourite also resets its usage count so it isn't re-promoted at
+    once; manually adding one that was automatic converts it to manual."""
+    try:
+        p = str(Path(path).expanduser().resolve())
+    except OSError:
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    favs = _load_favourites()
+    usage = _load_usage()
+    if action == "remove":
+        favs = [f for f in favs if f != p]
+        if p in usage["auto"]:
+            usage["auto"] = [a for a in usage["auto"] if a != p]
+            usage["counts"][p] = 0
+            _save_usage(usage)
+    elif p not in favs:
+        favs.append(p)
+        if p in usage["auto"]:  # promoted to a manual favourite: de-dup
+            usage["auto"] = [a for a in usage["auto"] if a != p]
+            _save_usage(usage)
+    _save_favourites(favs)
+    return JSONResponse({"favourites": _favourite_entries()})
+
+
+# --- file-picker recursive fuzzy search ---
+
+# A search bails to a confirm prompt once it has visited this many entries
+# without a prior go-ahead (starting a walk at $HOME is otherwise a foot-gun);
+# results are capped so a broad query can't return an unbounded list.
+_SEARCH_CONFIRM_AFTER = 10_000
+_SEARCH_MAX_RESULTS = 300
+# In-flight searches, keyed by the client-supplied id, so /api/search/cancel
+# (running on a separate threadpool thread) can signal the walk to stop.
+_searches: dict[str, threading.Event] = {}
+# Live counts per in-flight search ({scanned, matches}) that the client polls
+# via /api/search/progress to drive the "searching…" counter.
+_search_progress: dict[str, dict] = {}
+
+
+def _fuzzy_score(query: str, name: str) -> int | None:
+    """Case-insensitive subsequence match of ``query`` in ``name``. Returns a
+    score (higher is a better match) or None when it doesn't match at all."""
+    if not query:
+        return 0
+    q = query.lower()
+    n = name.lower()
+    qi = 0
+    score = 0
+    prev = -2
+    for i, ch in enumerate(n):
+        if qi < len(q) and ch == q[qi]:
+            score += 6 if i == prev + 1 else 1  # reward contiguous runs
+            if i == 0:
+                score += 5  # and a match at the very start
+            prev = i
+            qi += 1
+    return score if qi == len(q) else None
+
+
+@rt("/api/search")
+def api_search(dir: str, q: str, id: str, confirm: str = "0"):
+    """Recursively fuzzy-match .py files and folders under ``dir``.
+
+    Runs synchronously in fasthtml's threadpool (so the walk never blocks the
+    event loop) and checks a per-id cancel flag that ``/api/search/cancel``
+    sets. With ``confirm != "1"`` it stops and returns ``needs_confirm`` once
+    it has scanned :data:`_SEARCH_CONFIRM_AFTER` entries, so a huge tree
+    (e.g. $HOME) needs an explicit go-ahead before the full walk.
+    """
+    root = Path(dir).expanduser()
+    if not root.is_dir():
+        return JSONResponse({"error": f"not a directory: {root}"}, status_code=400)
+    root = str(root.resolve())
+    confirmed = confirm == "1"
+    cancel = threading.Event()
+    _searches[id] = cancel
+    _search_progress[id] = {"scanned": 0, "matches": 0}
+    matches: list[tuple[int, str, bool, str]] = []
+    scanned = 0
+    try:
+        stack = [root]
+        while stack:
+            if cancel.is_set():
+                break
+            cur = stack.pop()
+            try:
+                it = os.scandir(cur)
+            except OSError:
+                continue
+            with it:
+                for e in it:
+                    if cancel.is_set():
+                        break
+                    name = e.name
+                    if name.startswith(".") or name == "__pycache__":
+                        continue
+                    scanned += 1
+                    if scanned % 512 == 0:  # cheap live counter for the client
+                        _search_progress[id] = {
+                            "scanned": scanned,
+                            "matches": len(matches),
+                        }
+                    if not confirmed and scanned > _SEARCH_CONFIRM_AFTER:
+                        return JSONResponse({"needs_confirm": True, "scanned": scanned})
+                    try:
+                        is_dir = e.is_dir()
+                    except OSError:
+                        continue
+                    if not is_dir and not (e.is_file() and name.endswith(".py")):
+                        continue
+                    if is_dir:
+                        stack.append(e.path)
+                    sc = _fuzzy_score(q, name)
+                    if sc is not None:
+                        matches.append((sc, e.path, is_dir, name))
+        matches.sort(key=lambda m: (-m[0], len(m[3]), m[1]))
+        truncated = len(matches) > _SEARCH_MAX_RESULTS
+        results = [
+            {
+                "path": p,
+                "name": nm,
+                "is_dir": d,
+                "rel": os.path.relpath(p, root),
+            }
+            for _, p, d, nm in matches[:_SEARCH_MAX_RESULTS]
+        ]
+        return JSONResponse(
+            {
+                "results": results,
+                "truncated": truncated,
+                "scanned": scanned,
+                "cancelled": cancel.is_set(),
+            }
+        )
+    finally:
+        _searches.pop(id, None)
+        _search_progress.pop(id, None)
+
+
+@rt("/api/search/cancel", methods=["post"])
+def api_search_cancel(id: str):
+    ev = _searches.get(id)
+    if ev is not None:
+        ev.set()
+    return JSONResponse({"ok": True})
+
+
+@rt("/api/search/progress")
+def api_search_progress(id: str):
+    """Live {scanned, matches} for an in-flight search (client counter)."""
+    return JSONResponse(_search_progress.get(id, {}))
 
 
 # --- pages ---
@@ -1104,13 +2016,16 @@ def set_param(code: str, name: str, value: str):
 
 
 @rt("/render", methods=["post"])
-async def render(code: str, view: str = "grid", path: str = ""):
+async def render(code: str, view: str = "grid", path: str = "", sid: str = ""):
     mode = view if view in ("grid", "topo", "edit") else "grid"
-    return view_fragment(await _render_scene(code, mode, path), code, mode=mode)
+    return view_fragment(
+        await _render_scene(code, mode, path, sid=sid), code, mode=mode,
+        sess=_session(sid)
+    )
 
 
 @rt("/api/topo/validate", methods=["post"])
-async def topo_validate(code: str, blocking: str = "{}", path: str = ""):
+async def topo_validate(code: str, blocking: str = "{}", path: str = "", sid: str = ""):
     """Diagnostics for a candidate blocking (JSON) against the script's base +
     geometry; an empty list means green/committable. Runs in the render worker
     (it execs the script), never in the server."""
@@ -1118,12 +2033,12 @@ async def topo_validate(code: str, blocking: str = "{}", path: str = ""):
         f = json.loads(blocking)
     except json.JSONDecodeError:
         return JSONResponse({"error": "bad blocking json"}, status_code=400)
-    diags = await asyncio.wrap_future(_render_worker.validate(code, f, path))
-    return JSONResponse({"diagnostics": diags})
+    out = await asyncio.wrap_future(_render_worker.validate(code, f, path, sid=sid))
+    return JSONResponse(out)
 
 
 @rt("/api/topo/commit", methods=["post"])
-async def topo_commit(code: str, blocking: str = "{}", path: str = ""):
+async def topo_commit(code: str, blocking: str = "{}", path: str = "", sid: str = ""):
     """Write a blocking back into the ``editable({...})`` source span — but only
     when it has no errors. Validates in the worker; advisory ``warn_*``
     diagnostics don't block, real errors refuse with the reasons."""
@@ -1131,7 +2046,8 @@ async def topo_commit(code: str, blocking: str = "{}", path: str = ""):
         f = json.loads(blocking)
     except json.JSONDecodeError:
         return JSONResponse({"error": "bad blocking json"}, status_code=400)
-    diags = await asyncio.wrap_future(_render_worker.validate(code, f, path))
+    val = await asyncio.wrap_future(_render_worker.validate(code, f, path, sid=sid))
+    diags = val["diagnostics"]
     errors = [d for d in diags if not d.get("kind", "").startswith("warn")]
     if errors:
         return JSONResponse(
@@ -1149,19 +2065,23 @@ async def topo_commit(code: str, blocking: str = "{}", path: str = ""):
 
 
 @rt("/reset", methods=["post"])
-async def reset(code: str, view: str = "grid", path: str = ""):
-    """Discard the last smoothed result and show the fresh unsmoothed grid.
+async def reset(code: str, view: str = "grid", path: str = "", sid: str = ""):
+    """Drop the last smoothed result and show the fresh unsmoothed grid.
 
-    A completed run leaves the smoothed mesh on the canvas (and in _last for
-    export / _run for the mid-render keep). Reset drops those so a plain
-    re-exec of the script — TFI-initialized, unsmoothed — is what shows and
-    what exports. Disabled while a run streams (it owns the canvas).
+    A finished run leaves its smoothed mesh on the canvas (and in the session
+    state). Reset clears that, so a plain re-exec of the script (TFI-initialized,
+    unsmoothed) is what shows and what exports. Off while a run streams (the run
+    owns the canvas).
     """
     mode = view if view in ("grid", "topo", "edit") else "grid"
-    if not _running():
-        _last.update(code=None, harvest=None, hist=None)
-        _run["svg"] = _run["quality"] = None
-    return view_fragment(await _render_scene(code, mode, path), code, mode=mode)
+    sess = _session(sid)
+    if not _running(sess):
+        sess["last"].update(code=None, harvest=None, hist=None)
+        sess["run"]["svg"] = sess["run"]["quality"] = None
+        _clear_resume(sess)  # reset also discards the resume cache
+    return view_fragment(
+        await _render_scene(code, mode, path, sid=sid), code, mode=mode, sess=sess
+    )
 
 
 def _menu(label: str, *items):
@@ -1169,14 +2089,87 @@ def _menu(label: str, *items):
     return Div(Button(label, cls="menu-btn"), Div(*items, cls="menu-items"), cls="menu")
 
 
+def _window_controls():
+    """The min / maximize / close buttons for the native-app titlebar. They
+    call the window controls exposed through ``js_api`` under
+    ``window.pywebview.api`` (see egg/_desktop.py)."""
+    return Div(
+        Button(
+            "−",  # minus sign
+            type="button",
+            aria_label="Minimize",
+            cls="desktop-titlebar__btn",
+            onclick="window.pywebview.api.minimize()",
+        ),
+        Button(
+            "□",  # white square
+            type="button",
+            aria_label="Maximize",
+            cls="desktop-titlebar__btn",
+            onclick="window.pywebview.api.toggle_maximize()",
+        ),
+        Button(
+            "✕",  # multiplication x
+            type="button",
+            aria_label="Close",
+            cls="desktop-titlebar__btn desktop-titlebar__close",
+            # prompt on unsaved changes / unapplied topology edits, then close
+            onclick="window.eggDesktopClose()",
+        ),
+        cls="desktop-titlebar__controls",
+    )
+
+
+def _landing_titlebar():
+    """A minimal window titlebar for the landing overlay in the native app: just
+    the drag handle and the min/maximize/close controls (no menus). The landing
+    overlay covers the real titlebar, so without this the window controls would
+    be unreachable while the landing page is up."""
+    return Header(
+        Div(cls="desktop-titlebar__drag"),
+        _window_controls(),
+        cls="desktop-titlebar landing-titlebar",
+    )
+
+
+def _titlebar_or_header(desktop: object, *menu_items):
+    """The top toolbar: the same logo + file/view/help dropdowns either way,
+    followed by the filename chip and the pan/zoom hint.
+
+    In an ordinary browser this is the plain app header. In the native
+    (pywebview) app (``/?desktop=1``, opened by the ``egg-desktop`` launcher)
+    it becomes the window titlebar: the menus move into it, and it also carries
+    a drag handle and the window controls. The launcher runs a *frameless*
+    window; dragging the spacer starts a compositor move via
+    ``window.pywebview.api.start_drag`` (wired in app.js), so it works on
+    Wayland too, while the menus and buttons keep their own clicks.
+    """
+    filechip = Span(id="filechip")
+    if not desktop:
+        return Header(*menu_items, filechip)
+    return Header(
+        *menu_items,
+        filechip,
+        # Flex spacer between the menus and the window controls; mousedown
+        # here starts the window drag (see app.js / start_drag).
+        Div(cls="desktop-titlebar__drag"),
+        _window_controls(),
+        cls="desktop-titlebar",
+    )
+
+
 @rt("/")
-async def get(view: str = "grid"):
+async def get(view: str = "grid", desktop: int = 0):
     mode = view if view in ("grid", "topo", "edit") else "grid"
     code, path = _initial_code(), _initial_path()
     scene_r = await _render_scene(code, mode, path)
     return (
         Title("egg webui"),
-        Header(
+        # The top toolbar: the ordinary browser header, or (at /?desktop=1,
+        # opened by the egg-desktop launcher) the native-app titlebar with
+        # the same menus plus window controls.
+        _titlebar_or_header(
+            desktop,
             NotStr(EGG_LOGO),
             _menu(
                 "file",
@@ -1192,28 +2185,76 @@ async def get(view: str = "grid"):
                     title="follow the opened file on disk (edit in your own "
                     "editor); hides the editor pane",
                 ),
+                Label(
+                    Input(type="checkbox", id="autosave-toggle"),
+                    "auto-save",
+                    title="write edits to the open file automatically, about a "
+                    "second after you stop typing",
+                ),
                 Div(cls="menu-sep"),
-                Button("export svg", id="file-dl-svg"),
-                Button("export su2", id="file-dl-su2"),
+                Div(
+                    Button("export", cls="menu-sub-btn"),
+                    Div(
+                        Button("SVG", id="file-dl-svg"),
+                        Button("SU2", id="file-dl-su2"),
+                        Button(
+                            "gdtk grid (Eilmer)",
+                            id="file-dl-lmr",
+                            title="write the current mesh as gdtk/Eilmer lmr "
+                            "structured blocks plus a grid.lua for prep-grid; pick "
+                            "a folder to write them into",
+                        ),
+                        Button(
+                            "control net (npz)",
+                            id="file-dl-net",
+                            title="save the last run's control net as an .npz, the "
+                            "escape hatch if the pipeline had no Save stage; a regrid "
+                            "script can resample from it",
+                        ),
+                        cls="menu-sub-items",
+                    ),
+                    cls="menu-sub",
+                ),
+                # populated + shown by JS after the first export (overwrite in place)
+                Button("export as…", id="file-export-as", style="display:none"),
                 Div(cls="menu-sep"),
                 Button(
-                    "import control net…",
-                    id="file-import-net",
-                    title="load a saved control net (.npz) onto this script's "
-                    "grid and evaluate it — the grid must match the one the "
-                    "net was solved on",
+                    "open .eggy archive…",
+                    id="file-open-eggy",
+                    title="open a case archive (.eggy): pick it, then choose a "
+                    "folder to extract it into; a regrid script can resample "
+                    "from the packed net",
                 ),
                 Button(
-                    "export control net",
-                    id="file-dl-net",
-                    title="download the control net solved by the last "
-                    'tmop_smoother="control_point" run of this script',
+                    "save .eggy archive…",
+                    id="file-save-eggy",
+                    title="pack this case (script + its folder, including the "
+                    "saved net) into a .eggy archive to share or regrid",
+                ),
+                Div(cls="menu-sep"),
+                Button(
+                    "open config directory",
+                    id="file-config-dir",
+                    title="open ~/.config/egg (config.toml, favourites, recent) "
+                    "in the system file manager",
                 ),
             ),
             _menu(
                 "view",
                 Button("fit", id="fit"),
                 Div(cls="menu-sep"),
+                # "grid" hides only the interior grid lines (a scene-toggle on
+                # #view), so block boundaries and fills stay independently
+                # toggleable below even with the grid off.
+                Label(
+                    Input(
+                        type="checkbox",
+                        checked=True,
+                        cls="scene-toggle",
+                        data_toggle="grid-lines",
+                    ),
+                    "grid",
+                ),
                 *[
                     Label(
                         Input(
@@ -1224,7 +2265,7 @@ async def get(view: str = "grid"):
                         ),
                         layer,
                     )
-                    for layer in ("grid", "tangled", "curves", "points")
+                    for layer in ("tangled", "curves", "points")
                 ],
                 Label(
                     Input(type="checkbox", cls="layer-toggle", data_layer="ctrl"),
@@ -1237,7 +2278,7 @@ async def get(view: str = "grid"):
                     Input(type="checkbox", cls="layer-toggle", data_layer="net"),
                     "control net",
                     title="the solved B-spline control lattice of a "
-                    'tmop_smoother="control_point" run (or an imported net)',
+                    'tmop_smoother="control_point" run',
                 ),
                 Div(cls="menu-sep"),
                 Label(
@@ -1285,12 +2326,21 @@ async def get(view: str = "grid"):
                 A("documentation", href="/docs/", target="_blank")
                 if DOCS_DIR and DOCS_DIR.is_dir()
                 else Span(
-                    "docs not built — uv sync --group docs, then restart egg-webui",
+                    "docs not built; restart the app to build them",
                     cls="menu-note",
                 ),
+                Button(
+                    "report a problem",
+                    id="help-report",
+                    data_url="https://github.com/bezmi/egg/issues",
+                ),
+                Button(
+                    "view logs",
+                    id="help-logs",
+                    title="open the log directory (default ~/.config/egg/logs) "
+                    "in the system file manager",
+                ),
             ),
-            Span(id="filechip"),
-            Span("scroll or pinch to zoom, drag to pan, hover for names", cls="hint"),
         ),
         Div(
             Div(
@@ -1307,11 +2357,12 @@ async def get(view: str = "grid"):
                     data_watch="1"
                     if os.environ.get("EGG_WEBUI_WATCH") and _script_arg()
                     else "0",
-                    hx_post="/render",
-                    hx_include="[name='view'],[name='path']",
-                    hx_target="#view",
-                    hx_trigger="input changed delay:500ms",
-                    hx_sync="this:replace",
+                    # No input-driven render: the preview re-executes when an
+                    # editable item is used (params/topology/loading a file) or,
+                    # for typed edits, a couple of seconds after typing stops and
+                    # only when the LSP reports no errors, so a half-typed line
+                    # never re-execs into a runtime error. Renders are driven
+                    # explicitly via eggForceRender() in app.js.
                 ),
                 Input(type="hidden", name="path", id="scriptpath", value=path),
                 cls="editor",
@@ -1346,8 +2397,54 @@ async def get(view: str = "grid"):
                 cls="viewer",
             ),
             cls="panes",
-            hx_ext="ws",
-            ws_connect="/ws",
+            # The run-frame socket is opened manually in app.js (with the session
+            # id: /ws?sid=...), so server-pushed OOB frames reach only this
+            # instance. (Not htmx-ws, which can't carry the per-instance sid.)
+        ),
+        # Landing page: shown by JS at startup when no script is open (no default
+        # example is loaded). A splash plus the entry points; each option drives
+        # an existing flow and hides the landing once a project is opened.
+        Div(
+            # native app: a minimal titlebar so the window controls stay reachable
+            # while the landing overlay is up (it covers the real titlebar)
+            *([_landing_titlebar()] if desktop else []),
+            Div(
+                Div(NotStr(EGG_LOGO), cls="landing-logo"),
+                Div("egg", cls="landing-title"),
+                Div("egg aims to be an excellent grid generator", cls="landing-sub"),
+                Div(
+                    # shown by JS only when a cached session exists
+                    Button(
+                        "restore cached session", id="landing-restore",
+                        cls="landing-opt", style="display:none",
+                    ),
+                    Button("recently opened", id="landing-recent", cls="landing-opt"),
+                    # only in a source checkout, where the examples ship
+                    *(
+                        [Button(
+                            "examples", id="landing-examples", cls="landing-opt",
+                            data_dir=str(EXAMPLES_ROOT),
+                        )]
+                        if EXAMPLES_ROOT and EXAMPLES_ROOT.is_dir()
+                        else []
+                    ),
+                    Button("new project", id="landing-new", cls="landing-opt"),
+                    Button("open project", id="landing-open", cls="landing-opt"),
+                    Button("open archive", id="landing-archive", cls="landing-opt"),
+                    Button(
+                        "documentation", id="landing-docs", cls="landing-opt",
+                        data_url="/docs/",
+                    ),
+                    Button(
+                        "configuration directory", id="landing-config",
+                        cls="landing-opt",
+                    ),
+                    cls="landing-opts",
+                ),
+                cls="landing-card",
+            ),
+            id="landing",
+            style="display:none",
         ),
         Div(
             Div(
@@ -1356,8 +2453,63 @@ async def get(view: str = "grid"):
                     Button("cancel", id="fs-cancel"),
                     cls="fs-head",
                 ),
-                Div(id="fs-dir", cls="fs-path"),
-                Div(id="fs-list"),
+                # editable current-path bar + favourite toggle for this folder
+                Div(
+                    Input(
+                        id="fs-path",
+                        cls="fs-path-input",
+                        autocomplete="off",
+                        spellcheck="false",
+                        placeholder="/path/to/folder",
+                        title="type a path and press Enter to jump there",
+                    ),
+                    Button(
+                        "☆",
+                        id="fs-fav",
+                        cls="fs-fav",
+                        title="add this folder to favourites",
+                    ),
+                    cls="fs-pathrow",
+                ),
+                Div(
+                    Input(
+                        id="fs-search",
+                        cls="fs-search",
+                        autocomplete="off",
+                        spellcheck="false",
+                        placeholder="Search this directory",
+                    ),
+                    Select(
+                        Option("name A–Z", value="az"),
+                        Option("name Z–A", value="za"),
+                        id="fs-sort",
+                        title="sort order",
+                    ),
+                    cls="fs-searchrow",
+                ),
+                # deep-search confirm prompt (shown once a walk gets large)
+                Div(
+                    Span(id="fs-confirm-text"),
+                    Div(
+                        Button("keep searching", id="fs-confirm-go", cls="primary"),
+                        Button("stop", id="fs-confirm-stop"),
+                        cls="fs-actions",
+                    ),
+                    id="fs-confirm",
+                    cls="fs-note",
+                ),
+                # live "searching…" indicator with a cancel button
+                Div(
+                    Span("searching…", id="fs-searching-text"),
+                    Button("stop", id="fs-search-stop"),
+                    id="fs-searching",
+                    cls="fs-note",
+                ),
+                Div(
+                    Div(id="fs-sidebar", cls="fs-sidebar"),
+                    Div(id="fs-list"),
+                    cls="fs-main",
+                ),
                 Div(
                     Input(id="fs-name", placeholder="filename.py", autocomplete="off"),
                     Button("save", id="fs-do-save", cls="primary"),
@@ -1366,6 +2518,19 @@ async def get(view: str = "grid"):
                 cls="fs-box",
             ),
             id="fsmodal",
+        ),
+        # generic yes/no confirm (overwrite prompts); JS drives it as a promise
+        Div(
+            Div(
+                Div(Span(id="cf-text"), cls="cf-body"),
+                Div(
+                    Button("cancel", id="cf-no"),
+                    Button("ok", id="cf-yes", cls="primary"),
+                    cls="fs-actions",
+                ),
+                cls="fs-box cf-box",
+            ),
+            id="cfmodal",
         ),
         Div(
             Div(
@@ -1388,7 +2553,7 @@ async def get(view: str = "grid"):
         Div(
             Div(
                 Div(
-                    Span("save edits"),
+                    Span("apply edits"),
                     Button("close", id="save-close"),
                     cls="fs-head",
                 ),
@@ -1452,12 +2617,14 @@ def _script_arg() -> Path | None:
 
 
 def _initial_code() -> str:
-    p = _script_arg() or DEFAULT_SCRIPT
+    # No script argument -> start on the landing page (no default example
+    # loaded); the editor stays empty until the user picks/creates one.
+    p = _script_arg()
     return p.read_text() if p else ""
 
 
 def _initial_path() -> str:
-    p = _script_arg() or DEFAULT_SCRIPT
+    p = _script_arg()
     return str(p) if p else ""
 
 

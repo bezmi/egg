@@ -163,6 +163,7 @@ def interface_ortho_samples(
     weight: float = 1.0,
     n_layers: int = 3,
     cluster_relax: float = 0.0,
+    pinned=None,
     topology=None,
 ) -> InterfaceSamples:
     """Build the interface orthogonality/continuity samples for a 2D grid.
@@ -193,6 +194,13 @@ def interface_ortho_samples(
         merely sheared cell keeps full weight), so the term backs off in the
         clustered band and only acts where the blocking, not the clustering, owns
         the cell shape. ``0`` (default) keeps full weight everywhere.
+    pinned : array of int, optional
+        DOF ids frozen by a Pin stamp. When given, the pinned/free boundary of
+        each wall-clustered band (a within-block interface, the frozen band's
+        top edge) also gets crossing samples: the boundary row is read-only and
+        the free grid just above it is orthogonalised / continued out of the
+        band, so it does not kink at the band edge. Note the near-band cells are
+        slivers, so pair with ``cluster_relax=0`` for the term to bite there.
     topology : BlockTopology, optional
         Defaults to ``grid.topology``.
     """
@@ -296,6 +304,50 @@ def interface_ortho_samples(
             for k in range(n_layers):
                 side(mA, jA, caA, taA, cA, k)
                 side(mB, jB, caB, taB, cB, k)
+
+    # Pinned/free boundary within a block (a Pin stamp froze the near-wall
+    # band): treat the band's top edge as an interface and orthogonalise /
+    # continue the free crossing edges just above it, so the free grid leaves
+    # the band smoothly instead of kinking at its edge. The boundary row is
+    # read-only (added to ``frozen``); samples push only the free nodes above.
+    if pinned is not None and len(pinned) > 0:
+        pin_set = {int(x) for x in np.asarray(pinned).ravel()}
+        specs = getattr(topo, "boundary_layer_specs", {})
+        for assoc in topo.associations:
+            spec = specs.get(id(assoc.entity))
+            if spec is None or int(spec.get("n_fixed", 0) or 0) <= 0:
+                continue
+            face = assoc.face
+            if spec.get("blocks") is not None and face.block_name not in spec["blocks"]:
+                continue
+            bi = block_names.index(face.block_name)
+            m = _oriented_map(np.asarray(grid.block_dof_maps[bi]), face.axis, face.side)
+            n_cross, n_tan = m.shape
+            cross_axis, tan_axis = face.axis, 1 - face.axis
+            for j in range(1, n_tan - 1):  # skip band-corner endpoints
+                col = m[:, j]
+                rows_pinned = [k for k in range(n_cross) if int(col[k]) in pin_set]
+                if not rows_pinned:
+                    continue
+                b = max(rows_pinned)  # last pinned row = the boundary
+                if b + 1 >= n_cross:
+                    continue  # nothing free above it
+                m_free = m[b:]  # row 0 = boundary (pinned), rows 1.. = free
+                frozen.add(int(m_free[0, j]))
+                if mode == "normal":
+                    tan = (
+                        X[int(m[b, min(j + 1, n_tan - 1)])]
+                        - X[int(m[b, max(j - 1, 0)])]
+                    )
+                    base = np.array([-tan[1], tan[0]])
+                else:  # continuous: continue the frozen band's column direction
+                    base = (
+                        X[int(m[b, j])] - X[int(m[b - 1, j])]
+                        if b >= 1
+                        else X[int(m_free[1, j])] - X[int(m_free[0, j])]
+                    )
+                for k in range(n_layers):
+                    side(m_free, j, cross_axis, tan_axis, base, k)
 
     if not rows:
         z = np.zeros(0)

@@ -39,17 +39,11 @@ Needs the ``cad`` group for ``--sphere cad``; plotting needs ``pyvista``.
 from __future__ import annotations
 
 import argparse
-import os
-import sys
 
 import numpy as np
 
-sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sphere3d")
-)
-
-import sphere_in_cube_cad as ex  # noqa: E402  (sibling example, this directory)
-from driver import surface_faces  # noqa: E402  (path-injected sphere3d/driver.py)
+import sphere_in_cube_cad as ex  # sibling example, this directory
+from driver import surface_faces  # local sibling module
 
 
 def _sphere_entity(kind, r0):

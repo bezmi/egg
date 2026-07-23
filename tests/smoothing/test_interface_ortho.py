@@ -106,6 +106,49 @@ def test_cluster_relax_fades_only_on_slivers():
     assert thin > 0.5
 
 
+def _clustered_strip(res=(6, 12)):
+    from egg.geometry import LineSegment
+
+    wall = (
+        LineSegment((0.0, 0.0), (4.0, 0.0))
+        .named("wall")
+        .clustered(first_height=0.05, growth=1.2, n_layers=4, n_fixed=3)
+    )
+    b = TopologyBuilder(d=2)
+    for n, p in [("A", (0, 0)), ("B", (4, 0)), ("C", (0, 2)), ("D", (4, 2))]:
+        b.add_corner(n, p, fixed=True)
+    b.add_block("main", ("A", "C", "B", "D"), res)
+    b.associate("main", 1, 0, wall)
+    return b.build().initialize_grid()
+
+
+@pytest.mark.parametrize("mode", ["normal", "continuous"])
+def test_pinned_boundary_emits_crossing_samples(mode):
+    """A single-block clustered strip has no block seams, so without a pin the
+    term is empty; a Pin's frozen band adds crossing samples at the pinned/free
+    boundary that push only the free nodes above it (the boundary is read-only,
+    so a rigid shift of just the free grid raises the energy)."""
+    from egg.smoothing.respace import respace_first_layers
+
+    grid = _clustered_strip()
+    pinned = respace_first_layers(grid, grid.topology)
+    base = interface_ortho_samples(grid, mode=mode, weight=1.0, cluster_relax=0.0)
+    withp = interface_ortho_samples(
+        grid, mode=mode, weight=1.0, cluster_relax=0.0, pinned=pinned
+    )
+    assert len(base) == 0  # no block interface in a single block
+    assert len(withp) > 0  # frozen band boundary got crossing samples
+    # the samples constrain the free grid above the band: shifting the free
+    # nodes (leaving the pinned band put) skews the crossing edges and raises
+    # the energy, so the term really acts across the pinned/free boundary.
+    pin_set = set(int(x) for x in np.asarray(pinned).ravel())
+    referenced = np.unique(np.asarray(withp.part_node))
+    free_above = np.array([n for n in referenced if int(n) not in pin_set])
+    Xp = grid.global_nodes.copy()
+    Xp[free_above, 1] += 0.1
+    assert _energy(Xp, withp) > 1e-6
+
+
 @pytest.mark.parametrize("mode", ["normal", "continuous"])
 def test_perturbation_raises_energy(mode):
     grid = _lr_grid()

@@ -27,6 +27,7 @@ import ast
 import io
 import json
 import os
+from typing import TypeGuard
 import sys
 import threading
 import time
@@ -66,7 +67,7 @@ Bounds = tuple[np.ndarray, np.ndarray]
 class Scene:
     """Harvested world-space primitives, ready for rendering."""
 
-    curves: list[tuple[str, str, np.ndarray]] = field(default_factory=list)
+    curves: list[tuple[str, str, np.ndarray, int]] = field(default_factory=list)
     points: list[tuple[str, str, float, float]] = field(default_factory=list)
     # control cages: (name, (n, 2) vertex array, per-vertex kind) — the
     # Vector3s a curve was constructed from, drawn as CAD-style control
@@ -81,10 +82,12 @@ class Scene:
     # adjacency so no two blocks sharing a boundary get the same colour.
     block_colors: dict[str, int] = field(default_factory=dict)
     # topology-view primitives (straight-edged, from the BlockTopology)
-    topo_blocks: list[tuple[str, np.ndarray]] = field(default_factory=list)
-    topo_corners: list[tuple[str, float, float, bool]] = field(default_factory=list)
+    topo_blocks: list[tuple[str, np.ndarray, list[int]]] = field(default_factory=list)
+    topo_corners: list[tuple[str, float, float, bool, int | None, list[int]]] = field(
+        default_factory=list
+    )
     topo_connections: list[tuple[str, np.ndarray]] = field(default_factory=list)
-    topo_associations: list[tuple[str, np.ndarray]] = field(default_factory=list)
+    topo_associations: list[tuple[str, np.ndarray, int]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -136,11 +139,14 @@ class GuardParam:
     name: str
     text: str  # exact source text of the value (e.g. "5.0e-3")
     kind: str  # bool | int | float | str
-    span: tuple[int, int, int, int]  # lineno, col, end_lineno, end_col (1-based lines)
+    # lineno, col, end_lineno, end_col (1-based lines); end_* are None on some
+    # ast nodes.
+    span: tuple[int, int, int | None, int | None]
     choices: tuple | None = None  # literal options -> dropdown (editable() only)
+    show_if: dict | None = None  # {param: value|[values]} -> shown only when matched
 
 
-def _is_params_call(node) -> bool:
+def _is_params_call(node: ast.AST) -> TypeGuard[ast.Call]:
     """``params(...)`` / ``egg_webui.params(...)``."""
     if not isinstance(node, ast.Call):
         return False
@@ -206,7 +212,7 @@ def _literal_kind(val: ast.expr) -> str | None:
     return None
 
 
-def _is_editable_call(node) -> bool:
+def _is_editable_call(node: ast.AST) -> TypeGuard[ast.Call]:
     """``editable(...)`` / ``egg_webui.editable(...)`` with a positional arg."""
     if not (isinstance(node, ast.Call) and node.args):
         return False
@@ -252,7 +258,7 @@ def _editable_params(tree: ast.Module, code: str) -> list[GuardParam]:
         kind = _literal_kind(val)
         if kind is None:
             continue  # only plain literals can be rewritten losslessly
-        label, choices = None, None
+        label, choices, show_if = None, None, None
         for kw in node.keywords:
             if kw.arg == "label" and isinstance(kw.value, ast.Constant):
                 label = str(kw.value.value)
@@ -261,6 +267,11 @@ def _editable_params(tree: ast.Module, code: str) -> list[GuardParam]:
                     choices = tuple(ast.literal_eval(e) for e in kw.value.elts)
                 except ValueError:
                     choices = None
+            elif kw.arg == "show_if" and isinstance(kw.value, ast.Dict):
+                try:
+                    show_if = ast.literal_eval(kw.value)
+                except ValueError:
+                    show_if = None
         text = ast.get_source_segment(code, val) or ""
         params.append(
             GuardParam(
@@ -269,6 +280,7 @@ def _editable_params(tree: ast.Module, code: str) -> list[GuardParam]:
                 kind,
                 (val.lineno, val.col_offset, val.end_lineno, val.end_col_offset),
                 choices=choices,
+                show_if=show_if,
             )
         )
     return params
@@ -315,6 +327,40 @@ def guard_params(code: str) -> list[GuardParam]:
     return params
 
 
+def _param_value(p: GuardParam):
+    """The current value of a param, parsed from its source text."""
+    try:
+        return ast.literal_eval(p.text)
+    except (ValueError, SyntaxError):
+        return p.text
+
+
+def visible_params(params: list[GuardParam]) -> list[GuardParam]:
+    """Drop params whose ``show_if`` is not met by the other params' values.
+
+    ``show_if`` maps a parameter name to an allowed value (or list of values);
+    a param is shown only when every named parameter currently matches. Lets
+    the panel show only the parameters that apply to the current choices (e.g.
+    node-mode interface knobs disappear when the control-point smoother is
+    selected).
+    """
+    values = {p.name: _param_value(p) for p in params}
+    out = []
+    for p in params:
+        if p.show_if:
+            hidden = False
+            for key, allowed in p.show_if.items():
+                if not isinstance(allowed, (list, tuple, set)):
+                    allowed = [allowed]
+                if values.get(key) not in allowed:
+                    hidden = True
+                    break
+            if hidden:
+                continue
+        out.append(p)
+    return out
+
+
 def set_guard_param(code: str, name: str, raw: str) -> str:
     """Rewrite one editable value in ``code``; returns the new source.
 
@@ -350,13 +396,14 @@ def set_guard_param(code: str, name: str, raw: str) -> str:
         raise ValueError(f"{name!r} must be one of {list(p.choices)}, not {raw!r}")
     lines = code.splitlines(keepends=True)
     l0, c0, l1, c1 = p.span
+    assert l1 is not None and c1 is not None  # value nodes carry end spans
     # splice over [l0:c0, l1:c1] (1-based lines, 0-based cols)
     start = sum(len(ln) for ln in lines[: l0 - 1]) + c0
     end = sum(len(ln) for ln in lines[: l1 - 1]) + c1
     return code[:start] + new + code[end:]
 
 
-def _is_explicit_topology_call(node) -> bool:
+def _is_explicit_topology_call(node: ast.AST) -> TypeGuard[ast.Call]:
     """``ExplicitTopology(...)`` / ``x.ExplicitTopology(...)``."""
     if not isinstance(node, ast.Call):
         return False
@@ -420,6 +467,27 @@ def editable_block(code: str) -> str | None:
     return None
 
 
+def _py_literal(v) -> str:
+    """Inline Python literal for a JSON value — ``json.dumps`` spacing and
+    double-quoted strings, but ``True``/``False``/``None`` instead of the
+    JSON spellings (the rendering is spliced into Python source)."""
+    if v is True:
+        return "True"
+    if v is False:
+        return "False"
+    if v is None:
+        return "None"
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_py_literal(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return (
+            "{"
+            + ", ".join(f"{json.dumps(str(k))}: {_py_literal(x)}" for k, x in v.items())
+            + "}"
+        )
+    return json.dumps(v)
+
+
 def _format_blocking(blocking: dict, indent: int) -> str:
     """Pretty-print a blocking dict as diff-friendly Python at ``indent`` columns.
 
@@ -431,14 +499,31 @@ def _format_blocking(blocking: dict, indent: int) -> str:
     out = ["{"]
     out.append(f'{p1}"nodes": {{')
     for nid, spec in (blocking.get("nodes") or {}).items():
-        out.append(f"{p2}{json.dumps(str(nid))}: {json.dumps(spec)},")
+        out.append(f"{p2}{json.dumps(str(nid))}: {_py_literal(spec)},")
     out.append(f"{p1}}},")
     out.append(f'{p1}"edges": [')
     for e in blocking.get("edges") or []:
-        out.append(f"{p2}{json.dumps(e)},")
+        out.append(f"{p2}{_py_literal(e)},")
     out.append(f"{p1}],")
+    # Sections beyond nodes/edges/res (fan_frames, parallel, 3D blocks)
+    # survive the rewrite verbatim: dicts and lists break one entry per line,
+    # sorted key order.
+    for key in sorted(k for k in blocking if k not in ("nodes", "edges", "res")):
+        v = blocking[key]
+        if isinstance(v, dict):
+            out.append(f"{p1}{json.dumps(str(key))}: {{")
+            for k2, v2 in v.items():
+                out.append(f"{p2}{json.dumps(str(k2))}: {_py_literal(v2)},")
+            out.append(f"{p1}}},")
+        elif isinstance(v, list):
+            out.append(f"{p1}{json.dumps(str(key))}: [")
+            for v2 in v:
+                out.append(f"{p2}{_py_literal(v2)},")
+            out.append(f"{p1}],")
+        else:
+            out.append(f"{p1}{json.dumps(str(key))}: {_py_literal(v)},")
     if blocking.get("res") is not None:
-        out.append(f'{p1}"res": {json.dumps(blocking["res"])},')
+        out.append(f'{p1}"res": {_py_literal(blocking["res"])},')
     out.append(f"{pad}}}")
     return "\n".join(out)
 
@@ -578,13 +663,22 @@ def edit_data_for(code: str, h: Harvest) -> dict | None:
     if h.editable is None:
         return None
     src = explicit_topology_source(code) or {}
-    return {
+    out = {
         "editable": bool(src.get("editable")),
         "blocking": h.editable.connectivity,
         "geometry": _geometry_polylines(h.editable.geometry),
         "base": h.editable.base_graph(),
         "diagnostics": [_diag_dict(d) for d in h.diagnostics],
     }
+    # A valid flatten's per-edge effective resolutions + must-share classes,
+    # so the edit view shows loop-propagated values from the first paint
+    # (validate refreshes them after each edit).
+    errors = [d for d in h.diagnostics if not d.kind.startswith("warn")]
+    if h.topo is not None and not errors and getattr(h.topo, "d", 2) == 2:
+        eff, classes = _edge_res_classes(h.topo)
+        out["edge_res"] = eff
+        out["res_classes"] = classes
+    return out
 
 
 def _geometry_polylines(geometry: dict, n: int = 64) -> list[dict]:
@@ -609,8 +703,52 @@ def _geometry_polylines(geometry: dict, n: int = 64) -> list[dict]:
     return out
 
 
-def validate_blocking(code: str, blocking: dict, path: str | None = None) -> list[dict]:
-    """Diagnostics for a candidate blocking against the script's base + geometry.
+def _edge_res_classes(topo) -> tuple[dict[str, int], list[list[str]]]:
+    """Per-edge effective resolution plus the classes of edges that must share
+    one, from a flattened 2D topology.
+
+    Opposite faces of a block share a resolution and a shared face links two
+    blocks, so one explicit setting drives its whole loop (the same union-find
+    the flatten's ``_propagate_loop_res`` runs). Keys match the client's edge
+    keys: the sorted corner-name pair joined by ``|``.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def key(a: str, b: str) -> str:
+        return f"{a}|{b}" if a < b else f"{b}|{a}"
+
+    eff: dict[str, int] = {}
+    for spec in topo.block_specs.values():
+        for axis in (0, 1):
+            ks = []
+            for side in (0, 1):
+                a, b = spec.face_corner_names(axis, side, 2)
+                if a == b:
+                    continue
+                k = key(a, b)
+                eff[k] = int(spec.resolutions[1 - axis])
+                ks.append(k)
+            if len(ks) == 2:
+                parent[find(ks[0])] = find(ks[1])
+    classes: dict[str, list[str]] = {}
+    for k in eff:
+        classes.setdefault(find(k), []).append(k)
+    return eff, [sorted(v) for v in classes.values()]
+
+
+def validate_blocking(code: str, blocking: dict, path: str | None = None) -> dict:
+    """Validation payload for a candidate blocking against the script's base +
+    geometry: ``diagnostics`` (empty means green/committable) plus, when the
+    flatten succeeds in 2D, ``edge_res`` (edge key -> effective cell count)
+    and ``res_classes`` (groups of edge keys that must share a resolution), so
+    the edit view can show the propagated resolution on every loop edge.
 
     Execs ``code`` to recover the ExplicitTopology's base and geometry, then
     flattens ``blocking`` in their context — without touching the source — so the
@@ -619,30 +757,44 @@ def validate_blocking(code: str, blocking: dict, path: str | None = None) -> lis
     """
     ns, _out, err = exec_script(code, path)
     if err is not None:
-        return [
-            {
-                "kind": "script_error",
-                "msg": "script error — fix it first",
-                "where": [],
-                "xy": None,
-            }
-        ]
+        return {
+            "diagnostics": [
+                {
+                    "kind": "script_error",
+                    "msg": "script error — fix it first",
+                    "where": [],
+                    "xy": None,
+                }
+            ]
+        }
     h = harvest(ns, init_grid=False)
     if h.editable is None:
-        return [
-            {
-                "kind": "no_editable",
-                "msg": "script builds no ExplicitTopology",
-                "where": [],
-                "xy": None,
-            }
-        ]
+        return {
+            "diagnostics": [
+                {
+                    "kind": "no_editable",
+                    "msg": "script builds no ExplicitTopology",
+                    "where": [],
+                    "xy": None,
+                }
+            ]
+        }
     et = ExplicitTopology(
-        base=h.editable.base, geometry=h.editable.geometry, connectivity=blocking
+        base=h.editable.base,
+        geometry=h.editable.geometry,
+        connectivity=blocking,
+        relax_orthogonality=getattr(h.editable, "relax_orthogonality", ()),
+        fan_frames=getattr(h.editable, "fan_frames", None),
+        parallel=getattr(h.editable, "parallel", None),
     )
-    _topo, diags = et.flatten()
+    topo, diags = et.flatten()
     _debug_blocking(blocking, diags)
-    return [_diag_dict(d) for d in diags]
+    out: dict = {"diagnostics": [_diag_dict(d) for d in diags]}
+    if topo is not None and getattr(topo, "d", 2) == 2:
+        eff, classes = _edge_res_classes(topo)
+        out["edge_res"] = eff
+        out["res_classes"] = classes
+    return out
 
 
 def webui_block_suggestion(code: str, path: str | None = None) -> str | None:
@@ -726,7 +878,39 @@ def su2_export_text(code: str, path: str | None = None) -> tuple[str | None, str
         return None, f"export failed: {exc}"
 
 
-def _iter_named(ns: dict, depth: int = HARVEST_DEPTH, prefix: str = ""):
+def lmr_export_to_dir(
+    code: str, out_dir: str, path: str | None = None
+) -> tuple[dict | None, str]:
+    """Exec ``code`` and export its grid as lmr structured blocks + grid.lua.
+
+    Writes the per-block grid files and ``grid.lua`` into ``out_dir`` and
+    returns ``({"written": [...], "untagged": [...]}, "")`` on success,
+    ``(None, reason)`` otherwise. ``untagged`` reports the ``egg-untagged-N``
+    marker groups (empty when every external face is tagged) so the UI can warn.
+    Multi-file, so it writes directly rather than returning text; the registered
+    run's grid wins over a harvested one, mirroring what the view shows. Execs
+    the script — call it in a worker process.
+    """
+    ns, _out, err = exec_script(code, path)
+    if err is not None:
+        return None, f"script error:\n{err}"
+    h = harvest(ns)
+    if (reg := ns.get("__egg_webui_run__")) is not None:
+        h.grid = reg[0]
+    if h.grid is None:
+        return None, "no grid to export"
+    try:
+        from egg.io.lmr import export_lmr, untagged_external_faces
+
+        # The /export/lmr route already gates the overwrite conflict, so write
+        # unconditionally here.
+        written = export_lmr(h.grid, out_dir, overwrite=True)
+        return {"written": written, "untagged": untagged_external_faces(h.grid)}, ""
+    except Exception as exc:
+        return None, f"export failed: {exc}"
+
+
+def _iter_named(ns: dict | list, depth: int = HARVEST_DEPTH, prefix: str = ""):
     """Yield (name, obj) for values, recursing ``depth`` levels into containers."""
     items = (
         ns.items()
@@ -1140,7 +1324,7 @@ def grid_quality(grid_blocks: list[np.ndarray]) -> dict[str, tuple] | None:
     }
 
 
-def _line_indices(n: int, cap: int = None) -> np.ndarray:
+def _line_indices(n: int, cap: int | None = None) -> np.ndarray:
     """Grid-line indices to draw for a block axis of ``n`` lines.
 
     Dense blocks are decimated to ``MAX_GRID_LINES`` evenly spaced lines

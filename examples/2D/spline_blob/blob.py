@@ -38,7 +38,14 @@ The command-line surface lives in ``driver.py``; run
 
 import numpy as np
 
-from egg.pipeline import PipelineConfig, generate_steps
+from egg.pipeline import (
+    ControlPointSmoother,
+    FasSmoother,
+    JacobiSmoother,
+    Presmooth,
+    Untangle,
+    generate_steps,
+)
 
 from egg.geometry import Edge, Line, Spline, Vector3
 from egg.topology.builder import TopologyBuilder
@@ -103,43 +110,55 @@ def build_blob_in_rectangle():
     # the blob (rough corners) and the corner-block faces (corners shared by
     # two walls) stay explicit. Every associated face inherits its entity's
     # name as its boundary marker — no separate tag_boundary calls.
-    for blk in ("o_s", "o_e", "o_n", "o_w"):
-        b.associate(blk, 1, 1, blob)
+    b.associate(blob, north=["o_s", "o_e", "o_n", "o_w"])
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_se", bottom, right),
         ("c_ne", right, top),
         ("c_nw", top, left),
     ]:
-        b.associate(blk, 0, 0, a0)
-        b.associate(blk, 1, 0, a1)
+        b[blk].west.on(a0).south.on(a1)
 
     topology = b.build()
     return topology, topology.entities
 
 
-def setup(a):
-    """Topology, grid, and config from parsed args — shared by the
-    CLI ``main()`` and the web UI (which passes the parser defaults)."""
+def _smoother(a):
+    """The smoothing-phase stage(s) chosen by ``--smoother``.
+
+    Control mode is preceded by a nodal pre-pass so the net fit starts smooth.
+    """
+    s = a["smoother"]
+    if s == "fas":
+        return [
+            FasSmoother(sweeps=a["tmop_sweeps"], chunk=a["chunk"], omega=a["omega"])
+        ]
+    if s == "control_point":
+        return [
+            Presmooth(JacobiSmoother(sweeps=100, chunk=100, omega=a["omega"])),
+            ControlPointSmoother(chunk=a["chunk"], omega=a["omega"]),
+        ]
+    return [JacobiSmoother(sweeps=a["tmop_sweeps"], chunk=a["chunk"], omega=a["omega"])]
+
+
+def setup(a, *, direct=True):
+    """Topology, grid, and stage list from parsed args — shared by the CLI
+    ``main()`` and the web UI."""
     topo, ents = build_blob_in_rectangle()
     grid = topo.initialize_grid()
-    cfg = PipelineConfig(
-        sweeps_per_delta=a["sweeps_per_delta"],
-        tmop_sweeps=a["tmop_sweeps"],
-        tmop_chunk=a["chunk"],
-        tmop_smoother=a["smoother"],
-        omega=a["omega"],
-        device=a["device"],
-    )
-    return topo, ents, grid, cfg
+    stages = [
+        Untangle(sweeps_per_delta=a["sweeps_per_delta"], direct=direct),
+        *_smoother(a),
+    ]
+    return topo, ents, grid, stages
 
 
 def main():
     from driver import finish, parse_args
 
     a = parse_args()
-    topo, ents, grid, cfg = setup(vars(a))
-    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
+    topo, ents, grid, stages = setup(vars(a), direct=not a.plot_live)
+    steps = generate_steps(grid, stages=stages, device=a.device)
 
     finish(
         grid,
@@ -164,8 +183,8 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         omega=0.8,
         device="cpu",
     )
-    topo, ents, grid, cfg = setup(a)
-    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
+    topo, ents, grid, stages = setup(a, direct=False)
+    egg_webui.run(grid, generate_steps(grid, stages=stages, device=a["device"]))
 
 if __name__ == "__main__":
     main()

@@ -21,13 +21,23 @@ The heavy conversion (OCCT surface to NURBS, trim wires to UV polylines) runs
 once at import; the solver never sees OCCT.
 """
 
+# OCP (the OpenCASCADE bindings under build123d) ships no type stubs, so its
+# symbols are opaque to the checker. This adapter is behind the optional `cad`
+# extra.
+# pyright: reportAttributeAccessIssue=false, reportMissingImports=false
+
 from __future__ import annotations
 
 import numpy as np
 
 from egg.geometry.analytic3d import Line3
 from egg.geometry.base import _INHERIT
-from egg.geometry.surfaces3d import BSplineSurface, _trim_clamp, _trim_contains
+from egg.geometry.surfaces3d import (
+    BSplineSurface,
+    _orthonormalize2,
+    _trim_clamp,
+    _trim_contains,
+)
 
 __all__ = [
     "import_step",
@@ -43,13 +53,14 @@ class CadBSplineSurface(BSplineSurface):
 
     Serializes to the device wire exactly like a plain ``BSplineSurface``
     (``isinstance`` holds, so ``encode_entity_soa`` dispatches identically);
-    only the Python-side :meth:`invert` is overridden to route through OCCT's
-    ``GeomAPI_ProjectPointOnSurf``, which is far faster than the egg reference
-    Newton and handles the surface-of-revolution pole/seam natively. The egg
-    reference ``invert`` stays the parity oracle for the C++ device path; this
-    override touches only the host ``initialize_grid`` / ``project_nodes``
-    projection. Falls back to the reference when the OCCT handle is absent
-    (e.g. after a deep copy that drops it).
+    the Python-side projection family (:meth:`invert` and everything composed
+    from it) is overridden to route through OCCT's
+    ``GeomAPI_ProjectPointOnSurf``, which is far faster than the egg
+    parametrization Newton and handles the surface-of-revolution pole/seam
+    natively. This touches only host projection (``initialize_grid`` /
+    ``project_nodes`` / target frames); the C++ device path still runs the SoA
+    reconstruction. Falls back to the egg ``invert`` when the OCCT handle is
+    absent (e.g. after a deep copy that drops it).
     """
 
     def __init__(self, *args, occ_surface=None, **kwargs):
@@ -89,6 +100,30 @@ class CadBSplineSurface(BSplineSurface):
         if self.trim and not _trim_contains(self.trim, u, v):
             u, v = _trim_clamp(self.trim, u, v)
         return u, v
+
+    # Host projection stays with OCCT (the GeometryEntity base methods route
+    # through the C++ SoA reconstruction, which would bypass the carrier):
+    # everything composes invert -> eval / frame.
+
+    def project(self, p):
+        u, v = self.invert(p)
+        return self.eval(u, v)
+
+    def project_many(self, pts):
+        return np.stack([self.project(p) for p in np.asarray(pts, dtype=float)])
+
+    def tangent_space(self, q):
+        u, v = self.invert(q)
+        return _orthonormalize2(*self.frame(u, v))
+
+    def tangent_space_many(self, Q):
+        return np.stack([self.tangent_space(q) for q in np.asarray(Q, dtype=float)])
+
+    def normal(self, q):
+        u, v = self.invert(q)
+        su, sv = self.frame(u, v)
+        n = np.cross(su, sv)
+        return n / np.linalg.norm(n)
 
 
 def _require_cad() -> None:
@@ -144,7 +179,7 @@ def _extract_surface(bs) -> CadBSplineSurface:
         for j in range(1, nv + 1):
             p = bs.Pole(i, j)
             ctrl[i - 1, j - 1] = (p.X(), p.Y(), p.Z())
-            if rational:
+            if weights is not None:  # non-None exactly when rational
                 weights[i - 1, j - 1] = bs.Weight(i, j)
 
     def kseq(arr):

@@ -17,6 +17,7 @@
 namespace py = pybind11;
 
 #include "control_solve.hpp"
+#include "directional.hpp"
 #include "geometry.hpp"
 #include "metric.hpp"
 #include "patch.hpp"
@@ -292,6 +293,42 @@ std::vector<egg::real>
     return v;
 }
 
+// Host-side directional soft-energy total and analytic gradient over a sample
+// table (the SYCL-free oracle mirroring egg.smoothing.directional). X is
+// [n_nodes*D], grad accumulates in place ([n_nodes*D], caller-zeroed).
+template <int D>
+double directional_eval_impl(const std::vector<egg::real>& X,
+                             const std::vector<int>& nodes,
+                             const std::vector<int>& kind,
+                             const std::vector<egg::real>& ref,
+                             const std::vector<egg::real>& weight,
+                             egg::real eps,
+                             std::vector<egg::real>& grad)
+{
+    double e_total = 0.0;
+    for (std::size_t i = 0; i < weight.size(); ++i) {
+        const int arity = egg::dir_kind_arity(kind[i]);
+        if (arity == 0) {
+            throw py::value_error("directional_eval: unsupported sample kind " +
+                                  std::to_string(kind[i]));
+        }
+        const int* nd = nodes.data() + (i * 4);
+        egg::PtN<D> p[3];
+        for (int m = 0; m < arity; ++m) { p[m] = egg::load_pt<D>(X.data(), nd[m]); }
+        const egg::real* r = ref.data() + (i * static_cast<std::size_t>(D));
+        e_total += static_cast<double>(egg::dir_window_energy<D>(kind[i], p, r, weight[i], eps));
+        for (int m = 0; m < arity; ++m) {
+            egg::VecN<D> g {};
+            egg::MatN<D> h {};
+            egg::real e0 = egg::real(0);
+            egg::dir_window_accumulate<D>(kind[i], p, r, weight[i], eps, m, g, h, e0);
+            egg::real* row = grad.data() + (static_cast<std::size_t>(nd[m]) * D);
+            for (int k = 0; k < D; ++k) { row[k] += g[k]; }
+        }
+    }
+    return e_total;
+}
+
 template <int D>
 egg::SweepContextHostT<D>
   unpack_context(const py::dict& ctx_arrays, const double* X_data, std::size_t num_nodes)
@@ -355,6 +392,22 @@ egg::SweepContextHostT<D>
                 sg.curv_weight = extract_real(gd, "curv_weight");
             }
         }
+        // Directional soft-energy sample table: per-DOF fixed-K arrays
+        // (dir_nodes [ndof*K*4], dir_slot/dir_kind [ndof*K], dir_ref/dir_axis
+        // [ndof*K*D], dir_weight [ndof*K]). Node ids are global here;
+        // apply_structured_remap rewrites them to structured owner slots.
+        if (gd.contains("dir_k")) {
+            sg.dir_k = gd["dir_k"].cast<int>();
+            if (sg.dir_k > 0) {
+                sg.dir_eps = static_cast<egg::real>(gd["dir_eps"].cast<double>());
+                sg.dir_nodes = extract_int(gd, "dir_nodes");
+                sg.dir_slot = extract_int(gd, "dir_slot");
+                sg.dir_kind = extract_int(gd, "dir_kind");
+                sg.dir_ref = extract_real(gd, "dir_ref");
+                sg.dir_axis = extract_real(gd, "dir_axis");
+                sg.dir_weight = extract_real(gd, "dir_weight");
+            }
+        }
 
         // Typed per-entity-type SoA sub-dicts (the sole carrier of entity
         // data). Each present type contributes {tag, kFields, dof_local,
@@ -413,6 +466,19 @@ egg::SweepContextHostT<D>
     host.energy_stencil.W_inv = extract_real(es, "W_inv");
     // Optional per-sample energy weight; omission ⇒ unit weight (one shared row).
     if (es.contains("weight")) { host.energy_stencil.weight = extract_real(es, "weight"); }
+    // Directional soft-energy whole-sample table (energy totals); node ids are
+    // global here and remapped alongside gc/gn by apply_structured_remap.
+    if (es.contains("dir_num")) {
+        host.energy_stencil.dir_num = es["dir_num"].cast<std::size_t>();
+        if (host.energy_stencil.dir_num > 0) {
+            host.energy_stencil.dir_eps = static_cast<egg::real>(es["dir_eps"].cast<double>());
+            host.energy_stencil.dir_nodes = extract_int(es, "dir_nodes");
+            host.energy_stencil.dir_kind = extract_int(es, "dir_kind");
+            host.energy_stencil.dir_ref = extract_real(es, "dir_ref");
+            host.energy_stencil.dir_axis = extract_real(es, "dir_axis");
+            host.energy_stencil.dir_weight = extract_real(es, "dir_weight");
+        }
+    }
 
     // Fail fast on a malformed context before any device allocation / kernel.
     validate_context<D>(host);
@@ -846,12 +912,15 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         g2s[g] = it->second;
     }
 
-    // Spare ghost-ring slots per block, for foreign patch nodes (singular fans).
-    // A few of a singular node's fan neighbours cross non-axis-aligned interfaces,
-    // so they are not in any face-ghost slot; we mirror each into an otherwise
-    // unused ghost-ring slot of the owner block and refresh it every sweep from the
-    // node's owner interior (frozen halo). The pool excludes interior slots (never
-    // on the ring) and the regular face-ghost destinations.
+    // Spare ghost-ring slots per block, for foreign patch nodes (singular fans,
+    // constrained corner DOFs with diagonal cross-block neighbours). Such nodes
+    // cross non-axis-aligned interfaces, so they are not in any face-ghost slot;
+    // we mirror each into an otherwise unused ghost-ring slot of the owner block
+    // and refresh it every sweep from the node's owner interior (frozen halo).
+    // The pool excludes interior slots (never on the ring) and the regular
+    // face-ghost destinations. It is a best-effort locality optimization, not a
+    // capacity limit: when a block's ring is full, `lookup` below appends
+    // overflow nodes past the last block instead.
     std::vector<std::unordered_set<int>> used_ghost(num_blocks);
     for (std::size_t e = 0; e < halo_dst_block.size(); ++e) {
         used_ghost[static_cast<std::size_t>(halo_dst_block[e])].insert(
@@ -889,10 +958,13 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     }
 
     std::vector<std::size_t> fan_src_off, fan_dst_off;
+    std::size_t n_overflow = 0;
 
     // Remap one global node id relative to block b's interior-or-ghost map. A node
-    // outside it is a singular-fan neighbour: allocate it a spare ghost slot in b,
-    // sourced from its owner interior, and record the extra halo copy.
+    // outside it is a singular-fan / foreign patch neighbour: mirror it into a
+    // spare ghost slot of b — or, when b's ring is full, an overflow node appended
+    // past the last block — sourced from its owner interior, and record the extra
+    // halo copy.
     auto lookup = [&](std::size_t b, int gid, const char* what) -> int {
         const auto it = block_map[b].find(gid);
         if (it != block_map[b].end()) { return it->second; }
@@ -902,12 +974,22 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
                                         " references global node " + std::to_string(gid) +
                                         " absent from every block's interior map");
         }
-        if (free_cursor[b] >= free_ghosts[b].size()) {
-            throw std::invalid_argument(
-              "structured: block " + std::to_string(b) +
-              " ran out of spare ghost slots for singular-fan / foreign patch nodes");
+        int slot = 0;
+        if (free_cursor[b] < free_ghosts[b].size()) {
+            slot = free_ghosts[b][free_cursor[b]++];
+        } else {
+            // Ring exhausted: grow the store instead of failing. The slot is
+            // reachable only through the tables built here, so appending past
+            // the last block is safe; seed it with the owner's coordinates
+            // (the fan broadcast refreshes it every sweep regardless).
+            slot = static_cast<int>(Xp.size() / static_cast<std::size_t>(D));
+            std::array<egg::real, D> seed {};
+            for (int k = 0; k < D; ++k) {
+                seed[static_cast<std::size_t>(k)] = Xp[(static_cast<std::size_t>(src) * D) + k];
+            }
+            Xp.insert(Xp.end(), seed.begin(), seed.end());
+            ++n_overflow;
         }
-        const int slot = free_ghosts[b][free_cursor[b]++];
         block_map[b][gid] = slot;
         fan_src_off.push_back(static_cast<std::size_t>(src) * D);
         fan_dst_off.push_back(static_cast<std::size_t>(slot) * D);
@@ -965,8 +1047,35 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         }
     }
 
+    // Directional-sample nodes likewise resolve to their OWNER structured slot;
+    // pad slots (-1) pass through. Both the per-DOF group tables and the
+    // energy-stencil whole-sample table carry global ids on the wire.
+    const auto remap_dir_nodes = [&](std::vector<int>& v) {
+        for (int& x : v) {
+            if (x < 0) { continue; }
+            const int s = g2s[static_cast<std::size_t>(x)];
+            if (s < 0) {
+                throw std::invalid_argument(
+                  "structured: a directional-sample node references a global node absent from "
+                  "every block's interior map");
+            }
+            x = s;
+        }
+    };
+    for (auto& g : host.groups) { remap_dir_nodes(g.dir_nodes); }
+    remap_dir_nodes(host.energy_stencil.dir_nodes);
+
+    // Register any overflow nodes the lookup appended, so every consumer sized
+    // off the layout (device X, metric scratch, gather-back staging, control
+    // work buffers) covers them.
+    layout.add_overflow_nodes(n_overflow);
+    if (Xp.size() != layout.total_reals()) {
+        throw std::logic_error("structured: packed X size disagrees with the layout");
+    }
+
     host.X = std::move(Xp);
     host.num_nodes = layout.total_reals() / static_cast<std::size_t>(D);
+    host.num_overflow = n_overflow;
 
     // Flatten the block layout into node-unit arrays the device synthesis reads
     // (block base + padded node strides per block). Doubles/D are exact: a block
@@ -1707,6 +1816,61 @@ PYBIND11_MODULE(cpp_core, m)
       "Returns (mu, grad(9,), hess(81,)).");
 
     m.def(
+      "directional_eval",
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& X_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& nodes_arr,
+         const py::array_t<int, py::array::c_style | py::array::forcecast>& kind_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& ref_arr,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& weight_arr,
+         double eps) -> std::tuple<double, py::array_t<double>> {
+          if (X_arr.ndim() != 2 || (X_arr.shape(1) != 2 && X_arr.shape(1) != 3)) {
+              throw py::value_error("directional_eval: X must be (n_nodes, 2) or (n_nodes, 3)");
+          }
+          const int d = static_cast<int>(X_arr.shape(1));
+          const auto n = static_cast<std::size_t>(weight_arr.size());
+          if (nodes_arr.ndim() != 2 || nodes_arr.shape(1) != 4 ||
+              static_cast<std::size_t>(nodes_arr.shape(0)) != n ||
+              static_cast<std::size_t>(kind_arr.size()) != n || ref_arr.ndim() != 2 ||
+              static_cast<std::size_t>(ref_arr.shape(0)) != n || ref_arr.shape(1) != d) {
+              throw py::value_error("directional_eval: inconsistent sample-table shapes");
+          }
+          const std::vector<egg::real> X = narrow(X_arr);
+          const std::vector<egg::real> ref = narrow(ref_arr);
+          const std::vector<egg::real> weight = narrow(weight_arr);
+          const int* np_ = nodes_arr.data();
+          std::vector<int> nodes(np_, np_ + nodes_arr.size());
+          const int* kp = kind_arr.data();
+          std::vector<int> kind(kp, kp + kind_arr.size());
+          std::vector<egg::real> grad(X.size(), egg::real(0));
+          const auto e = d == 2 ? directional_eval_impl<2>(X,
+                                                           nodes,
+                                                           kind,
+                                                           ref,
+                                                           weight,
+                                                           static_cast<egg::real>(eps),
+                                                           grad)
+                                : directional_eval_impl<3>(X,
+                                                           nodes,
+                                                           kind,
+                                                           ref,
+                                                           weight,
+                                                           static_cast<egg::real>(eps),
+                                                           grad);
+          py::array_t<double> g_ret = to_f64(grad.data(), static_cast<py::ssize_t>(grad.size()));
+          g_ret = g_ret.reshape({X_arr.shape(0), X_arr.shape(1)});
+          return std::make_tuple(e, g_ret);
+      },
+      py::arg("X"),
+      py::arg("nodes"),
+      py::arg("kind"),
+      py::arg("ref"),
+      py::arg("weight"),
+      py::arg("eps") = 1e-12,
+      "Directional soft-energy total and analytic gradient over a sample table "
+      "(host-side oracle). X (n_nodes, d), nodes (n, 4) with -1 pads, kind (n,), "
+      "ref (n, d), weight (n,). Returns (energy, grad (n_nodes, d)).");
+
+    m.def(
       "geometry_project",
       [](const py::array_t<double, py::array::c_style | py::array::forcecast>& p_arr,
          int tag,
@@ -1739,6 +1903,107 @@ PYBIND11_MODULE(cpp_core, m)
       py::arg("tag"),
       py::arg("params"),
       "Tangent direction at point on entity. Returns tang(2,).");
+
+    m.def(
+      "geometry_project_batch",
+      [](const py::array_t<double, py::array::c_style | py::array::forcecast>& q_arr,
+         int tag,
+         const py::array_t<double, py::array::c_style | py::array::forcecast>& records_arr,
+         const py::list& seg_list) -> std::tuple<py::array_t<double>, py::array_t<double>> {
+          if (q_arr.ndim() != 2 || (q_arr.shape(1) != 2 && q_arr.shape(1) != 3)) {
+              throw std::invalid_argument("geometry_project_batch: q must be (n, 2) or (n, 3)");
+          }
+          const auto n = static_cast<std::size_t>(q_arr.shape(0));
+          const std::vector<egg::real> records = narrow(records_arr);
+          // CSR slots ({data, off}) in the entity's EntitySoA slot order —
+          // exactly the wire layout unpack_context ingests, restricted to a
+          // single entity row.
+          if (static_cast<std::size_t>(seg_list.size()) > egg::kMaxSoASeg) {
+              throw std::invalid_argument("geometry_project_batch: too many seg slots");
+          }
+          std::vector<std::vector<egg::real>> seg_data;
+          std::vector<std::vector<int>> seg_off;
+          for (auto item : seg_list) {
+              auto sd = item.cast<py::dict>();
+              seg_data.push_back(extract_real(sd, "data"));
+              seg_off.push_back(extract_int(sd, "off"));
+          }
+          std::array<egg::SegmentedView<egg::real>, egg::kMaxSoASeg> segs {};
+          for (std::size_t s = 0; s < seg_data.size(); ++s) {
+              segs[s] = {seg_data[s].data(), seg_off[s].data()};
+          }
+          const egg::SoAView<const egg::real> soa(records.data(), 1, records.size());
+          const double* qp = q_arr.data();
+
+          // Dimension-generic body: loop the queries through the entity's
+          // project_frame (one Newton yields foot + orthonormal basis).
+          py::array_t<double> feet;
+          py::array_t<double> basis;
+          bool handled = false;
+          const auto run = [&]<int D>() {
+              feet = py::array_t<double>({static_cast<py::ssize_t>(n), py::ssize_t {D}});
+              double* fp = feet.mutable_data();
+              egg::with_entity<D>(
+                static_cast<egg::EntityTag>(tag),
+                soa,
+                segs.data(),
+                0,
+                [&](const auto& e) {
+                    using E = std::decay_t<decltype(e)>;
+                    // Curves and surfaces only: Free (tdim == D) has no foot.
+                    if constexpr (E::tdim >= 1 && E::tdim < D) {
+                        constexpr int K = E::tdim;
+                        handled = true;
+                        basis = py::array_t<double>(
+                          {static_cast<py::ssize_t>(n), py::ssize_t {D}, py::ssize_t {K}});
+                        double* bp = basis.mutable_data();
+                        for (std::size_t i = 0; i < n; ++i) {
+                            egg::PtN<D> q {};
+                            for (int k = 0; k < D; ++k) {
+                                q[static_cast<std::size_t>(k)] =
+                                  static_cast<egg::real>(qp[i * D + static_cast<std::size_t>(k)]);
+                            }
+                            const auto f = e.project_frame(q);
+                            for (int k = 0; k < D; ++k) {
+                                fp[i * D + static_cast<std::size_t>(k)] =
+                                  static_cast<double>(f.pos[static_cast<std::size_t>(k)]);
+                            }
+                            for (int c = 0; c < K; ++c) {
+                                for (int k = 0; k < D; ++k) {
+                                    bp[(i * D + static_cast<std::size_t>(k)) * K +
+                                       static_cast<std::size_t>(c)] =
+                                      static_cast<double>(f.basis[static_cast<std::size_t>(c)]
+                                                                 [static_cast<std::size_t>(k)]);
+                                }
+                            }
+                        }
+                    }
+                });
+          };
+          if (q_arr.shape(1) == 2) {
+              run.operator()<2>();
+          } else {
+              run.operator()<3>();
+          }
+          if (!handled) {
+              throw std::invalid_argument(
+                "geometry_project_batch: tag " + std::to_string(tag) +
+                " is not a projectable curve/surface entity in dimension " +
+                std::to_string(q_arr.shape(1)));
+          }
+          return std::make_tuple(feet, basis);
+      },
+      py::arg("q"),
+      py::arg("tag"),
+      py::arg("records"),
+      py::arg("seg"),
+      "Batched projection onto ONE SoA-encoded entity (the sweep kernels' "
+      "own entity reconstruction, so composites / B-splines / arena-backed "
+      "types all work). q is (n, d) float64 with d in {2, 3}; records / seg "
+      "come from egg.geometry.entity_soa.encode_entity_soa restricted to one "
+      "row. Returns (feet(n, d), basis(n, d, tdim)) float64 — the projected "
+      "points and the orthonormal tangent basis at each foot. Precision "
+      "follows the build's egg::real.");
 
     m.def(
       "patch_eval",

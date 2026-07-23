@@ -147,6 +147,7 @@ def curvature_windows(
     iface_boost: float = 1.0,
     interface_only: bool = False,
     singularity_weight: float = 0.0,
+    frozen=None,
     topology=None,
 ) -> CurvatureWindows:
     """Build the curvature-continuity windows for a 2D grid.
@@ -167,6 +168,13 @@ def curvature_windows(
         boundary ring (see :func:`_singularity_rings`), weighted by this. The C2
         term drives a closed ring toward constant curvature (a smooth loop), so
         the fan's sharp pentagon corners round out — C1-continuous ring edges.
+    frozen : array of int, optional
+        DOF ids frozen by a Pin stamp. A window that CROSSES the pinned/free
+        boundary (some nodes frozen, some free — the edge of the frozen
+        boundary-layer band, a within-block interface) is treated like a
+        block-seam window: it gets the ``iface_boost``, so the C2 constraint is
+        concentrated across the frozen band edge and the free grid continues
+        its curvature smoothly out of the band instead of kinking.
     topology : BlockTopology, optional
         Defaults to ``grid.topology``.
     """
@@ -187,6 +195,17 @@ def curvature_windows(
     is_seam = np.zeros(n_total, bool)
     is_seam[_seam_nodes(grid)] = True
     touches = is_seam[nodes].any(axis=1) if have_lines else np.zeros(0, bool)
+
+    # A window straddling the pinned/free boundary (some nodes frozen, some
+    # not) is a within-block interface — the frozen boundary-layer band edge —
+    # and gets the same interface boost so the free grid continues its
+    # curvature out of the band instead of kinking at the edge.
+    if frozen is not None and have_lines:
+        is_frozen = np.zeros(n_total, bool)
+        is_frozen[np.asarray(frozen, dtype=np.int64)] = True
+        fr = is_frozen[nodes]
+        crosses = fr.any(axis=1) & (~fr).any(axis=1)
+        touches = touches | crosses
 
     w = np.where(touches, weight * iface_boost, weight).astype(float)
     if interface_only and have_lines:

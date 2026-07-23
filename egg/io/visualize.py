@@ -8,6 +8,11 @@
 
 """PyVista (2D+3D grids) + matplotlib (scalar diagnostics)."""
 
+# pyvista binds its plotting methods dynamically; its own py.typed stubs surface
+# them as unbound functions, so the checker asks for an explicit self on calls
+# like plotter.view_xy(). This is a display-only module.
+# pyright: reportCallIssue=false
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
@@ -91,25 +96,26 @@ def plot_geometry_entity(
 
     import pyvista as pv
 
-    # Sample curve points
-    if isinstance(entity, type) or entity.dim == 1:
+    from egg.geometry.analytic2d import Circle, LineSegment
+
+    # Sample curve points, by entity kind.
+    if isinstance(entity, LineSegment):
         t_vals = np.linspace(0, 1, n_curve)
-        if hasattr(entity, "start") and hasattr(entity, "end"):
-            pts = np.array(
-                [
-                    entity.project(entity.start + t * (entity.end - entity.start))
-                    for t in t_vals
-                ]
-            )
-        else:
-            # Circle: sample roughly around it
-            angles = np.linspace(0, 2 * np.pi, n_curve)
-            pts = np.column_stack(
-                [
-                    entity.center[0] + entity.radius * np.cos(angles),
-                    entity.center[1] + entity.radius * np.sin(angles),
-                ]
-            )
+        pts = np.array(
+            [entity.project(entity.start + t * (entity.end - entity.start)) for t in t_vals]
+        )
+    elif isinstance(entity, Circle):
+        angles = np.linspace(0, 2 * np.pi, n_curve)
+        pts = np.column_stack(
+            [
+                entity.center[0] + entity.radius * np.cos(angles),
+                entity.center[1] + entity.radius * np.sin(angles),
+            ]
+        )
+    elif entity.dim == 1 and hasattr(entity, "eval"):
+        # Any other parametric curve (arc, bezier, spline): sample its parameter.
+        t_vals = np.linspace(0, 1, n_curve)
+        pts = np.array([entity.eval_frac(t) for t in t_vals])
     else:
         # Generic: just project some reference points (not exhaustive)
         pts = np.array([entity.project(np.array([0.0, 0.0]))])
@@ -219,16 +225,19 @@ def _add_entity_curve(plotter: "pv.Plotter", entity: "GeometryEntity") -> None:
     """Add the entity curve to the plotter (internal helper)."""
     import pyvista as pv
 
-    if hasattr(entity, "segments"):  # CompositePath
+    from egg.geometry.analytic2d import Circle, LineSegment
+    from egg.geometry.curves2d import CompositePath, _TrimmedCurve
+
+    if isinstance(entity, CompositePath):
         for seg in entity.segments:
             _add_entity_curve(plotter, seg)
         return
 
-    if hasattr(entity, "eval"):
+    if isinstance(entity, _TrimmedCurve):
         # Trimmed parametric curve: sample within its own parameter range.
         t_vals = np.linspace(entity.t0, entity.t1, 200)
         pts2 = np.array([entity.eval(t) for t in t_vals])
-    elif hasattr(entity, "center") and hasattr(entity, "radius"):
+    elif isinstance(entity, Circle):
         # Analytic full circle.
         angles = np.linspace(0, 2 * np.pi, 200)
         pts2 = np.column_stack(
@@ -237,7 +246,7 @@ def _add_entity_curve(plotter: "pv.Plotter", entity: "GeometryEntity") -> None:
                 entity.center[1] + entity.radius * np.sin(angles),
             ]
         )
-    elif hasattr(entity, "start") and hasattr(entity, "end"):
+    elif isinstance(entity, LineSegment):
         t_vals = np.linspace(0, 1, 200)
         pts2 = entity.start[None, :] + t_vals[:, None] * (entity.end - entity.start)
     else:

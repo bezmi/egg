@@ -33,3 +33,7 @@ docs/_doxygen/
 # web UI assets generated at build time (tools/vendor_webui.py); never committed
 egg/webui/static/vendor/
 egg/webui/docs/
+
+# control nets written by example runs (Save stage, regrid demos)
+examples/**/net.npz
+examples/**/net-remesh.npz

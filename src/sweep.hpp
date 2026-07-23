@@ -12,6 +12,7 @@
 
 #include "curvature.hpp"
 #include "device.hpp"
+#include "directional.hpp"
 #include "geometry.hpp"
 #include "metric.hpp"
 #include "patch.hpp"
@@ -96,6 +97,20 @@ template <int D> struct SweepGroupHostT {
     std::vector<int> curv_nodes;    // [ndof * curv_k * 4]
     std::vector<int> curv_slot;     // [ndof * curv_k]  (-1 = pad)
     std::vector<real> curv_weight;  // [ndof * curv_k]
+
+    // Directional soft-energy term (topology-aware constraints, D-generic):
+    // per-DOF fixed-K sample table — four node ids per sample (global; remapped
+    // to structured owner slots), the DOF's slot, the sample kind, the frozen
+    // D-component reference and projector-axis vectors, and the weight.
+    // dir_k == 0 means no directional term. See directional.hpp.
+    int dir_k = 0;
+    real dir_eps = 0.0_r;
+    std::vector<int> dir_nodes;    // [ndof * dir_k * 4]
+    std::vector<int> dir_slot;     // [ndof * dir_k]  (-1 = pad)
+    std::vector<int> dir_kind;     // [ndof * dir_k]
+    std::vector<real> dir_ref;     // [ndof * dir_k * D]
+    std::vector<real> dir_axis;    // [ndof * dir_k * D]
+    std::vector<real> dir_weight;  // [ndof * dir_k]
 };
 
 template <int D> struct EnergyStencilHostT {
@@ -105,6 +120,17 @@ template <int D> struct EnergyStencilHostT {
     std::vector<real> s[D];
     std::vector<real> W_inv;   // [num_samples * dim::wInv(D)]
     std::vector<real> weight;  // [num_samples] energy weight, or one row if uniform
+
+    // Whole-sample directional table (see directional.hpp): the reductions add
+    // its total on top of the shape energy, so reported energies and the FAS
+    // safeguard gate on the composed objective. Empty when absent.
+    std::size_t dir_num = 0;
+    real dir_eps = 0.0_r;
+    std::vector<int> dir_nodes;    // [dir_num * 4]
+    std::vector<int> dir_kind;     // [dir_num]
+    std::vector<real> dir_ref;     // [dir_num * D]
+    std::vector<real> dir_axis;    // [dir_num * D]
+    std::vector<real> dir_weight;  // [dir_num]
 };
 
 template <int D> struct SweepContextHostT {
@@ -112,6 +138,12 @@ template <int D> struct SweepContextHostT {
     EnergyStencilHostT<D> energy_stencil;
     std::size_t num_nodes;
     std::vector<real> X;  // [num_nodes * D] initial positions
+
+    // Overflow nodes the structured remap appended past the last block (foreign
+    // patch nodes that did not fit a ghost ring); the last num_overflow of
+    // num_nodes. layout_from_context must exclude them when inferring the last
+    // block's padded shape.
+    std::size_t num_overflow = 0;
 
     // Structured block layout in NODE units, for synthesizing interior DOF
     // patches on the device (empty on the unstructured path): block_off[b] is
@@ -173,6 +205,18 @@ template <int D> struct GroupViewT {
     const int* curv_slot = nullptr;     // [ndof * curv_k]
     const real* curv_weight = nullptr;  // [ndof * curv_k]
 
+    // Directional soft-energy term (null when absent): per-DOF fixed-K sample
+    // table (see SweepGroupHostT / directional.hpp). dir_nodes holds structured
+    // node ids.
+    int dir_k = 0;
+    real dir_eps = 0.0_r;
+    const int* dir_nodes = nullptr;    // [ndof * dir_k * 4]
+    const int* dir_slot = nullptr;     // [ndof * dir_k]
+    const int* dir_kind = nullptr;     // [ndof * dir_k]
+    const real* dir_ref = nullptr;     // [ndof * dir_k * D]
+    const real* dir_axis = nullptr;    // [ndof * dir_k * D]
+    const real* dir_weight = nullptr;  // [ndof * dir_k]
+
     // True when DOF d's patch can be synthesized from the block layout (its whole
     // patch lies inside one block's interior); fills the block + logical index.
     bool interior(std::size_t d, int& block, int (&logical)[D]) const
@@ -232,6 +276,15 @@ template <int D> struct GroupViewT {
             sub.curv_slot = curv_slot + (begin * curv_k);
             sub.curv_weight = curv_weight + (begin * curv_k);
         }
+        if (dir_nodes != nullptr) {
+            const auto dk = static_cast<std::size_t>(dir_k);
+            sub.dir_nodes = dir_nodes + (begin * dk * 4);
+            sub.dir_slot = dir_slot + (begin * dk);
+            sub.dir_kind = dir_kind + (begin * dk);
+            sub.dir_ref = dir_ref + (begin * dk * D);
+            sub.dir_axis = dir_axis + (begin * dk * D);
+            sub.dir_weight = dir_weight + (begin * dk);
+        }
         return sub;
     }
 };
@@ -247,6 +300,10 @@ template <int D> struct StencilViewT {
     int w_stride = dim::wInv(D);
     View1<const real> weight;  // [num_samples] energy weight, or one row when uniform
     int wt_stride = 1;         // 0 when every sample shares one weight value
+
+    // Whole-sample directional table (empty when absent): the reductions add
+    // its total on top of the shape energy.
+    DirTableViewT<D> dir {};
 };
 
 // Base pointers of the shared deduplicated metric table, indexed by a patch
@@ -398,6 +455,38 @@ template <int D> class SweepDeviceContextT
                 dg.curv_weight = {q, cw};
             }
 
+            // Directional sample table: K-wide per DOF, reordered in lockstep.
+            if (g.dir_k > 0) {
+                const auto K = static_cast<std::size_t>(g.dir_k);
+                dg.dir_k = g.dir_k;
+                dg.dir_eps = g.dir_eps;
+                std::vector<int> dn(g.ndof * K * 4), ds(g.ndof * K), dk(g.ndof * K);
+                std::vector<real> dref(g.ndof * K * D), dax(g.ndof * K * D), dw(g.ndof * K);
+                for (std::size_t i = 0; i < perm.size(); ++i) {
+                    const auto src = static_cast<std::size_t>(perm[i]);
+                    for (std::size_t j = 0; j < K; ++j) {
+                        const std::size_t dst_e = (i * K) + j;
+                        const std::size_t src_e = (src * K) + j;
+                        ds[dst_e] = g.dir_slot[src_e];
+                        dk[dst_e] = g.dir_kind[src_e];
+                        dw[dst_e] = g.dir_weight[src_e];
+                        for (int m = 0; m < 4; ++m) {
+                            dn[(dst_e * 4) + m] = g.dir_nodes[(src_e * 4) + m];
+                        }
+                        for (int m = 0; m < D; ++m) {
+                            dref[(dst_e * D) + m] = g.dir_ref[(src_e * D) + m];
+                            dax[(dst_e * D) + m] = g.dir_axis[(src_e * D) + m];
+                        }
+                    }
+                }
+                dg.dir_nodes = {q, dn};
+                dg.dir_slot = {q, ds};
+                dg.dir_kind = {q, dk};
+                dg.dir_ref = {q, dref};
+                dg.dir_axis = {q, dax};
+                dg.dir_weight = {q, dw};
+            }
+
             groups_.push_back(std::move(dg));
         }
 
@@ -417,6 +506,15 @@ template <int D> class SweepDeviceContextT
         // Energy weight per stencil sample: default to one shared 1.0 when the
         // wire omits it, so the reduction reads it with stride 0.
         stencil_.weight = {q, es.weight.empty() ? std::vector<real> {1.0_r} : es.weight};
+        if (es.dir_num > 0) {
+            stencil_.dir_num = es.dir_num;
+            stencil_.dir_eps = es.dir_eps;
+            stencil_.dir_nodes = {q, es.dir_nodes};
+            stencil_.dir_kind = {q, es.dir_kind};
+            stencil_.dir_ref = {q, es.dir_ref};
+            stencil_.dir_axis = {q, es.dir_axis};
+            stencil_.dir_weight = {q, es.dir_weight};
+        }
 
         // Build the per-group PartitionView arrays (host copies), retained for
         // the merged block-Jacobi view (which uploads its own concatenated copy).
@@ -521,6 +619,10 @@ template <int D> class SweepDeviceContextT
         int curv_k = 0;                                   // curvature windows per DOF (0 = none)
         UsmBuffer<int> curv_nodes, curv_slot;             // [ndof*curv_k*4], [ndof*curv_k]
         UsmBuffer<real> curv_weight;                      // [ndof*curv_k]
+        int dir_k = 0;                                    // directional samples per DOF (0 = none)
+        real dir_eps = 0.0_r;
+        UsmBuffer<int> dir_nodes, dir_slot, dir_kind;   // [ndof*dir_k*4], [ndof*dir_k] ×2
+        UsmBuffer<real> dir_ref, dir_axis, dir_weight;  // [ndof*dir_k*D] ×2, [ndof*dir_k]
         std::vector<DevicePartition> partitions;
 
         GroupViewT<D> view(const PartitionView* pvs,
@@ -563,6 +665,16 @@ template <int D> class SweepDeviceContextT
                 gv.curv_slot = curv_slot.data();
                 gv.curv_weight = curv_weight.data();
             }
+            if (dir_nodes.size() > 0) {
+                gv.dir_k = dir_k;
+                gv.dir_eps = dir_eps;
+                gv.dir_nodes = dir_nodes.data();
+                gv.dir_slot = dir_slot.data();
+                gv.dir_kind = dir_kind.data();
+                gv.dir_ref = dir_ref.data();
+                gv.dir_axis = dir_axis.data();
+                gv.dir_weight = dir_weight.data();
+            }
             return gv;
         }
     };
@@ -574,6 +686,10 @@ template <int D> class SweepDeviceContextT
         UsmBuffer<real> s[D];
         UsmBuffer<real> W_inv;
         UsmBuffer<real> weight;
+        std::size_t dir_num = 0;  // whole-sample directional table (0 = none)
+        real dir_eps = 0.0_r;
+        UsmBuffer<int> dir_nodes, dir_kind;
+        UsmBuffer<real> dir_ref, dir_axis, dir_weight;
 
         StencilViewT<D> view() const
         {
@@ -590,6 +706,15 @@ template <int D> class SweepDeviceContextT
             // One shared value => stride 0; otherwise one weight per sample.
             sv.weight = View1<const real> {weight.data(), weight.size()};
             sv.wt_stride = (weight.size() == 1) ? 0 : 1;
+            if (dir_num > 0) {
+                sv.dir.num = dir_num;
+                sv.dir.eps = dir_eps;
+                sv.dir.nodes = dir_nodes.data();
+                sv.dir.kind = dir_kind.data();
+                sv.dir.ref = dir_ref.data();
+                sv.dir.axis = dir_axis.data();
+                sv.dir.weight = dir_weight.data();
+            }
             return sv;
         }
     };
@@ -628,6 +753,17 @@ template <int D> class SweepDeviceContextT
         std::vector<int> curv_nodes(total_ndof * ck * 4, -1);
         std::vector<int> curv_slot(total_ndof * ck, -1);
         std::vector<real> curv_weight(total_ndof * ck, 0.0_r);
+        // Directional sample table carried through the merge (0-wide when absent).
+        const bool has_dir = !groups_.empty() && groups_[0].dir_k > 0;
+        const int dir_k = has_dir ? groups_[0].dir_k : 0;
+        const real dir_eps = has_dir ? groups_[0].dir_eps : 0.0_r;
+        const std::size_t dk = static_cast<std::size_t>(dir_k);
+        std::vector<int> dir_nodes(total_ndof * dk * 4, -1);
+        std::vector<int> dir_slot(total_ndof * dk, -1);
+        std::vector<int> dir_kind(total_ndof * dk, 0);
+        std::vector<real> dir_ref(total_ndof * dk * static_cast<std::size_t>(D), 0.0_r);
+        std::vector<real> dir_axis(total_ndof * dk * static_cast<std::size_t>(D), 0.0_r);
+        std::vector<real> dir_weight(total_ndof * dk, 0.0_r);
         std::vector<PartitionView> merged_pvs;
         merged_pvs.reserve(total_parts);
 
@@ -679,6 +815,36 @@ template <int D> class SweepDeviceContextT
                         curv_weight[d_e] = g_cw[s_e];
                         for (int m = 0; m < 4; ++m) {
                             curv_nodes[(d_e * 4) + m] = g_cn[(s_e * 4) + m];
+                        }
+                    }
+                }
+            }
+            if (has_dir && dg.dir_k > 0) {
+                std::vector<int> g_dn(gd * dk * 4), g_ds(gd * dk), g_dk(gd * dk);
+                std::vector<real> g_dr(gd * dk * static_cast<std::size_t>(D));
+                std::vector<real> g_da(gd * dk * static_cast<std::size_t>(D));
+                std::vector<real> g_dw(gd * dk);
+                dg.dir_nodes.download(g_dn.data());
+                dg.dir_slot.download(g_ds.data());
+                dg.dir_kind.download(g_dk.data());
+                dg.dir_ref.download(g_dr.data());
+                dg.dir_axis.download(g_da.data());
+                dg.dir_weight.download(g_dw.data());
+                for (std::size_t r = 0; r < gd; ++r) {
+                    for (std::size_t j = 0; j < dk; ++j) {
+                        const std::size_t d_e = ((dbase + r) * dk) + j;
+                        const std::size_t s_e = (r * dk) + j;
+                        dir_slot[d_e] = g_ds[s_e];
+                        dir_kind[d_e] = g_dk[s_e];
+                        dir_weight[d_e] = g_dw[s_e];
+                        for (int m = 0; m < 4; ++m) {
+                            dir_nodes[(d_e * 4) + m] = g_dn[(s_e * 4) + m];
+                        }
+                        for (int m = 0; m < D; ++m) {
+                            dir_ref[(d_e * D) + static_cast<std::size_t>(m)] =
+                              g_dr[(s_e * D) + static_cast<std::size_t>(m)];
+                            dir_axis[(d_e * D) + static_cast<std::size_t>(m)] =
+                              g_da[(s_e * D) + static_cast<std::size_t>(m)];
                         }
                     }
                 }
@@ -752,6 +918,37 @@ template <int D> class SweepDeviceContextT
             m_curv_slot_ = UsmBuffer<int> {q_, rcs};
             m_curv_weight_ = UsmBuffer<real> {q_, rcw};
         }
+        if (has_dir) {
+            m_dir_k_ = dir_k;
+            m_dir_eps_ = dir_eps;
+            std::vector<int> rdn(total_ndof * dk * 4), rds(total_ndof * dk), rdk(total_ndof * dk);
+            std::vector<real> rdr(total_ndof * dk * static_cast<std::size_t>(D));
+            std::vector<real> rda(total_ndof * dk * static_cast<std::size_t>(D));
+            std::vector<real> rdw(total_ndof * dk);
+            for (std::size_t i = 0; i < perm.size(); ++i) {
+                const auto src = static_cast<std::size_t>(perm[i]);
+                for (std::size_t j = 0; j < dk; ++j) {
+                    const std::size_t d_e = (i * dk) + j;
+                    const std::size_t s_e = (src * dk) + j;
+                    rds[d_e] = dir_slot[s_e];
+                    rdk[d_e] = dir_kind[s_e];
+                    rdw[d_e] = dir_weight[s_e];
+                    for (int m = 0; m < 4; ++m) { rdn[(d_e * 4) + m] = dir_nodes[(s_e * 4) + m]; }
+                    for (int m = 0; m < D; ++m) {
+                        rdr[(d_e * D) + static_cast<std::size_t>(m)] =
+                          dir_ref[(s_e * D) + static_cast<std::size_t>(m)];
+                        rda[(d_e * D) + static_cast<std::size_t>(m)] =
+                          dir_axis[(s_e * D) + static_cast<std::size_t>(m)];
+                    }
+                }
+            }
+            m_dir_nodes_ = UsmBuffer<int> {q_, rdn};
+            m_dir_slot_ = UsmBuffer<int> {q_, rds};
+            m_dir_kind_ = UsmBuffer<int> {q_, rdk};
+            m_dir_ref_ = UsmBuffer<real> {q_, rdr};
+            m_dir_axis_ = UsmBuffer<real> {q_, rda};
+            m_dir_weight_ = UsmBuffer<real> {q_, rdw};
+        }
 
         // Per-partition reordered-position lists for the boundary tail: bucket
         // every boundary position by merged partition; each non-empty bucket is
@@ -821,6 +1018,16 @@ template <int D> class SweepDeviceContextT
             gv.curv_nodes = m_curv_nodes_.data();
             gv.curv_slot = m_curv_slot_.data();
             gv.curv_weight = m_curv_weight_.data();
+        }
+        if (has_dir) {
+            gv.dir_k = m_dir_k_;
+            gv.dir_eps = m_dir_eps_;
+            gv.dir_nodes = m_dir_nodes_.data();
+            gv.dir_slot = m_dir_slot_.data();
+            gv.dir_kind = m_dir_kind_.data();
+            gv.dir_ref = m_dir_ref_.data();
+            gv.dir_axis = m_dir_axis_.data();
+            gv.dir_weight = m_dir_weight_.data();
         }
         merged_view_ = gv;
 
@@ -996,6 +1203,10 @@ template <int D> class SweepDeviceContextT
     int m_curv_k_ = 0;                                      // curvature windows per DOF (0 = none)
     UsmBuffer<int> m_curv_nodes_, m_curv_slot_;             // curvature table; empty otherwise
     UsmBuffer<real> m_curv_weight_;
+    int m_dir_k_ = 0;  // directional samples per DOF (0 = none)
+    real m_dir_eps_ = 0.0_r;
+    UsmBuffer<int> m_dir_nodes_, m_dir_slot_, m_dir_kind_;  // directional table; empty otherwise
+    UsmBuffer<real> m_dir_ref_, m_dir_axis_, m_dir_weight_;
     UsmBuffer<PartitionView> m_partitions_;
 
     // Per-partition boundary launch descriptors (§4.7 / S1). m_part_positions_
@@ -1093,6 +1304,28 @@ inline void sweep_kernel(sycl::queue& q,
         const PatchResultT<D> r = patch_eval<D>(pv, X, objective);
         const PtN<D> pos = load_pt<D>(X, dof);
 
+        // Directional soft-energy term: fold the DOF's sample contributions
+        // into the Newton system and the baseline energy (cf. metric_kernel),
+        // so constrained chain/stem endpoints feel the term too.
+        VecN<D> grad = r.grad;
+        MatN<D> hess = r.hess;
+        real e_base = r.energy;
+        const std::size_t dir_off = d * static_cast<std::size_t>(g.dir_k);
+        if (g.dir_nodes != nullptr) {
+            dir_dof_accumulate<D>(g.dir_k,
+                                  g.dir_nodes + (dir_off * 4),
+                                  g.dir_slot + dir_off,
+                                  g.dir_kind + dir_off,
+                                  g.dir_ref + (dir_off * D),
+                                  g.dir_axis + (dir_off * D),
+                                  g.dir_weight + dir_off,
+                                  g.dir_eps,
+                                  X,
+                                  grad,
+                                  hess,
+                                  e_base);
+        }
+
         // 2. Tangent-reduced Newton step via the scoped tag switch (the only place
         //    the Newton math touches entity geometry). The DOF's entity lives in
         //    partition part_of[d] at SoA row row_of[d]; warm-start the tangent from
@@ -1105,7 +1338,7 @@ inline void sweep_kernel(sycl::queue& q,
                                 ? (seeds + (static_cast<std::size_t>(dof) * kSeedStride))
                                 : nullptr;
             with_entity<D>(part.tag, part.soa_view, part.seg, row, [&](const auto& ent) {
-                delta = newton_delta_with_seed<D, false>(r.grad, r.hess, pos, ent, seed_slot);
+                delta = newton_delta_with_seed<D, false>(grad, hess, pos, ent, seed_slot);
             });
         }
         // Jacobi damping on the step itself: trials stay projected, so the
@@ -1140,8 +1373,20 @@ inline void sweep_kernel(sycl::queue& q,
             real e_new;
             real mdet;
             trial_energy_mindet<D>(pv, X, dof, trial, objective, e_new, mdet);
+            if (g.dir_nodes != nullptr) {
+                e_new += dir_dof_trial_energy<D>(g.dir_k,
+                                                 g.dir_nodes + (dir_off * 4),
+                                                 g.dir_slot + dir_off,
+                                                 g.dir_kind + dir_off,
+                                                 g.dir_ref + (dir_off * D),
+                                                 g.dir_axis + (dir_off * D),
+                                                 g.dir_weight + dir_off,
+                                                 g.dir_eps,
+                                                 X,
+                                                 trial);
+            }
 
-            const bool ok = sycl::isfinite(e_new) && (e_new <= r.energy + tol::energy) &&
+            const bool ok = sycl::isfinite(e_new) && (e_new <= e_base + tol::energy) &&
                             objective.accept_mindet(mdet);
             if (ok) {
                 cur = trial;
@@ -1240,6 +1485,31 @@ inline void metric_kernel(sycl::queue& q,
                 e0_buf[base] += ce;
             }
         }
+
+        // Directional soft-energy term (D-generic): add the DOF's sample
+        // contributions on top of the shape metric. The det barrier is
+        // untouched, so validity is still owned by the shape/mindet gate.
+        if (g.dir_nodes != nullptr) {
+            const auto off = d * static_cast<std::size_t>(g.dir_k);
+            VecN<D> dgr {};
+            MatN<D> dh {};
+            real de = 0.0_r;
+            dir_dof_accumulate<D>(g.dir_k,
+                                  g.dir_nodes + (off * 4),
+                                  g.dir_slot + off,
+                                  g.dir_kind + off,
+                                  g.dir_ref + (off * D),
+                                  g.dir_axis + (off * D),
+                                  g.dir_weight + off,
+                                  g.dir_eps,
+                                  X,
+                                  dgr,
+                                  dh,
+                                  de);
+            for (int k = 0; k < D; ++k) { gslot[k] += dgr[k]; }
+            for (int k = 0; k < D * D; ++k) { hslot[k] += dh[k]; }
+            e0_buf[base] += de;
+        }
     });
 }
 
@@ -1334,9 +1604,29 @@ inline void interior_update_kernel(sycl::queue& q,
                 if (g.curv_nodes != nullptr) {
                     const int K = g.curv_k;
                     const std::size_t off = d * static_cast<std::size_t>(K);
-                    e_new += curv_dof_trial_energy(
-                      K, g.curv_nodes + (off * 4), g.curv_slot + off, g.curv_weight + off, X, trial);
+                    e_new += curv_dof_trial_energy(K,
+                                                   g.curv_nodes + (off * 4),
+                                                   g.curv_slot + off,
+                                                   g.curv_weight + off,
+                                                   X,
+                                                   trial);
                 }
+            }
+            // Directional term: the DOF's sample energies with its node moved to
+            // the trial (others frozen), matching the energy folded into e0 by
+            // metric_kernel — the accept rule gates on the composed objective.
+            if (g.dir_nodes != nullptr) {
+                const auto off = d * static_cast<std::size_t>(g.dir_k);
+                e_new += dir_dof_trial_energy<D>(g.dir_k,
+                                                 g.dir_nodes + (off * 4),
+                                                 g.dir_slot + off,
+                                                 g.dir_kind + off,
+                                                 g.dir_ref + (off * D),
+                                                 g.dir_axis + (off * D),
+                                                 g.dir_weight + off,
+                                                 g.dir_eps,
+                                                 X,
+                                                 trial);
             }
             // Shift the trial energy by the same linear term as e0 above, so
             // the acceptance compares the FAS objective on both sides.
@@ -1448,6 +1738,40 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q,
         real* seed_slot =
           (seeds != nullptr) ? (seeds + (static_cast<std::size_t>(dof) * kSeedStride)) : nullptr;
 
+        // Directional soft-energy term: fold into the Newton system and the
+        // baseline energy; each trial adds its own increment (cf. sweep_kernel).
+        VecN<D> grad = r.grad;
+        MatN<D> hess = r.hess;
+        real e_base = r.energy;
+        const std::size_t dir_off = d * static_cast<std::size_t>(g.dir_k);
+        if (g.dir_nodes != nullptr) {
+            dir_dof_accumulate<D>(g.dir_k,
+                                  g.dir_nodes + (dir_off * 4),
+                                  g.dir_slot + dir_off,
+                                  g.dir_kind + dir_off,
+                                  g.dir_ref + (dir_off * D),
+                                  g.dir_axis + (dir_off * D),
+                                  g.dir_weight + dir_off,
+                                  g.dir_eps,
+                                  X,
+                                  grad,
+                                  hess,
+                                  e_base);
+        }
+        const auto dir_trial = [&](const PtN<D>& trial) -> real {
+            if (g.dir_nodes == nullptr) { return 0.0_r; }
+            return dir_dof_trial_energy<D>(g.dir_k,
+                                           g.dir_nodes + (dir_off * 4),
+                                           g.dir_slot + dir_off,
+                                           g.dir_kind + dir_off,
+                                           g.dir_ref + (dir_off * D),
+                                           g.dir_axis + (dir_off * D),
+                                           g.dir_weight + dir_off,
+                                           g.dir_eps,
+                                           X,
+                                           trial);
+        };
+
         PtN<D> cur = pos;
         with_entity<D>(part.tag, part.soa_view, part.seg, row, [&](const auto& ent) {
             using E = std::decay_t<decltype(ent)>;
@@ -1474,7 +1798,7 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q,
                 const std::array<VecN<D>, K> B = orthonormalize<D, K>(J);
 
                 // 3. Tangent-reduced Newton step δ_world = B y.
-                const VecN<D> delta = newton_step_from_basis<D, K>(r.grad, r.hess, B);
+                const VecN<D> delta = newton_step_from_basis<D, K>(grad, hess, B);
 
                 // 4. Reduce to a parametric step Δq = (JᵀJ)⁻¹ Jᵀ δ_world (exact,
                 //    since δ_world ∈ span(J)).
@@ -1505,7 +1829,8 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q,
                     real e_new;
                     real mdet;
                     trial_energy_mindet<D>(pv, X, dof, trial, objective, e_new, mdet);
-                    const bool ok = sycl::isfinite(e_new) && (e_new <= r.energy + tol::energy) &&
+                    e_new += dir_trial(trial);
+                    const bool ok = sycl::isfinite(e_new) && (e_new <= e_base + tol::energy) &&
                                     objective.accept_mindet(mdet);
                     if (ok) {
                         cur = trial;
@@ -1523,8 +1848,7 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q,
                 // analytic reprojection per trial. (The free/interior entity's
                 // identity `project` also matches here, but free DOFs never enter
                 // this boundary group — they are relaxed by the dedicated kernel.)
-                VecN<D> delta =
-                  newton_delta_with_seed<D, true>(r.grad, r.hess, pos, ent, seed_slot);
+                VecN<D> delta = newton_delta_with_seed<D, true>(grad, hess, pos, ent, seed_slot);
                 for (int k = 0; k < D; ++k) { delta[k] *= omega; }
                 real alpha = 1.0_r;
                 bool accepted = false;
@@ -1535,7 +1859,8 @@ inline void sweep_boundary_paramls_kernel(sycl::queue& q,
                     real e_new;
                     real mdet;
                     trial_energy_mindet<D>(pv, X, dof, trial, objective, e_new, mdet);
-                    const bool ok = sycl::isfinite(e_new) && (e_new <= r.energy + tol::energy) &&
+                    e_new += dir_trial(trial);
+                    const bool ok = sycl::isfinite(e_new) && (e_new <= e_base + tol::energy) &&
                                     objective.accept_mindet(mdet);
                     if (ok) {
                         cur = trial;
@@ -1591,6 +1916,9 @@ inline void reduce_energy_mindet(
                        e_sum += wt * objective.value(t);
                        m_min.combine(detA);
                    });
+    // Directional soft-energy total on top of the shape energy (accumulating
+    // reduction on the in-order queue; no-op when the stencil carries none).
+    reduce_directional_energy<D>(q, es.dir, X, out_e);
 }
 
 /// One double-buffered block-Jacobi sweep: pre-sweep hook on the read buffer,

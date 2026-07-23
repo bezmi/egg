@@ -323,8 +323,7 @@ inline void accumulate_sample(M& objective,
 /// batch.patch_eval (numerically identical to the JAX patch_eval_jax); D=2
 /// accumulation order matches the original unrolled code bit-for-bit.
 template <int D, ObjectiveD<D> M = ShapeObjectiveT<D>>
-inline PatchResultT<D>
-  patch_eval(const PatchViewT<D>& sv, const real* X, M objective = {})
+inline PatchResultT<D> patch_eval(const PatchViewT<D>& sv, const real* X, M objective = {})
 {
     PatchResultT<D> r {};
     r.grad = VecN<D> {};
@@ -402,6 +401,13 @@ inline VecN<D> newton_delta(const VecN<D>& g, const MatN<D>& H, const PtN<D>& po
         static_cast<void>(entity);
         return solveNxN<D>(H, g);  // interior DOF, full d×d solve
     } else {
+        // An open-ended rail whose foot lies beyond the segment is RELEASED:
+        // the DOF takes the full-space step (the per-trial projection is the
+        // identity out there too, so it moves like a free node until its foot
+        // re-enters the segment).
+        if constexpr (requires { entity.on_rail(pos); }) {
+            if (!entity.on_rail(pos)) { return solveNxN<D>(H, g); }
+        }
         // Cold path: the tangent basis comes from a fresh (coarse-grid) projection.
         return newton_step_from_basis<D, k>(g, H, entity.tangent_basis(pos));
     }

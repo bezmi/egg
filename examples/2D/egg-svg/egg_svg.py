@@ -50,7 +50,17 @@ The command-line surface lives in ``driver.py``; run
 
 from pathlib import Path
 
-from egg.pipeline import PipelineConfig, generate_steps
+from egg.enums import TmopMetric
+from egg.pipeline import (
+    ControlPointSmoother,
+    FasSmoother,
+    JacobiSmoother,
+    Presmooth,
+    Pin,
+    Respace,
+    Untangle,
+    generate_steps,
+)
 
 from egg.geometry import svg_import, svg_topology
 
@@ -82,8 +92,7 @@ def build_egg_from_svg(bl_first_height=0.0, bl_growth=1.5, n_fixed=2, res=12):
         # Wall-normal clustering on the imported egg curve; the egg is a
         # closed interior wall, so no domain boundary meets it obliquely
         # and relax_orthogonality stays empty.
-        b.set_boundary_layer(
-            dom.edge("egg"),
+        dom.edge("egg").clustered(
             first_height=bl_first_height,
             growth=bl_growth,
             n_fixed=n_fixed,
@@ -92,8 +101,60 @@ def build_egg_from_svg(bl_first_height=0.0, bl_growth=1.5, n_fixed=2, res=12):
     return b.build(), entities
 
 
-def setup(a):
-    """Topology, grid, and config from parsed args — shared by the CLI
+def _smoother(a, *, metric, cluster):
+    """The smoothing-phase stage(s) chosen by ``--smoother``.
+
+    The clustering target is built by the pipeline from the topology's bl
+    specs, so the smoother carries only ``metric`` and whether clustering is
+    on. Control mode is preceded by a matching nodal pre-pass so the net fit
+    starts from a smooth grid.
+    """
+    s = a["smoother"]
+    if s == "fas":
+        return [
+            FasSmoother(
+                sweeps=a["tmop_sweeps"],
+                chunk=a["chunk"],
+                omega=a["omega"],
+                metric=metric,
+                cluster_boundary_layers=cluster,
+                bl_blend_neighbours=False,
+            )
+        ]
+    if s == "control_point":
+        return [
+            Presmooth(
+                JacobiSmoother(
+                    sweeps=100,
+                    chunk=100,
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=cluster,
+                    bl_blend_neighbours=False,
+                )
+            ),
+            ControlPointSmoother(
+                chunk=a["chunk"],
+                omega=a["omega"],
+                metric=metric,
+                cluster_boundary_layers=cluster,
+                bl_blend_neighbours=False,
+            ),
+        ]
+    return [
+        JacobiSmoother(
+            sweeps=a["tmop_sweeps"],
+            chunk=a["chunk"],
+            omega=a["omega"],
+            metric=metric,
+            cluster_boundary_layers=cluster,
+            bl_blend_neighbours=False,
+        )
+    ]
+
+
+def setup(a, *, direct=True):
+    """Topology, grid, and stage list from parsed args — shared by the CLI
     ``main()`` and the web UI (which passes the parser defaults).
 
     NB: ``--pin-layers`` (→ ``n_fixed``) only takes effect when
@@ -119,29 +180,32 @@ def setup(a):
     # outer rows reach the neighbour spacing on their own.
     pin = a["bl_first_height"] > 0.0 and a["pin_layers"] > 0
     grid = topo.initialize_grid()
-    metric = a.get("metric", "shape")
-    cfg = PipelineConfig(
-        sweeps_per_delta=a["sweeps_per_delta"],
-        tmop_sweeps=a["tmop_sweeps"],
-        tmop_chunk=a["chunk"],
-        tmop_smoother=a["smoother"],
-        tmop_metric=metric,
-        cluster_boundary_layers=pin,
-        bl_blend_neighbours=False,
-        omega=a["omega"],
-        device=a["device"],
-        pin_sweeps=a["pin_sweeps"] if pin else 0,
-        respace=a["bl_first_height"] > 0.0 and not pin,
-    )
-    return topo, ents, grid, cfg
+    metric = TmopMetric(a.get("metric", "shape"))
+    stages = [
+        Untangle(sweeps_per_delta=a["sweeps_per_delta"], direct=direct),
+        *_smoother(a, metric=metric, cluster=pin),
+    ]
+    # pin: fix the first layers exactly and re-smooth; else, with a boundary
+    # layer requested, restore the spacing with the respace post-pass.
+    if pin:
+        stages.append(
+            Pin(
+                JacobiSmoother(
+                    sweeps=a["pin_sweeps"], chunk=a["chunk"], omega=a["omega"]
+                )
+            )
+        )
+    elif a["bl_first_height"] > 0.0:
+        stages.append(Respace())
+    return topo, ents, grid, stages
 
 
 def main():
     from driver import finish, parse_args
 
     a = parse_args()
-    topo, ents, grid, cfg = setup(vars(a))
-    steps = generate_steps(grid, config=cfg, untangle_direct=not a.plot_live)
+    topo, ents, grid, stages = setup(vars(a), direct=not a.plot_live)
+    steps = generate_steps(grid, stages=stages, device=a.device)
 
     finish(
         grid,
@@ -177,8 +241,8 @@ if __name__ == "__egg_webui__":  # running inside the egg web UI
         omega=0.8,
         device="cpu",
     )
-    topo, ents, grid, cfg = setup(a)
-    egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=False))
+    topo, ents, grid, stages = setup(a, direct=False)
+    egg_webui.run(grid, generate_steps(grid, stages=stages, device=a["device"]))
 
 if __name__ == "__main__":
     main()

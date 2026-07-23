@@ -227,12 +227,12 @@ The boundary layer and the oblique outflow
    # The outflow meets the wall obliquely; relaxing orthogonality towards it
    # lets the clustering target follow it with sheared cells instead of
    # trading away the near-wall layer heights.
+   bld.relax_orthogonality(outflow)
    bld.set_boundary_layer(
        wall,
        first_height=H_WALL,
        growth=BL_GROWTH,
        n_fixed=n_fixed,
-       relax_orthogonality=(outflow,),
    )
 
 This is where phoebus earns its ``relax_orthogonality``. The aft wall is
@@ -240,12 +240,13 @@ horizontal but the outflow line runs up to ``F`` at an angle, so the two
 meet **obliquely**. Without help, the clustering target near that corner
 would try to keep the near-wall cells orthogonal to the wall, rotating them
 away from the outflow and sacrificing the requested layer heights.
-Listing ``outflow`` in ``relax_orthogonality`` tells the target builder to
-instead shear the wall-normal column into the outflow's own direction near
-that corner, so the smoother follows the outflow with uniformly sheared
-parallelograms and keeps the heights. (In capsule-fire-II the same argument
-appears but is a no-op, because that example deliberately made the outflow
-vertical; here it does real work.)
+Declaring ``outflow`` via
+:meth:`~egg.topology.builder.TopologyBuilder.relax_orthogonality` tells the
+target builder to instead shear the wall-normal column into the outflow's
+own direction near that corner, so the smoother follows the outflow with
+uniformly sheared parallelograms and keeps the heights. (In capsule-fire-II
+the same declaration appears but is a no-op, because that example
+deliberately made the outflow vertical; here it does real work.)
 
 ``H_WALL`` (1e-4 m) and ``BL_GROWTH`` (1.2) are the module constants
 matching the Lua clustering; ``n_fixed`` is ``pin_layers`` from the knobs.

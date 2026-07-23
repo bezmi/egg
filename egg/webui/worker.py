@@ -77,9 +77,12 @@ def main() -> None:
 
         code = Path(sys.argv[1]).read_text()
         path = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
+        # A resume run passes the cached node coordinates (a .npy) as argv[3];
+        # the grid is seeded from them before the (freshly re-exec'd) stages run.
+        resume_npy = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
         ns, _out, err = exec_script(code, path)
         if err is not None:
-            send(("fatal", "script error — fix it first"))
+            send(("fatal", "script error, fix it first"))
             return
         reg = ns.get("__egg_webui_run__")
         if reg is None:
@@ -92,6 +95,17 @@ def main() -> None:
             )
             return
         grid, steps = reg
+        # Seed the grid from the resume cache before the generator is iterated
+        # (generate_steps builds its MeshState lazily on the first step, so this
+        # is the state the stages see). Shape-guarded: an edit that changed the
+        # topology (different node count) can't be resumed, so run fresh instead.
+        if resume_npy:
+            X = np.load(resume_npy)
+            if X.shape == grid.global_nodes.shape:
+                grid.global_nodes[...] = X
+                for bi, blk in enumerate(grid.blocks):
+                    blk.nodes[...] = X[grid.block_dof_maps[bi]]
+
         from .scene import control_net_state
 
         for phase, info in steps:

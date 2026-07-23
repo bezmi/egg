@@ -47,7 +47,16 @@ pipeline's ``cluster_boundary_layers`` then builds the target.
 import numpy as np
 
 from egg.geometry import Line, Spline, Vector3
-from egg.pipeline import PipelineConfig, generate_steps
+from egg.enums import TmopMetric
+from egg.pipeline import (
+    ControlPointSmoother,
+    FasSmoother,
+    JacobiSmoother,
+    Presmooth,
+    Pin,
+    Untangle,
+    generate_steps,
+)
 from egg.topology import ExplicitTopology
 
 
@@ -227,19 +236,59 @@ if __name__ == "__egg_webui__":  # this example runs ONLY in the egg web UI
     topo, _diagnostics = egg_topo.flatten()
     if topo is not None:
         grid = topo.initialize_grid()
-        cfg = PipelineConfig(
-            sweeps_per_delta=a["sweeps_per_delta"],
-            tmop_sweeps=a["tmop_sweeps"],
-            tmop_chunk=a["chunk"],
-            tmop_smoother=a["smoother"],
-            tmop_metric=a["metric"],
-            # the egg's carried .clustered() request populates the topology's
-            # boundary_layer_specs, so cluster_boundary_layers builds the target
-            # and the pin phase freezes the near-wall layers
-            cluster_boundary_layers=a["cluster_boundary_layers"],
-            bl_blend_neighbours=a["bl_blend_neighbours"],
-            pin_sweeps=a["pin_sweeps"],
-            omega=a["omega"],
-            device=a["device"],
-        )
-        egg_webui.run(grid, generate_steps(grid, config=cfg, untangle_direct=True))
+        # The egg's carried .clustered() request populates the topology's
+        # boundary_layer_specs, so cluster_boundary_layers builds the target and
+        # the pin phase freezes the near-wall layers.
+        metric = TmopMetric(a["metric"])
+        if a["smoother"] == "fas":
+            smoothing = [
+                FasSmoother(
+                    sweeps=a["tmop_sweeps"],
+                    chunk=a["chunk"],
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=a["cluster_boundary_layers"],
+                    bl_blend_neighbours=a["bl_blend_neighbours"],
+                )
+            ]
+        elif a["smoother"] == "control_point":
+            smoothing = [
+                Presmooth(
+                    JacobiSmoother(
+                        sweeps=100,
+                        chunk=100,
+                        omega=a["omega"],
+                        metric=metric,
+                        cluster_boundary_layers=a["cluster_boundary_layers"],
+                        bl_blend_neighbours=a["bl_blend_neighbours"],
+                    )
+                ),
+                ControlPointSmoother(
+                    chunk=a["chunk"],
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=a["cluster_boundary_layers"],
+                    bl_blend_neighbours=a["bl_blend_neighbours"],
+                ),
+            ]
+        else:
+            smoothing = [
+                JacobiSmoother(
+                    sweeps=a["tmop_sweeps"],
+                    chunk=a["chunk"],
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=a["cluster_boundary_layers"],
+                    bl_blend_neighbours=a["bl_blend_neighbours"],
+                )
+            ]
+        stages = [Untangle(sweeps_per_delta=a["sweeps_per_delta"]), *smoothing]
+        if a["pin_sweeps"] > 0:
+            stages.append(
+                Pin(
+                    JacobiSmoother(
+                        sweeps=a["pin_sweeps"], chunk=a["chunk"], omega=a["omega"]
+                    )
+                )
+            )
+        egg_webui.run(grid, generate_steps(grid, stages=stages, device=a["device"]))

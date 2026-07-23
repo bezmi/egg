@@ -6,7 +6,7 @@ Web UI tutorial
 ===============
 
 The web UI is "code as CAD": you write a Python geometry script with the
-same egg front-end the examples use, and the browser shows a live render
+same egg front-end the examples use, and the app shows a live render
 of whatever the script defines, then runs the real untangle + TMOP
 pipeline on it, streaming the relaxing mesh back into the view. You can
 write the script in the built-in editor, or keep your own editor and let
@@ -18,15 +18,21 @@ privileges.
 Starting it
 -----------
 
+``egg-desktop`` runs the UI in a native window:
+
 .. code-block:: bash
 
-   uv sync --group webui            # once; add --group docs for this manual
-   uv run --no-sync egg-webui       # → http://127.0.0.1:5001
+   uv sync --group ui               # once
+   uv run --no-sync egg-desktop     # native window
 
-Useful flags: a positional script path opens it in the editor,
-``--host 0.0.0.0`` exposes the server on your network, ``--reload``
-restarts on source edits, and ``--no-docs`` skips the docs refresh that
+Useful flags: a positional script path opens it in the editor, ``--watch``
+follows that file on disk, and ``--no-docs`` skips the docs refresh that
 otherwise runs at startup.
+
+The same UI also runs in a browser with ``egg-webui`` (serving
+``http://127.0.0.1:5001``); it adds ``--host 0.0.0.0`` to expose the server
+on your network and ``--reload`` to restart on source edits, for a remote or
+headless host.
 
 The window
 ----------
@@ -259,7 +265,7 @@ Things to watch out for:
   locked to grid view, so stop the run before you edit.
 
 When a layout will not validate and the on-screen message is not enough, set
-``EGG_WEBUI_DEBUG=1`` before launching ``egg-webui``: every time the drawn
+``EGG_WEBUI_DEBUG=1`` before launching the app: every time the drawn
 topology reports a problem (a warning or a hard error), its diagnostics **and
 the full connectivity** (the ``nodes`` / ``edges`` / ``res`` dict) are printed
 to the terminal running the server, so you can see the exact blocking that
@@ -389,11 +395,11 @@ console for the file you have open:
 The workflow:
 
 1. Open the script with **file → open…** / **examples…**, or pass it on the
-   command line: ``uv run --no-sync egg-webui my_geometry.py``.
+   command line: ``uv run --no-sync egg-desktop my_geometry.py``.
 2. Turn on **file → watch file**, or skip both steps and start in watch
    mode directly::
 
-      uv run --no-sync egg-webui my_geometry.py --watch
+      uv run --no-sync egg-desktop my_geometry.py --watch
 
    The editor pane disappears and the disk file becomes the source of
    truth: the UI polls it about once a second and re-renders on every

@@ -105,14 +105,58 @@ def test_windows_cross_seam_and_carry_boost():
     assert np.allclose(win.weight[~touches], 1.0)
 
 
+def _clustered_strip(res=(6, 12)):
+    from egg.geometry import LineSegment
+
+    wall = (
+        LineSegment((0.0, 0.0), (4.0, 0.0))
+        .named("wall")
+        .clustered(first_height=0.05, growth=1.2, n_layers=4, n_fixed=3)
+    )
+    b = TopologyBuilder(d=2)
+    for name, pos in [("A", (0, 0)), ("B", (4, 0)), ("C", (0, 2)), ("D", (4, 2))]:
+        b.add_corner(name, pos, fixed=True)
+    b.add_block("main", ("A", "C", "B", "D"), res)
+    b.associate("main", 1, 0, wall)
+    return b.build().initialize_grid()
+
+
+def test_frozen_boundary_windows_get_the_interface_boost():
+    """A Pin freezes the near-wall band; a window straddling the pinned/free
+    boundary (a within-block interface, not a block seam) gets the iface_boost
+    so the free grid continues its curvature out of the band."""
+    from egg.smoothing.respace import respace_first_layers
+
+    grid = _clustered_strip()
+    pinned = respace_first_layers(grid, grid.topology)
+    base = curvature_windows(grid, weight=1.0, iface_boost=10.0)
+    withf = curvature_windows(grid, weight=1.0, iface_boost=10.0, frozen=pinned)
+    assert np.array_equal(base.nodes, withf.nodes)  # frozen changes only weights
+
+    is_frozen = np.zeros(np.asarray(grid.global_nodes).shape[0], bool)
+    is_frozen[np.asarray(pinned)] = True
+    fr = is_frozen[withf.nodes]
+    crosses = fr.any(axis=1) & (~fr).any(axis=1)
+    assert crosses.sum() > 0  # windows really do straddle the boundary
+    # every boundary-crossing window is boosted now...
+    assert np.allclose(withf.weight[crosses], 10.0)
+    # ...and at least some were base weight before (the boundary is no seam)
+    assert np.any(base.weight[crosses] < 10.0 - 1e-9)
+
+
 def _fan_grid():
     """Three quad blocks fanning around a shared centre → valence-3 singularity."""
     b = TopologyBuilder(d=2)
     c = Vector3(0.0, 0.0)
     ang = [90, 210, 330]
-    n = [Vector3(float(np.cos(np.radians(x))), float(np.sin(np.radians(x)))) for x in ang]
+    n = [
+        Vector3(float(np.cos(np.radians(x))), float(np.sin(np.radians(x)))) for x in ang
+    ]
     f = [
-        Vector3(float(1.8 * np.cos(np.radians(x + 60))), float(1.8 * np.sin(np.radians(x + 60))))
+        Vector3(
+            float(1.8 * np.cos(np.radians(x + 60))),
+            float(1.8 * np.sin(np.radians(x + 60))),
+        )
         for x in ang
     ]
     for i in range(3):

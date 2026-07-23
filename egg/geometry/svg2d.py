@@ -505,15 +505,15 @@ def _shape_prims(el: ElementTree.Element, tag: str) -> tuple[list[_Prim], bool] 
         if _float_attr(el, "rx") or _float_attr(el, "ry"):
             raise ValueError("rounded <rect> corners are not supported")
         x, y = _float_attr(el, "x"), _float_attr(el, "y")
-        w, h = float(el.get("width")), float(el.get("height"))
+        w, h = _float_attr(el, "width"), _float_attr(el, "height")
         p = [np.array(q) for q in [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]]
         return [("line", p[i], p[(i + 1) % 4]) for i in range(4)], True
     if tag in ("circle", "ellipse"):
         c = np.array([_float_attr(el, "cx"), _float_attr(el, "cy")])
         if tag == "circle":
-            rx = ry = float(el.get("r"))
+            rx = ry = _float_attr(el, "r")
         else:
-            rx, ry = float(el.get("rx")), float(el.get("ry"))
+            rx, ry = _float_attr(el, "rx"), _float_attr(el, "ry")
         return [("arc", c, rx, ry, 0.0, 0.0, _TWO_PI)], True
     if tag == "line":
         p0 = np.array([_float_attr(el, "x1"), _float_attr(el, "y1")])
@@ -539,9 +539,9 @@ def _full_period_entity(
     """Exact periodic entity for full <circle>/<ellipse> elements."""
     c = np.array([_float_attr(el, "cx"), _float_attr(el, "cy")])
     if tag == "circle":
-        rx = ry = float(el.get("r"))
+        rx = ry = _float_attr(el, "r")
     else:
-        rx, ry = float(el.get("rx")), float(el.get("ry"))
+        rx, ry = _float_attr(el, "rx"), _float_attr(el, "ry")
     c2, a2, b2, alpha, _, _ = _transform_arc(A, b, c, rx, ry, 0.0, 0.0, _TWO_PI)
     if abs(a2 - b2) <= 1e-9 * max(a2, b2):
         return Circle(c2, a2)

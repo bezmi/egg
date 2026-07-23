@@ -16,6 +16,8 @@ boundary-layer request via ``.clustered(...)``, collected the same way into
 ``boundary_layer_specs`` (so a drawn, base-less topology clusters by name).
 """
 
+import pytest
+
 from egg.geometry import Edge, Line, Vector3
 from egg.topology import ExplicitTopology
 from egg.topology.builder import TopologyBuilder
@@ -174,19 +176,23 @@ def test_explicit_set_boundary_layer_overrides_clustered():
 
 
 def test_relax_orthogonality_by_name_resolves_to_entity():
+    # deprecated clustered(relax_orthogonality=...) still works: it warns and
+    # forwards into the built topology's relax_orthogonality tuple
     sw, se, ne, nw = _square()
-    egg = (
-        Line(p0=nw, p1=ne)
-        .named("egg")
-        .clustered(first_height=1e-2, growth=1.3, relax_orthogonality=("wall",))
-    )
+    with pytest.deprecated_call():
+        egg = (
+            Line(p0=nw, p1=ne)
+            .named("egg")
+            .clustered(first_height=1e-2, growth=1.3, relax_orthogonality=("wall",))
+        )
     wall = Line(p0=sw, p1=se).named("wall")
     b = TopologyBuilder(d=2)
     b.add_block("c", sw=sw, nw=nw, se=se, ne=ne, res=(4, 4))
     b.associate("c", 1, 1, egg)
     b.associate("c", 1, 0, wall)
-    spec = b.build().boundary_layer_specs[id(egg)]
-    assert spec["relax_orthogonality"] == (wall,)  # name -> the named entity
+    topo = b.build()
+    assert topo.relax_orthogonality == (wall,)  # name -> the named entity
+    assert id(egg) in topo.boundary_layer_specs  # the clustering itself remains
 
 
 def test_clustered_flows_through_a_drawn_topology():

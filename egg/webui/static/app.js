@@ -7,6 +7,236 @@
 // For commercial licensing, contact s.imran@tuta.io
 
 
+// Send browser-side errors to the server so they land in the logfile (the
+// terminal/log only sees Python; JS errors would otherwise be lost). Best
+// effort, throttled, and it never reports its own failures (no loop).
+let _eggLogGuard = false, _eggLogSent = 0;
+function eggLogClient(level, msg, src) {
+  if (_eggLogGuard || _eggLogSent > 100) return;  // cap one page's flood
+  _eggLogGuard = true;
+  _eggLogSent += 1;
+  try {
+    const body = new URLSearchParams({level, msg: String(msg || ''), src: src || ''});
+    fetch('/api/clientlog', {method: 'POST', body}).catch(() => {});
+  } catch (e) { /* ignore */ }
+  _eggLogGuard = false;
+}
+window.addEventListener('error', (e) => {
+  const at = e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : '';
+  eggLogClient('error', (e.error && e.error.stack) || e.message, at);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  eggLogClient('error', (r && (r.stack || r.message)) || String(r), 'promise');
+});
+
+// The launch auth token (window.eggToken, injected before this script). Needed
+// only for a WebSocket handshake and for a same-origin URL opened in a SEPARATE
+// browser (the desktop opens docs in the system browser, which has no auth
+// cookie yet). Same-origin HTTP requests carry the cookie automatically. Empty
+// string when auth is disabled, so these are no-ops then.
+function eggTokenParam(sep) {
+  return window.eggToken ? `${sep}token=${encodeURIComponent(window.eggToken)}` : '';
+}
+function eggWithToken(url) {
+  return url + eggTokenParam(url.includes('?') ? '&' : '?');
+}
+
+// Copy button shared by the error box, the warning, and the doc pane: copy the
+// text of the sibling .copytext (or pre) in the same .copybox, then flash the
+// button label. eggCopyText handles a non-secure context / the native app.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.copybtn');
+  if (!btn) return;
+  const box = btn.closest('.copybox') || btn.parentElement;
+  const src = box && (box.querySelector('.copytext') || box.querySelector('pre'));
+  const text = src ? src.textContent : '';
+  if (!text) return;
+  eggCopyText(text);
+  const prev = btn.textContent;
+  btn.textContent = 'copied';
+  setTimeout(() => { if (btn.textContent === 'copied') btn.textContent = prev; }, 900);
+});
+
+// Unified dismissable bottom pane, fixed across the whole bottom of the app.
+// One at a time; the × or Escape closes it. Both the go-to-definition warning
+// and the documentation popup use it, so their chrome (title bar, close, esc)
+// lives in one place. opts:
+//   title     - the header label
+//   severity  - 'warn' | 'doc' (tints the top border and, for warn, the text)
+//   render    - fn(bodyEl) that fills the body (docs)
+//   copyText  - a string shown as the body with a copy button (warning)
+//   resizable - add a top grip to drag the pane taller/shorter (this view only)
+//   heightPct - open at this percent of the window height (fixed, not content)
+let eggPaneEl = null;
+function eggPaneClose() {
+  if (eggPaneEl) { eggPaneEl.remove(); eggPaneEl = null; }
+  // the server-rendered error overlay was hidden underneath: show it again
+  document.body.classList.remove('egg-pane-open');
+}
+window.eggPaneClose = eggPaneClose;
+// Drag the top grip to resize the pane. It is anchored at the bottom, so the
+// height is the gap from the pointer to the bottom of the window, clamped. The
+// move/up listeners live on the document so the drag keeps tracking even when
+// the pointer leaves the thin grip.
+function eggPaneAddResize(pane, grip) {
+  grip.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const onMove = (ev) => {
+      const h = Math.max(80, Math.min(window.innerHeight * 0.9,
+                                      window.innerHeight - ev.clientY));
+      pane.style.height = h + 'px';
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+  });
+}
+window.eggPane = (opts = {}) => {
+  eggPaneClose();
+  const pane = document.createElement('div');
+  pane.className = 'egg-pane copybox' + (opts.severity ? ' egg-pane-' + opts.severity : '');
+  if (opts.resizable) {
+    const grip = document.createElement('div');
+    grip.className = 'egg-pane-resize';
+    grip.title = 'drag to resize';
+    eggPaneAddResize(pane, grip);
+    pane.appendChild(grip);
+  }
+  // Open at a fixed height (a configured % of the window), so the pane is the
+  // same size no matter how much content it holds. It can still be dragged
+  // taller/shorter for the current view; that is not remembered.
+  if (opts.heightPct) {
+    const h = Math.max(80, Math.min(window.innerHeight * 0.9,
+                                    window.innerHeight * opts.heightPct / 100));
+    pane.style.height = h + 'px';
+  }
+  const head = document.createElement('div');
+  head.className = 'egg-pane-head';
+  const title = document.createElement('span');
+  title.className = 'egg-pane-title';
+  title.textContent = opts.title || '';
+  head.appendChild(title);
+  if (opts.copyText != null) {
+    const copy = document.createElement('button');
+    copy.className = 'copybtn'; copy.type = 'button'; copy.textContent = 'copy';
+    head.appendChild(copy);
+  }
+  const x = document.createElement('button');
+  x.className = 'egg-pane-close'; x.type = 'button'; x.textContent = '×';
+  x.title = 'dismiss (esc)';
+  x.addEventListener('click', eggPaneClose);
+  head.appendChild(x);
+  const body = document.createElement('div');
+  body.className = 'egg-pane-body' + (opts.bodyClass ? ' ' + opts.bodyClass : '');
+  if (typeof opts.render === 'function') opts.render(body);
+  else if (opts.copyText != null) { body.textContent = opts.copyText; body.classList.add('copytext'); }
+  pane.append(head, body);
+  document.body.appendChild(pane);  // fixed, full app width
+  document.body.classList.add('egg-pane-open');  // cover the error overlay
+  eggPaneEl = pane;
+  return pane;
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && eggPaneEl) eggPaneClose();
+});
+// The go-to-definition warning: a yellow, copyable, dismissable bottom pane.
+window.eggFlashWarn = (msg) => {
+  window.eggPane({title: 'warning', severity: 'warn', copyText: msg});
+};
+
+// User config (window.eggConfig, injected before this script; see egg/webui/
+// config.py). Every read falls back to a built-in default, so a missing key or
+// an absent config changes nothing.
+const EGG_CFG = window.eggConfig || {};
+const eggDelay = (name, def) => {
+  const v = EGG_CFG.delays && EGG_CFG.delays[name];
+  return typeof v === 'number' ? v : def;
+};
+const eggBind = (name, def) => (EGG_CFG.keybinds && EGG_CFG.keybinds[name]) || def;
+const eggAutorunMode = () =>
+  (EGG_CFG.behavior && EGG_CFG.behavior.autorun) || 'delay';
+// Match a KeyboardEvent against a "Mod+Key" binding string ("Ctrl+Enter",
+// "Ctrl+/", or a bare key like "s"). Ctrl and Meta are treated interchangeably
+// so one binding works on both Linux/Windows and macOS.
+function eggMatchBind(e, bind) {
+  if (!bind) return false;
+  const parts = bind.split('+').map((p) => p.trim());
+  const key = parts.pop();
+  const need = new Set(parts.map((p) => p.toLowerCase()));
+  const wantMod = need.has('ctrl') || need.has('cmd') || need.has('meta');
+  const wantShift = need.has('shift');
+  const wantAlt = need.has('alt');
+  if (wantMod !== (e.ctrlKey || e.metaKey)) return false;
+  if (wantShift !== e.shiftKey) return false;
+  if (wantAlt !== e.altKey) return false;
+  return e.key.toLowerCase() === key.toLowerCase();
+}
+
+// --- session id: one per UI instance (tab / window). Sent with every request
+// and on the frame socket so the server routes a run's frames back to only this
+// instance. sessionStorage keeps it stable across reloads, distinct per tab, and
+// cleared when the instance closes (so its worker is reaped). crypto.randomUUID
+// needs a secure context (absent over plain http), so fall back to time+random.
+function eggMakeId() {
+  try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) { /* */ }
+  return 'egg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+function eggSessionId() {
+  let sid = null;
+  try { sid = sessionStorage.getItem('egg-webui-sid'); } catch (e) { /* */ }
+  if (!sid) {
+    sid = eggMakeId();
+    try { sessionStorage.setItem('egg-webui-sid', sid); } catch (e) { /* */ }
+  }
+  return sid;
+}
+// Attach the sid to every htmx request (run/stop/reset/render/params/topo …).
+document.addEventListener('htmx:configRequest', (evt) => {
+  evt.detail.parameters.sid = eggSessionId();
+});
+
+// --- run-frame socket (server push). Opened manually with the sid so OOB frames
+// reach only this instance; auto-reconnects (a reload resumes an in-flight run).
+let eggFrameWs = null;
+function eggApplyFrame(html) {
+  // Frames are OOB fragments: elements with hx-swap-oob="true" and an id. Replace
+  // each matching element by id, then let htmx bind the new content's hx-* attrs.
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  tpl.content.querySelectorAll('[hx-swap-oob], [data-hx-swap-oob]').forEach((el) => {
+    el.removeAttribute('hx-swap-oob');
+    el.removeAttribute('data-hx-swap-oob');
+    const cur = el.id && document.getElementById(el.id);
+    if (cur) {
+      cur.replaceWith(el);
+      if (window.htmx) htmx.process(el);
+    }
+  });
+  // A streamed frame swaps in a fresh #canvas; manual replaceWith does not fire
+  // htmx:oobAfterSwap, so reapply the view-menu toggles ourselves. Disabled
+  // layers stay hidden during the run, and toggling mid-run takes effect on the
+  // next frame.
+  applyView();
+}
+function eggConnectFrames() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  let ws;
+  try {
+    ws = new WebSocket(`${proto}://${location.host}/ws?sid=${encodeURIComponent(eggSessionId())}${eggTokenParam('&')}`);
+  } catch (e) { setTimeout(eggConnectFrames, 2000); return; }
+  eggFrameWs = ws;
+  ws.onmessage = (e) => eggApplyFrame(e.data);
+  ws.onclose = () => { eggFrameWs = null; setTimeout(eggConnectFrames, 1500); };
+  ws.onerror = () => { try { ws.close(); } catch (e) { /* */ } };
+}
+window.addEventListener('DOMContentLoaded', eggConnectFrames);
+
 // Reload without a flash: if there is a saved script to restore, hide the
 // server-rendered default grid before first paint. The DOMContentLoaded restore
 // below then discards that default mesh (swapping in a "rendering…" placeholder)
@@ -213,7 +443,10 @@ document.addEventListener('pointerdown', updateCoords);
 
 // Editor zoom: Ctrl+wheel (also trackpad pinch), touch pinch, and
 // Ctrl +/-/0. Adjusts a persisted font size, not the page zoom.
-let edFont = parseFloat(localStorage.getItem('egg-webui-edfont')) || 13;
+// Starts from the configured base editor size (fonts.editor_size); a persisted
+// Ctrl+scroll zoom, once set, takes over.
+let edFont = parseFloat(localStorage.getItem('egg-webui-edfont'))
+  || parseFloat((EGG_CFG.fonts || {}).editor_size) || 13;
 function setEdFont(px) {
   edFont = Math.min(28, Math.max(8, px));
   document.documentElement.style.setProperty('--egg-edfont', edFont.toFixed(1) + 'px');
@@ -400,15 +633,8 @@ function applyView() {
   if (sel && !el.querySelector('.hl')) sel.style.display = 'none';
   if (savedVB) el.setAttribute('viewBox', savedVB);
   scaleMarkers(el);  // fresh markers are authored-size; match the current zoom
-  // A control net appearing for the first time (control_point run starting,
-  // or an imported net) switches its layer on; once seen, the user's toggle
-  // choice stands for the rest of the run.
-  const hasNet = !!el.querySelector('.layer-net');
-  if (hasNet && !window._eggNetSeen) {
-    const netCb = document.querySelector('.layer-toggle[data-layer="net"]');
-    if (netCb) netCb.checked = true;
-  }
-  window._eggNetSeen = hasNet;
+  // The net layer obeys the user's toggle like every other layer: a net
+  // appearing mid-run (a control_point solve starting) must not check it.
   document.querySelectorAll('.layer-toggle').forEach((cb) => {
     el.querySelectorAll('.layer-' + cb.dataset.layer).forEach((g) => {
       g.style.display = cb.checked ? '' : 'none';
@@ -459,17 +685,26 @@ function eggSyncFileGuards() {
 // trigger and localStorage persistence. The cursor survives the replace — a
 // param edit must not fling the editor to the top (eggEditorApi.setValue does
 // a minimal-diff edit).
+// Set while eggSetCode is running so the auto-run input handler can tell a
+// programmatic replace (which re-runs immediately at its call site) from raw
+// typing (which re-runs on the delayed, syntax-gated path).
+let eggSettingCode = false;
 window.eggSetCode = (code) => {
-  if (window.eggEditorApi) {
-    window.eggEditorApi.setValue(code);
-  } else {
-    const t = document.querySelector('.editor textarea');
-    const cur = Math.min(t.selectionStart || 0, code.length);
-    const top = t.scrollTop;
-    t.value = code;
-    t.setSelectionRange(cur, cur);
-    t.scrollTop = top;
-    t.dispatchEvent(new Event('input', {bubbles: true}));
+  eggSettingCode = true;
+  try {
+    if (window.eggEditorApi) {
+      window.eggEditorApi.setValue(code);
+    } else {
+      const t = document.querySelector('.editor textarea');
+      const cur = Math.min(t.selectionStart || 0, code.length);
+      const top = t.scrollTop;
+      t.value = code;
+      t.setSelectionRange(cur, cur);
+      t.scrollTop = top;
+      t.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+  } finally {
+    setTimeout(() => { eggSettingCode = false; }, 0);
   }
 };
 
@@ -494,7 +729,9 @@ document.addEventListener('change', async (e) => {
     const r = await fetch('/api/param', {method: 'POST', body});
     if (!r.ok) { inp.classList.add('param-bad'); return; }
     inp.classList.remove('param-bad');
-    window.eggSetCode(await r.text());
+    const newCode = await r.text();
+    window.eggSetCode(newCode);
+    eggForceRender(newCode);  // an editable item: re-run immediately
   } catch { inp.classList.add('param-bad'); }
 });
 // Collapsed/open state survives the per-edit re-renders.
@@ -524,38 +761,95 @@ function eggForceRender(code) {
   });
   return true;
 }
+// Auto-run the UNSAVED buffer. Editable items (params, topology, a loaded file)
+// re-run immediately at their call sites via eggForceRender(); raw typing
+// re-runs a couple of seconds after it stops, and only when the code is
+// syntactically valid (a real server-side compile check), so a half-typed
+// line never re-execs into an error. Type-checker complaints do NOT block it.
+let autoRunTimer, autoRunPending = false;
+const AUTO_RUN_DELAY = eggDelay('autorun_ms', 2000);
+async function tryAutoRun() {
+  if (eggIsWatching()) { autoRunPending = false; return; }
+  const t = document.querySelector('.editor textarea');
+  if (!t) return;
+  const code = t.value;
+  try {
+    const j = await (await fetch('/api/syntax',
+      {method: 'POST', body: new URLSearchParams({code})})).json();
+    if (!j.ok) return;  // syntax error: hold (next typing pause retries)
+  } catch (err) { /* check failed: fall through and let the render try */ }
+  autoRunPending = false;
+  eggForceRender(code);
+}
+// file > auto-save: write the open file to disk ~1s after typing stops.
+let autoSaveTimer;
+const autoSaveOn = () =>
+  !!document.getElementById('autosave-toggle')?.checked;
+document.addEventListener('input', (e) => {
+  if (!e.target.matches('.editor textarea') || eggSettingCode) return;
+  // Auto-run on a typing pause only in "delay" mode; "save" runs on save, "off"
+  // never auto-runs (see behavior.autorun in the config).
+  if (eggAutorunMode() === 'delay') {
+    autoRunPending = true;
+    clearTimeout(autoRunTimer);
+    autoRunTimer = setTimeout(tryAutoRun, AUTO_RUN_DELAY);
+  }
+  if (autoSaveOn() && curFile && !eggIsWatching()) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
+      if (curFile && autoSaveOn() && !eggIsWatching()) doSave(curFile);
+    }, 1000);
+  }
+});
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'autosave-toggle')
+    localStorage.setItem('egg-webui-autosave', e.target.checked ? '1' : '');
+});
 window.addEventListener('DOMContentLoaded', () => {
   const t = document.querySelector('.editor textarea');
   if (!t) return;
   const saved = t.dataset.persist === '1'
       ? localStorage.getItem('egg-webui-code') : null;
+  // Capture the persisted session up front (before any editor init can persist
+  // over it), so "restore cached session" on the landing still has it.
+  eggCachedCode = saved;
+  eggCachedFile = localStorage.getItem('egg-webui-file') || null;
   // #canvas was server-rendered from the textarea's ORIGINAL content
   // (defaultValue). Compare against THAT, not .value: Firefox restores .value
   // from session history on reload (Chrome doesn't), so .value can already hold
   // the cached script while the canvas still shows the default grid. The script
   // we actually want to display is the cached one if present, else the field.
   const want = saved != null ? saved : t.value;
+  // No script argument: on a fresh launch / new tab, show the landing page
+  // (nothing opens automatically). A page refresh (sessionStorage flag set)
+  // continues the file the user was on, so it falls through to render `want`.
+  const sessionActive = (() => {
+    try { return !!sessionStorage.getItem('egg-webui-session'); } catch (e) { return false; }
+  })();
+  if (!t.dataset.file && !sessionActive) {
+    eggShowLanding();
+    reveal();
+    return;
+  }
   if (want !== t.defaultValue) {
     // The canvas (built from defaultValue) is stale — drop it for a placeholder
     // so we never flash/unveil the wrong grid, then render `want`.
     const cv = document.querySelector('#canvas');
     if (cv) cv.innerHTML = '<div class="canvas-wait">rendering…</div>';
     reveal();  // the placeholder is not the wrong grid; nothing left to hide
-    if (want !== t.value) {
-      window.eggSetCode(want);   // fires input → the textarea's render trigger
-    } else {
-      // Firefox already restored the field to `want`; its input render would be
-      // suppressed by the changed-gate, so drive the render explicitly. Still
-      // route through eggSetCode to sync the editor + persist localStorage.
-      window.eggSetCode(want);
-      eggForceRender(want);
-    }
+    // Route through eggSetCode to sync the editor + persist localStorage, then
+    // drive the render explicitly (there is no input-triggered render anymore).
+    window.eggSetCode(want);
+    eggForceRender(want);
   } else {
     reveal();  // canvas already matches what we want — show it now
   }
 });
 document.addEventListener('input', (e) => {
-  if (e.target.matches('.editor textarea') && e.target.dataset.persist === '1')
+  // Don't persist while the landing is up: the editor is empty behind it, and
+  // an init-time input event would otherwise overwrite the cached session.
+  if (e.target.matches('.editor textarea') && e.target.dataset.persist === '1'
+      && document.getElementById('landing')?.style.display !== 'flex')
     localStorage.setItem('egg-webui-code', e.target.value);
 });
 
@@ -576,109 +870,229 @@ document.addEventListener('click', (e) => {
   t.scrollTop = Math.max(0, (line - 4) * 19);
 });
 
-// Resizable editor/viewer split via Split.js (sizes persisted). Narrow
-// windows stack the panes vertically and the split re-initializes in the
-// other direction. When split.js is unavailable the static CSS layout
-// (side-by-side, or stacked under the media query) stays in place.
+// The editor/viewer split. These are "window" panes (like emacs windows): a
+// gutter between them redistributes the space, so growing one shrinks the other.
+// This is the counterpart to the "overlay" panes above (eggPane: docs / warning
+// / error), which float over the content and never resize anything. Sizes are
+// persisted; narrow windows stack the panes vertically and re-init in the other
+// direction. Reimplemented here so we no longer depend on the Split.js library.
 let splitInst = null;
 const stackedMQ = window.matchMedia('(max-width: 900px)');
 function initSplit() {
-  if (!window.Split) return;
   const panes = document.querySelector('.panes');
+  if (!panes) return;
+  const editor = panes.querySelector('.editor');
+  const viewer = panes.querySelector('.viewer');
+  if (!editor || !viewer) return;
   if (splitInst) { splitInst.destroy(); splitInst = null; }
-  const stacked = stackedMQ.matches;
-  panes.classList.toggle('stacked', stacked);
+  const vertical = stackedMQ.matches;      // narrow window: stacked (top/bottom)
+  panes.classList.toggle('stacked', vertical);
+  const dim = vertical ? 'height' : 'width';
+  const G = window.matchMedia('(pointer: coarse)').matches ? 20 : 8;  // gutter size
   let sizes = [42, 58];
   try {
     sizes = JSON.parse(localStorage.getItem('egg-webui-split-sizes')) || sizes;
   } catch (err) { /* stale value */ }
-  // finger-sized gutter on touch devices, slim one for mouse
-  const coarse = window.matchMedia('(pointer: coarse)').matches;
-  splitInst = Split(['.editor', '.viewer'], {
-    sizes, minSize: 120, gutterSize: coarse ? 20 : 8, snapOffset: 0,
-    direction: stacked ? 'vertical' : 'horizontal',
-    onDragEnd: (s) => localStorage.setItem('egg-webui-split-sizes', JSON.stringify(s)),
-  });
+
+  const gutter = document.createElement('div');
+  gutter.className = 'gutter' + (vertical ? ' gutter-vertical' : '');
+  gutter.style[dim] = G + 'px';
+  editor.after(gutter);                    // order: editor | gutter | viewer
+  // give each pane its share, minus half the gutter so the total is 100%
+  const apply = () => {
+    editor.style[dim] = `calc(${sizes[0]}% - ${G / 2}px)`;
+    viewer.style[dim] = `calc(${sizes[1]}% - ${G / 2}px)`;
+  };
+  apply();
   panes.classList.add('split-active');
+
+  const onDown = (e) => {
+    e.preventDefault();
+    const rect = panes.getBoundingClientRect();
+    const total = vertical ? rect.height : rect.width;
+    const minPct = total > 0 ? (120 / total) * 100 : 15;  // 120px floor per pane
+    // Drop the dense SVG layers (grid lines, nodes, ...) while dragging: the
+    // viewer re-rasterizes every path each frame as it resizes, which is the
+    // real cost. Block fills + outlines stay for context; full detail returns on
+    // release (html.egg-resizing in app.css).
+    document.documentElement.classList.add('egg-resizing');
+    // Coalesce to one resize per animation frame. A fast drag fires many
+    // pointermove events per frame; applying each one relays out the big SVG
+    // viewer and the editor repeatedly (the hitching). rAF collapses them to the
+    // latest position, so the panes reflow at most once per screen refresh.
+    let pendingPct = null, raf = 0;
+    const flush = () => {
+      raf = 0;
+      if (pendingPct == null) return;
+      const pct = Math.max(minPct, Math.min(100 - minPct, pendingPct));
+      sizes = [pct, 100 - pct];
+      apply();
+    };
+    const onMove = (ev) => {
+      const pos = vertical ? ev.clientY - rect.top : ev.clientX - rect.left;
+      pendingPct = total > 0 ? (pos / total) * 100 : sizes[0];
+      if (!raf) raf = requestAnimationFrame(flush);
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      flush();  // settle on the final position
+      document.documentElement.classList.remove('egg-resizing');  // full detail back
+      try {
+        localStorage.setItem('egg-webui-split-sizes', JSON.stringify(sizes));
+      } catch (err) { /* ignore */ }
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+  };
+  gutter.addEventListener('pointerdown', onDown);
+
+  splitInst = {
+    destroy() {
+      gutter.remove();
+      for (const el of [editor, viewer]) { el.style.width = ''; el.style.height = ''; }
+    },
+  };
 }
 window.addEventListener('DOMContentLoaded', () => {
   initSplit();
   stackedMQ.addEventListener('change', initSplit);
 });
 
-// Downloads: current view as SVG (client-side), current mesh as SU2.
-function dl(name, blob) {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
 // header dropdown menus (file / view). Checkbox items keep the menu
 // open; action buttons and outside clicks close it.
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.menu-btn');
   document.querySelectorAll('.menu').forEach((m) => {
     if (btn && m.contains(btn)) m.classList.toggle('open');
-    else if (!m.contains(e.target)
-             || e.target.closest('.menu-items button, .menu-items a'))
+    else if ((!m.contains(e.target)
+              || e.target.closest('.menu-items button, .menu-items a'))
+             // the submenu parent (export ▸) opens on hover; a click on it
+             // must not close the whole menu
+             && !e.target.closest('.menu-sub-btn'))
       m.classList.remove('open');
   });
 });
 
+// Native desktop app (egg-desktop, /?desktop=1): drag the frameless window
+// from the titlebar spacer. pywebview's built-in drag repositions the window
+// to an absolute coordinate, which Wayland compositors forbid, so instead
+// we ask Qt for a compositor-driven move (startSystemMove), which works on
+// both Wayland and X11. The element only exists in desktop mode, and
+// window.pywebview.api is present only under pywebview, so this is inert in
+// an ordinary browser.
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0 || !e.target.closest('.desktop-titlebar__drag')) return;
+  window.pywebview?.api?.start_drag?.();
+});
+
 document.addEventListener('click', async (e) => {
-  if (e.target.closest('#dl-svg, #file-dl-svg')) {
-    const el = svgEl();
-    if (el) {
-      // styling lives in the page stylesheet — embed it so the export
-      // is self-contained; in the standalone file the svg element is
-      // :root, so it carries the flavor itself
-      const clone = el.cloneNode(true);
-      clone.setAttribute('data-theme', eggTheme);
-      const st = document.createElementNS('http://www.w3.org/2000/svg', 'style');
-      st.textContent = document.querySelector('style').textContent;
-      clone.insertBefore(st, clone.firstChild);
-      dl('egg-scene.svg',
-         new Blob([new XMLSerializer().serializeToString(clone)],
-                  {type: 'image/svg+xml'}));
-    }
+  // Exports go through the file picker + backend (browser downloads do
+  // nothing under pywebview): pick a destination, the server writes it.
+  if (e.target.closest('#dl-svg, #file-dl-svg')) exportPick('svg');
+  if (e.target.closest('#dl-su2, #file-dl-su2')) exportPick('su2');
+  if (e.target.closest('#file-dl-lmr')) exportLmrPick();
+  if (e.target.closest('#file-dl-net')) exportPick('net');
+  if (e.target.closest('#file-export-as')) {   // re-run the last export, overwrite
+    const le = eggGetLastExport();
+    if (le) doExport(le.kind, le.out);
   }
-  if (e.target.closest('#dl-su2, #file-dl-su2')) {
-    const code = document.querySelector('.editor textarea').value;
-    const path = document.getElementById('scriptpath').value;
-    const r = await fetch('/export/su2', {method: 'POST', body: new URLSearchParams({code, path})});
-    const t = await r.text();
-    if (!r.ok) { alert(t); return; }
-    dl('mesh.su2', new Blob([t], {type: 'text/plain'}));
+  const rep = e.target.closest('#help-report');
+  if (rep) {  // open in the system browser (desktop) or a new tab (browser)
+    if (window.pywebview?.api?.open_url) window.pywebview.api.open_url(rep.dataset.url);
+    else window.open(rep.dataset.url, '_blank', 'noopener');
   }
-  if (e.target.closest('#file-dl-net')) {
-    const code = document.querySelector('.editor textarea').value;
-    const path = document.getElementById('scriptpath').value;
-    const r = await fetch('/export/net', {method: 'POST', body: new URLSearchParams({code, path})});
-    if (!r.ok) { alert(await r.text()); return; }
-    dl('control_net.npz', await r.blob());
+  if (e.target.closest('#file-save-eggy')) saveEggyPick();
+  if (e.target.closest('#file-open-eggy')) openEggyPick();
+  // open a config/logs directory in the OS file manager (server-side path)
+  if (e.target.closest('#file-config-dir')) eggOpenDir('config');
+  if (e.target.closest('#help-logs')) eggOpenDir('logs');
+});
+async function eggOpenDir(which) {
+  try {
+    const r = await fetch('/open/dir', {method: 'POST',
+      body: new URLSearchParams({which})});
+    const j = await r.json();
+    if (!r.ok || j.error) eggAlert((j && j.error) || 'could not open the directory');
+  } catch (err) { eggAlert('could not open the directory: ' + err); }
+}
+// --- landing page: the entry points, always shown at startup ---
+// The persisted session (buffer + file path), captured at load before anything
+// can overwrite it, so "restore cached session" survives sitting on the landing.
+let eggCachedCode = null, eggCachedFile = null;
+function eggShowLanding() {
+  const l = document.getElementById('landing');
+  if (l) l.style.display = 'flex';
+  // Offer "restore cached session" only when there is a non-empty one.
+  const rb = document.getElementById('landing-restore');
+  const has = (eggCachedCode != null && eggCachedCode.trim() !== '') || !!eggCachedFile;
+  if (rb) rb.style.display = has ? '' : 'none';
+}
+function eggHideLanding() {
+  const l = document.getElementById('landing');
+  if (l) l.style.display = 'none';
+  // A session is now active in this tab: a page refresh continues the file
+  // instead of returning to the landing (which is startup / new-tab only).
+  // sessionStorage clears on tab close and a fresh launch, but survives reload.
+  try { sessionStorage.setItem('egg-webui-session', '1'); } catch (e) { /* ignore */ }
+}
+// Restore the persisted buffer (with its file, if known); fall back to loading
+// the cached file from disk when only a path was kept.
+async function eggRestoreCached() {
+  if (eggCachedCode != null) {
+    loadIntoEditor(eggCachedCode, eggCachedFile, eggCachedCode);
+    return;
   }
-  if (e.target.closest('#file-import-net')) {
-    const inp = document.createElement('input');
-    inp.type = 'file';
-    inp.accept = '.npz';
-    inp.onchange = async () => {
-      const f = inp.files[0];
-      if (!f) return;
-      const fd = new FormData();
-      fd.append('code', document.querySelector('.editor textarea').value);
-      fd.append('path', document.getElementById('scriptpath').value);
-      fd.append('file', f);
-      const r = await fetch('/import/net', {method: 'POST', body: fd});
-      const t = await r.text();
-      if (!r.ok) { alert(t); return; }
-      const view = document.getElementById('view');
-      if (view) {
-        view.innerHTML = t;
-        applyView();  // first .layer-net sighting switches the layer on
-      }
-    };
-    inp.click();
+  if (!eggCachedFile) return;
+  try {
+    const r = await fetch('/api/file?path=' + encodeURIComponent(eggCachedFile));
+    const j = await r.json();
+    if (!j.error) { loadIntoEditor(j.code, j.path, j.code); return; }
+  } catch (err) { /* fall through */ }
+  eggAlert('could not restore the cached session');
+}
+// new project: pick a parent folder + name, the server scaffolds a starter
+// script in <folder>/<name>/<name>.py, then we open it.
+function eggNewProject() {
+  fsShow({
+    mode: 'save', title: 'new project', ext: '*',
+    namePlaceholder: 'project name',
+    onSave: async (target) => {
+      const dest = dirOf(target), name = baseOf(target);
+      if (!name) return;
+      try {
+        const r = await fetch('/new/project', {method: 'POST',
+          body: new URLSearchParams({dest, name})});
+        let j = null; try { j = await r.json(); } catch (e) { /* non-JSON */ }
+        if (!r.ok || !j || j.error) {
+          eggAlert((j && j.error) || 'could not create project'); return;
+        }
+        loadIntoEditor(j.code, j.path, j.code);
+        fsRecordRecent(j.path);
+        eggHideLanding();
+      } catch (err) { eggAlert('could not create project: ' + err); }
+    },
+  });
+}
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#landing-restore')) eggRestoreCached();
+  else if (e.target.closest('#landing-recent')) fsShowRecent();
+  else if (e.target.closest('#landing-examples')) {
+    const dir = e.target.closest('#landing-examples').dataset.dir;
+    fsShow({mode: 'open', startDir: dir});
+  }
+  else if (e.target.closest('#landing-open')) fsShow({mode: 'open'});
+  else if (e.target.closest('#landing-archive')) openEggyPick();
+  else if (e.target.closest('#landing-config')) eggOpenDir('config');
+  else if (e.target.closest('#landing-new')) eggNewProject();
+  else if (e.target.closest('#landing-docs')) {
+    const url = e.target.closest('#landing-docs').dataset.url || '/docs/';
+    if (window.pywebview?.api?.open_url)
+      window.pywebview.api.open_url(eggWithToken(location.origin + url));
+    else window.open(eggWithToken(url), '_blank', 'noopener');
   }
 });
 
@@ -686,6 +1100,30 @@ document.addEventListener('click', async (e) => {
 // (local single-user tool). State: the open file's path + its last
 // saved content, for the dirty dot on the filename chip.
 let curFile = null, lastSaved = null, fsMode = 'open', fsDir = null;
+// picker sidebar + search state
+let fsQuick = [], fsFavs = [], fsRecent = [];   // quick / favourite / recent entries
+let fsSearchId = null, fsSearchSeq = 0, fsSearchTimer = null, fsPendingQuery = '';
+let fsSearchPoll = null;             // interval polling live search progress
+let fsListing = null;                // last dir listing, re-rendered on sort change
+let fsSort = localStorage.getItem('egg-fs-sort') || 'az';
+let fsOpts = {};                     // active picker config (mode, ext, callbacks)
+const fsNote = (id, on) => document.getElementById(id).classList.toggle('show', on);
+// Small inline monochrome icons for the sidebar (themed via currentColor;
+// no external assets, per the no-CDN rule).
+const FS_ICONS = (() => {
+  const w = (inner) => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
+  return {
+    home: w('<path d="M3 10l7-6 7 6"/><path d="M5 9v7h10V9"/>'),
+    desktop: w('<rect x="2.5" y="4" width="15" height="9.5" rx="1"/><path d="M7 16.5h6M10 13.5v3"/>'),
+    documents: w('<path d="M5.5 2.5h6l3 3v12h-9z"/><path d="M11.5 2.5v3h3"/>'),
+    downloads: w('<path d="M10 3v8"/><path d="M6.5 8L10 11.5 13.5 8"/><path d="M4.5 16.5h11"/>'),
+    drive: w('<rect x="2.5" y="5.5" width="15" height="9" rx="1.5"/><path d="M6 10h5"/><path d="M14 10h.01"/>'),
+    folder: w('<path d="M2.5 5.5h5l1.5 2h8.5v8h-15z"/>'),
+    star: w('<path d="M10 2.5l2.2 4.6 5 .5-3.7 3.5 1 5L10 13.5 5.5 16.1l1-5L2.8 7.6l5-.5z"/>'),
+    clock: w('<circle cx="10" cy="10" r="7"/><path d="M10 6.5v4l2.8 1.8"/>'),
+  };
+})();
 const baseOf = (p) => p.slice(p.lastIndexOf('/') + 1);
 const dirOf = (p) => p.slice(0, Math.max(1, p.lastIndexOf('/')));
 const joinP = (d, n) => d + (d.endsWith('/') ? '' : '/') + n;
@@ -700,6 +1138,27 @@ function setFile(path, savedCode) {
   if (path) setScriptPath(path);
   updateChip();
 }
+// Load code into the editor and make it the open file. The editor's setValue
+// (a diff insert via execCommand) silently no-ops while the editor pane is
+// display:none, so in watch mode we briefly un-hide the pane around the set so
+// the buffer actually changes (synchronous: no paint, no flicker), then
+// re-point the watch at the new file. Everything (buffer, run, exit-watch) now
+// reflects the file that's actually open.
+function loadIntoEditor(code, path, savedCode) {
+  eggHideLanding();  // a file is now open
+  const panes = document.querySelector('.panes');
+  const wasWatching = !!watchTimer;
+  if (wasWatching) panes.classList.remove('watching');
+  window.eggSetCode(code);
+  if (wasWatching) panes.classList.add('watching');
+  setFile(path, savedCode);
+  if (wasWatching) {
+    watchLast = null; watchSuggested = false;
+    watchTick();          // re-run + re-follow the newly opened file
+  } else {
+    eggForceRender(code); // loading a file re-runs it
+  }
+}
 // the script's on-disk location: sent with renders/runs so sibling
 // imports (from driver import ...) resolve; independent of curFile so
 // pasted edits keep resolving against the last opened script's dir
@@ -709,21 +1168,55 @@ function setScriptPath(path) {
   // Let the editor re-home the language server on the new file's directory.
   window.dispatchEvent(new Event('egg-scriptpath'));
 }
+// The editor canonicalizes its buffer by dropping the trailing newline, so a
+// file that ends in a newline (most do) would always look modified the moment
+// it loads. Treat a trailing-newline-only difference as unchanged.
+function eggSameCode(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  return a.replace(/\n+$/, '') === b.replace(/\n+$/, '');
+}
 function updateChip(flash) {
   const c = document.getElementById('filechip');
   if (!c) return;
   if (!curFile) { c.textContent = ''; c.title = ''; return; }
-  const dirty = lastSaved === null || currentCode() !== lastSaved;
+  const dirty = lastSaved === null || !eggSameCode(currentCode(), lastSaved);
   c.textContent = baseOf(curFile) + (flash ? ' ✓' : dirty ? ' •' : '');
   c.title = curFile;
 }
-function fsHide() { document.getElementById('fsmodal').style.display = 'none'; }
+function fsHide() { fsCancelSearch(); document.getElementById('fsmodal').style.display = 'none'; }
+// Abort an in-flight search (tell the server to stop its walk) and clear the
+// debounce / note bars. Any partial results already fetched still render.
+function fsCancelSearch() {
+  clearTimeout(fsSearchTimer);
+  clearInterval(fsSearchPoll);
+  fsNote('fs-confirm', false); fsNote('fs-searching', false);
+  if (fsSearchId) {
+    const id = fsSearchId; fsSearchId = null;
+    fetch('/api/search/cancel', {method: 'POST', body: new URLSearchParams({id})});
+  }
+}
 async function fsList(dir) {
-  const r = await fetch('/api/files?dir=' + encodeURIComponent(dir || ''));
+  fsCancelSearch();
+  const ext = fsOpts.ext || '.py';
+  const r = await fetch('/api/files?dir=' + encodeURIComponent(dir || '')
+    + '&ext=' + encodeURIComponent(ext));
   const j = await r.json();
-  if (j.error) { alert(j.error); return; }
+  if (j.error) { eggAlert(j.error); return false; }
   fsDir = j.dir;
-  document.getElementById('fs-dir').textContent = j.dir;
+  document.getElementById('fs-path').value = j.dir;
+  document.getElementById('fs-search').value = '';
+  fsUpdateStar();
+  fsListing = {dir: j.dir, parent: j.parent, dirs: j.dirs, files: j.files};
+  fsRenderListing();
+  fsRecordRecent(j.dir);   // a visit: feeds recents + auto-favourite counts
+  return true;
+}
+// Render the cached directory listing under the active sort (folders first,
+// then files; name A–Z or Z–A). Re-run when the sort control changes.
+function fsRenderListing() {
+  const j = fsListing;
+  if (!j) return;
   const list = document.getElementById('fs-list');
   list.innerHTML = '';
   const add = (label, cls, fn) => {
@@ -731,52 +1224,261 @@ async function fsList(dir) {
     b.textContent = label; b.className = 'fs-entry ' + cls; b.onclick = fn;
     list.appendChild(b);
   };
+  const cmp = (a, b) => (fsSort === 'za' ? -1 : 1)
+    * a.toLowerCase().localeCompare(b.toLowerCase());
+  const dirs = [...j.dirs].sort(cmp), files = [...j.files].sort(cmp);
   if (j.parent && j.parent !== j.dir) add('..', 'fs-dirent', () => fsList(j.parent));
-  j.dirs.forEach((d) => add(d + '/', 'fs-dirent', () => fsList(joinP(j.dir, d))));
-  j.files.forEach((f) => add(f, 'fs-fileent', () => fsPick(joinP(j.dir, f))));
+  dirs.forEach((d) => add(d + '/', 'fs-dirent', () => fsList(joinP(j.dir, d))));
+  files.forEach((f) => add(f, 'fs-fileent', () => fsPick(joinP(j.dir, f))));
 }
-async function fsShow(mode) {
-  fsMode = mode;
+// Reflect whether the current folder is a MANUAL favourite in the ★ toggle
+// (automatic favourites are not starred; the star manually pins/unpins).
+function fsUpdateStar() {
+  const b = document.getElementById('fs-fav');
+  b.disabled = false;
+  const on = fsFavs.some((f) => f.path === fsDir && !f.auto);
+  b.textContent = on ? '★' : '☆';
+  b.classList.toggle('on', on);
+  b.title = on ? 'remove this folder from favourites' : 'add this folder to favourites';
+}
+async function fsLoadPlaces() {
+  try {
+    const j = await (await fetch('/api/places')).json();
+    fsQuick = j.quick || []; fsRecent = j.recent || []; fsFavs = j.favourites || [];
+  } catch (err) { fsQuick = []; fsRecent = []; fsFavs = []; }
+  fsRenderSidebar();
+  fsUpdateStar();
+}
+function fsRenderSidebar() {
+  const sb = document.getElementById('fs-sidebar');
+  sb.innerHTML = '';
+  const group = (label) => {
+    const d = document.createElement('div');
+    d.className = 'fs-side-group'; d.textContent = label; sb.appendChild(d);
+  };
+  const entry = (label, path, iconKey, onClick, onRemove) => {
+    const b = document.createElement('button');
+    b.className = 'fs-side-entry';
+    const ic = document.createElement('span');
+    ic.className = 'fs-side-icon'; ic.innerHTML = FS_ICONS[iconKey] || FS_ICONS.folder;
+    const lab = document.createElement('span');
+    lab.className = 'fs-side-label'; lab.textContent = label; lab.title = path;
+    b.appendChild(ic); b.appendChild(lab);
+    if (onRemove) {
+      const rm = document.createElement('button');
+      rm.className = 'fs-side-rm'; rm.textContent = '✕'; rm.title = 'remove';
+      rm.onclick = (e) => { e.stopPropagation(); onRemove(); };
+      b.appendChild(rm);
+    }
+    b.onclick = onClick;
+    sb.appendChild(b);
+  };
+  group('places');
+  fsQuick.forEach((p) => entry(p.name, p.path, p.icon, () => fsList(p.path)));
+  // "Recent" is a clickable pseudo-directory, not a real path (see fsShowRecent)
+  entry('Recent', '', 'clock', () => fsShowRecent());
+  if (fsFavs.length) {
+    group('favourites');
+    fsFavs.forEach((f) => entry(
+      f.name || f.path, f.path, f.auto ? 'clock' : 'star',
+      () => fsList(f.path), () => fsFavAction(f.path, 'remove')));
+  }
+}
+// The "Recent" pseudo-directory: recently visited dirs + opened files, each
+// shown by its (truncated) full path. Not a real filesystem location.
+async function fsShowRecent() {
+  // Launched from the landing page the picker is still closed and the recent
+  // list is not loaded yet; open it in "open" mode and fetch the places first.
+  const modal = document.getElementById('fsmodal');
+  if (modal.style.display !== 'flex') {
+    fsOpts = {mode: 'open'}; fsMode = 'open';
+    modal.style.display = 'flex';
+    document.querySelector('.fs-saverow').style.display = 'none';
+    document.getElementById('fs-title').textContent = 'open';
+    document.getElementById('fs-sort').value = fsSort;
+    await fsLoadPlaces();
+  }
+  fsCancelSearch();
+  fsListing = null;
+  document.getElementById('fs-path').value = 'Recent';
+  document.getElementById('fs-search').value = '';
+  const star = document.getElementById('fs-fav');
+  star.disabled = true; star.textContent = '☆'; star.classList.remove('on');
+  const list = document.getElementById('fs-list');
+  list.innerHTML = '';
+  if (!fsRecent.length) {
+    const d = document.createElement('div');
+    d.className = 'fs-note-row'; d.textContent = 'no recent items yet';
+    list.appendChild(d); return;
+  }
+  fsRecent.forEach((it) => {
+    const b = document.createElement('button');
+    b.className = 'fs-entry ' + (it.is_dir ? 'fs-dirent' : 'fs-fileent');
+    b.textContent = fsTruncPath(it.path) + (it.is_dir ? '/' : '');
+    b.title = it.path;
+    b.onclick = () => (it.is_dir ? fsList(it.path) : fsPick(it.path));
+    list.appendChild(b);
+  });
+}
+function fsTruncPath(p, max = 54) {
+  if (p.length <= max) return p;
+  const head = Math.ceil((max - 1) / 2), tail = Math.floor((max - 1) / 2);
+  return p.slice(0, head) + '…' + p.slice(p.length - tail);
+}
+// Record a visit (opened file, or navigated-to directory) in the persistent
+// recents/usage; the server may promote a frequently used dir to a favourite.
+async function fsRecordRecent(path) {
+  if (!path) return;
+  try {
+    const j = await (await fetch('/api/recent', {
+      method: 'POST', body: new URLSearchParams({path}),
+    })).json();
+    if (j.recent) fsRecent = j.recent;
+    if (j.favourites) fsFavs = j.favourites;
+    if (document.getElementById('fsmodal').style.display !== 'none') {
+      fsRenderSidebar(); fsUpdateStar();
+    }
+  } catch (err) { /* best-effort */ }
+}
+async function fsFavAction(path, action) {
+  try {
+    const j = await (await fetch('/api/favourites', {
+      method: 'POST', body: new URLSearchParams({path, action}),
+    })).json();
+    fsFavs = j.favourites || [];
+  } catch (err) { return; }
+  fsRenderSidebar();
+  fsUpdateStar();
+}
+// Recursive fuzzy search of fsDir. `confirmed` skips the deep-tree guard.
+async function fsRunSearch(q, confirmed) {
+  fsCancelSearch();
+  const seq = ++fsSearchSeq;
+  const id = 'srch-' + seq + '-' + Date.now();
+  fsSearchId = id;
+  fsNote('fs-confirm', false); fsNote('fs-searching', true);
+  const label = document.getElementById('fs-searching-text');
+  label.textContent = 'searching…';
+  // poll the server for a live "N matches (M searched)" counter
+  fsSearchPoll = setInterval(async () => {
+    try {
+      const p = await (await fetch(
+        '/api/search/progress?id=' + encodeURIComponent(id))).json();
+      if (p && p.scanned != null)
+        label.textContent = 'searching… ' + (p.matches || 0) + ' matches ('
+          + (p.scanned || 0).toLocaleString() + ' searched)';
+    } catch (err) { /* ignore transient poll errors */ }
+  }, 150);
+  let j;
+  try {
+    j = await (await fetch('/api/search?' + new URLSearchParams({
+      dir: fsDir, q, id, confirm: confirmed ? '1' : '0',
+    }))).json();
+  } catch (err) {
+    clearInterval(fsSearchPoll);
+    if (seq === fsSearchSeq) { fsSearchId = null; fsNote('fs-searching', false); }
+    return;
+  }
+  clearInterval(fsSearchPoll);
+  if (seq !== fsSearchSeq) return;   // a newer search superseded this one
+  fsSearchId = null;
+  fsNote('fs-searching', false);
+  if (j.error) { eggAlert(j.error); return; }
+  if (j.needs_confirm) {
+    fsPendingQuery = q;
+    document.getElementById('fs-confirm-text').textContent =
+      'Continue scanning large directory (10,000+ items)?';
+    fsNote('fs-confirm', true);
+    return;
+  }
+  fsRenderResults(j, q);
+}
+function fsRenderResults(j, q) {
+  const list = document.getElementById('fs-list');
+  list.innerHTML = '';
+  const results = j.results || [];
+  const note = (txt) => {
+    const d = document.createElement('div');
+    d.className = 'fs-note-row'; d.textContent = txt; list.appendChild(d);
+  };
+  if (!results.length) { note('no matches for “' + q + '”'); return; }
+  results.forEach((it) => {
+    const b = document.createElement('button');
+    b.className = 'fs-entry ' + (it.is_dir ? 'fs-dirent' : 'fs-fileent');
+    const name = document.createElement('span');
+    name.textContent = it.is_dir ? it.name + '/' : it.name;
+    const sub = document.createElement('span');
+    sub.className = 'fs-entry-sub'; sub.textContent = it.rel;
+    b.appendChild(name); b.appendChild(sub);
+    b.onclick = () => (it.is_dir ? fsList(it.path) : fsPick(it.path));
+    list.appendChild(b);
+  });
+  if (j.truncated) note('showing the first ' + results.length + ' matches (refine the query)');
+}
+// opts: {mode:'open'|'save', title, startDir, defaultName, namePlaceholder,
+//        ext, confirmOverwrite, onPick(path), onSave(path)}. A bare string is
+//        accepted as {mode}. onPick defaults to loading the file into the
+//        editor; onSave defaults to saving the script.
+async function fsShow(opts) {
+  fsOpts = (typeof opts === 'string') ? {mode: opts} : (opts || {});
+  fsMode = fsOpts.mode || 'open';
   document.getElementById('fsmodal').style.display = 'flex';
-  document.querySelector('.fs-saverow').style.display = mode === 'save' ? 'flex' : 'none';
+  document.querySelector('.fs-saverow').style.display = fsMode === 'save' ? 'flex' : 'none';
   document.getElementById('fs-title').textContent =
-    mode === 'save' ? 'save as' : 'open';
-  if (mode === 'save')
-    document.getElementById('fs-name').value = curFile ? baseOf(curFile) : 'geometry.py';
-  await fsList(fsDir || (curFile ? dirOf(curFile) : ''));
+    fsOpts.title || (fsMode === 'save' ? 'save as' : 'open');
+  const nameInput = document.getElementById('fs-name');
+  if (fsMode === 'save') {
+    nameInput.value = fsOpts.defaultName || (curFile ? baseOf(curFile) : 'geometry.py');
+    nameInput.placeholder = fsOpts.namePlaceholder || 'filename.py';
+  }
+  document.getElementById('fs-search').value = '';
+  document.getElementById('fs-sort').value = fsSort;
+  fsNote('fs-confirm', false); fsNote('fs-searching', false);
+  fsLoadPlaces();
+  await fsList(fsOpts.startDir || fsDir || (curFile ? dirOf(curFile) : ''));
+}
+// Prompt before replacing a modified buffer with another file. Only a tracked
+// file with edits since its last save counts as unsaved (a fresh untracked
+// buffer does not, to avoid nagging on the starter script).
+async function eggUnsavedOk() {
+  if (lastSaved === null || eggSameCode(currentCode(), lastSaved)) return true;
+  return eggConfirm(
+    'The current file has unsaved changes. Discard them and open the other file?',
+    'discard');
 }
 async function fsPick(path) {
   if (fsMode === 'save') {  // clicking a file in save mode = take its name
     document.getElementById('fs-name').value = baseOf(path);
     return;
   }
+  if (fsOpts.onPick) return fsOpts.onPick(path);   // custom open flow (e.g. .eggy)
+  if (!(await eggUnsavedOk())) return;   // keep the picker open to reconsider
   const r = await fetch('/api/file?path=' + encodeURIComponent(path));
   const j = await r.json();
-  if (j.error) { alert(j.error); return; }
+  if (j.error) { eggAlert(j.error); return; }
+  fsRecordRecent(j.path);
   // library-style script (defines a builder, no __egg_webui__ block):
   // watching -> show the block to paste (never touch a watched file);
   // otherwise offer to append it to the file, on confirmation only
   if (j.suggest) {
     if (watchTimer) {
-      window.eggSetCode(j.code);
-      setFile(j.path, j.code);
+      loadIntoEditor(j.code, j.path, j.code);  // re-points the watch too
       fsHide();
       showSuggestion(j.suggest);
       return;
     }
-    if (confirm(
-        'this script draws nothing and registers no run in the web UI.\n\n'
-        + 'append an __egg_webui__ block (build + egg_webui.run) and save '
-        + 'the file?')) {
-      window.eggSetCode(j.code.trimEnd() + j.suggest);
-      setFile(j.path, null);
+    if (await eggConfirm(
+        'This script draws nothing and registers no run in the web UI. '
+        + 'Append an __egg_webui__ block (build + egg_webui.run) and save '
+        + 'the file?', 'append')) {
+      const appended = j.code.trimEnd() + j.suggest;
+      loadIntoEditor(appended, j.path, null);
       await doSave(j.path);
       fsHide();
       return;
     }
   }
-  window.eggSetCode(j.code);
-  setFile(j.path, j.code);
+  loadIntoEditor(j.code, j.path, j.code);
   fsHide();
 }
 function showSuggestion(text) {
@@ -789,10 +1491,216 @@ async function doSave(path) {
     method: 'POST', body: new URLSearchParams({path, code}),
   });
   const j = await r.json();
-  if (j.error) { alert('save failed: ' + j.error); return; }
+  if (j.error) { eggAlert('save failed: ' + j.error); return; }
   setFile(j.path, code);
+  fsRecordRecent(j.path);
   updateChip(true);
   setTimeout(() => updateChip(), 1200);
+  // "save" auto-run policy: saving is the trigger to re-run the grid view.
+  if (eggAutorunMode() === 'save' && !eggIsWatching()) eggForceRender(code);
+}
+// Themed yes/no confirm as a promise, reused for every overwrite prompt.
+let cfResolve = null;
+function eggConfirm(message, okLabel) {
+  document.getElementById('cf-no').style.display = '';
+  document.getElementById('cf-text').textContent = message;
+  document.getElementById('cf-yes').textContent = okLabel || 'ok';
+  document.getElementById('cfmodal').style.display = 'flex';
+  return new Promise((res) => { cfResolve = res; });
+}
+// A themed replacement for window.alert(): the confirm modal with only the
+// ok button. Resolves when dismissed so callers can await it if they wish.
+function eggAlert(message, okLabel) {
+  document.getElementById('cf-no').style.display = 'none';
+  document.getElementById('cf-text').textContent = message;
+  document.getElementById('cf-yes').textContent = okLabel || 'ok';
+  document.getElementById('cfmodal').style.display = 'flex';
+  return new Promise((res) => { cfResolve = res; });
+}
+function cfClose(val) {
+  document.getElementById('cfmodal').style.display = 'none';
+  const r = cfResolve; cfResolve = null;
+  if (r) r(val);
+}
+async function fsExists(path) {
+  try { return await (await fetch('/api/exists?path=' + encodeURIComponent(path))).json(); }
+  catch (err) { return {exists: false, is_dir: false}; }
+}
+// The picker's save button: confirm overwrite (when the flow asks for it),
+// then hand the chosen path to the flow's onSave (default: save the script).
+async function fsDoSaveClick() {
+  const name = document.getElementById('fs-name').value.trim();
+  if (!name) return;
+  const target = joinP(fsDir, name);
+  if (fsOpts.confirmOverwrite) {
+    const info = await fsExists(target);
+    if (info.exists && !info.is_dir
+        && !(await eggConfirm('“' + name + '” already exists here. Overwrite it?', 'overwrite')))
+      return;
+  }
+  fsHide();
+  (fsOpts.onSave || doSave)(target);
+}
+
+// --- exports (SVG / SU2 / control-net npz): pick a destination via the file
+// picker, the backend writes it; remember the last one for "export as".
+function fsSuggestName(ext) {
+  const b = curFile ? baseOf(curFile).replace(/\.[^.]+$/, '') : 'grid';
+  return (b || 'grid') + ext;
+}
+function exportPick(kind) {
+  const meta = {svg: {ext: '.svg', title: 'export SVG'},
+                su2: {ext: '.su2', title: 'export SU2'},
+                net: {ext: '.npz', title: 'save control net'}}[kind];
+  fsShow({
+    mode: 'save', title: meta.title, ext: meta.ext,
+    defaultName: fsSuggestName(meta.ext), namePlaceholder: 'name' + meta.ext,
+    confirmOverwrite: true, onSave: (out) => runExport(kind, out),
+  });
+}
+// lmr is multi-file (per-block grids + grid.lua), so it writes into a folder
+// (dest/name) rather than a single file — pick the folder like .eggy extract.
+function exportLmrPick() {
+  const base = curFile ? baseOf(curFile).replace(/\.[^.]+$/, '') : 'grid';
+  fsShow({
+    mode: 'save', title: 'export lmr grid into folder', ext: '*',
+    defaultName: (base || 'grid') + '-lmr', namePlaceholder: 'folder name',
+    onSave: (out) => runExport('lmr', out),
+  });
+}
+async function runExport(kind, out) {
+  if (await doExport(kind, out)) eggSetLastExport(kind, out);
+}
+async function doExport(kind, out, overwrite) {
+  let url, body;
+  if (kind === 'svg') {
+    const svg = serializeSceneSvg();
+    if (!svg) { eggAlert('nothing to export yet (render a scene first)'); return false; }
+    url = '/export/svg'; body = {svg, out};
+  } else {
+    // su2/net/lmr export from this session's last run -> send the sid
+    url = kind === 'su2' ? '/export/su2'
+        : kind === 'lmr' ? '/export/lmr' : '/export/net';
+    body = {code: currentCode(), path: document.getElementById('scriptpath').value,
+            out, sid: eggSessionId()};
+    if (kind === 'lmr' && overwrite) body.overwrite = 'true';
+  }
+  const r = await fetch(url, {method: 'POST', body: new URLSearchParams(body)});
+  let j = null; try { j = await r.json(); } catch (err) { /* non-JSON error */ }
+  // lmr writes into a folder; if one already holds an export, confirm before
+  // clobbering a possibly hand-edited grid.lua, then retry forcing overwrite.
+  if (kind === 'lmr' && r.status === 409 && j && j.conflict) {
+    const ok = await eggConfirm(
+      (j.message || 'This folder already contains an exported grid.')
+      + ' Overwrite it?', 'overwrite');
+    if (!ok) return false;
+    return doExport(kind, out, true);
+  }
+  if (!r.ok || !j || j.error) { eggAlert((j && j.error) || 'export failed'); return false; }
+  fsRecordRecent(j.path || out);
+  if (kind === 'lmr' && j.untagged && j.untagged.length) eggWarnUntagged(j.untagged);
+  return true;
+}
+// The lmr export tags every external face; ones egg couldn't name from the
+// topology get an egg-untagged-N marker (faces on the same geometry share one,
+// faces with no geometry get one per block edge). Tell the user which faces so
+// they can map the markers in their sim bcDict.
+function eggWarnUntagged(groups) {
+  const MAX = 12;
+  const shown = groups.slice(0, MAX).map((g) => {
+    const where = g.faces.map((f) => f.block + ':' + f.face).join(', ');
+    const geo = g.geometry ? 'geometry "' + g.geometry + '"' : 'block edge (no geometry)';
+    return g.tag + '  (' + geo + ')\n    ' + where;
+  });
+  if (groups.length > MAX) shown.push('...and ' + (groups.length - MAX) + ' more');
+  eggAlert(
+    groups.length + ' external face group' + (groups.length === 1 ? '' : 's')
+    + ' had no boundary tag. Each was exported under an egg-untagged-N marker '
+    + '(faces on the same geometry share one). Define these in your sim '
+    + 'bcDict:\n\n' + shown.join('\n\n'));
+}
+// Serialize the live scene SVG standalone (embed the page CSS so the file
+// carries its own flavor), same as the old client-side download did.
+function serializeSceneSvg() {
+  const el = svgEl();
+  if (!el) return null;
+  const clone = el.cloneNode(true);
+  clone.setAttribute('data-theme', eggTheme);
+  const st = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+  st.textContent = document.querySelector('style').textContent;
+  clone.insertBefore(st, clone.firstChild);
+  return new XMLSerializer().serializeToString(clone);
+}
+function eggGetLastExport() {
+  try { return JSON.parse(localStorage.getItem('egg-last-export') || 'null'); }
+  catch (err) { return null; }
+}
+function eggSetLastExport(kind, out) {
+  localStorage.setItem('egg-last-export', JSON.stringify({kind, out}));
+  eggRefreshExportAs();
+}
+function eggRefreshExportAs() {
+  const btn = document.getElementById('file-export-as');
+  if (!btn) return;
+  const le = eggGetLastExport();
+  if (le && le.out) {
+    btn.style.display = '';
+    btn.textContent = 'export as ' + baseOf(le.out);
+    btn.title = 'overwrite ' + le.out;
+  } else btn.style.display = 'none';
+}
+document.addEventListener('DOMContentLoaded', eggRefreshExportAs);
+
+// --- .eggy case archives, through the picker + backend ---
+function saveEggyPick() {
+  const path = document.getElementById('scriptpath').value;
+  if (!path) { eggAlert('save the script to a file first, then save the .eggy'); return; }
+  fsShow({
+    mode: 'save', title: 'save .eggy archive', ext: '.eggy',
+    defaultName: fsSuggestName('.eggy'), namePlaceholder: 'name.eggy',
+    confirmOverwrite: true, onSave: (out) => saveEggy(out),
+  });
+}
+async function saveEggy(out) {
+  const code = currentCode();
+  const path = document.getElementById('scriptpath').value;
+  const r = await fetch('/save/eggy', {method: 'POST',
+    body: new URLSearchParams({code, path, out})});
+  let j = null; try { j = await r.json(); } catch (err) { /* non-JSON */ }
+  if (!r.ok || !j || j.error) { eggAlert((j && j.error) || 'save failed'); return; }
+  fsRecordRecent(j.path || out);
+}
+// open: step 1 pick the archive, step 2 pick a folder + workspace name to
+// extract into (dest/name), then load the unpacked script.
+function openEggyPick() {
+  fsShow({mode: 'open', title: 'open .eggy archive', ext: '.eggy',
+          onPick: (archive) => openEggyDest(archive)});
+}
+function openEggyDest(archive) {
+  fsShow({
+    mode: 'save', title: 'extract into folder', ext: '*',
+    startDir: dirOf(archive),
+    defaultName: baseOf(archive).replace(/\.eggy$/i, '') || 'workspace',
+    namePlaceholder: 'workspace name',
+    onSave: (target) => extractEggy(archive, target),
+  });
+}
+async function extractEggy(archive, target) {
+  if (!(await eggUnsavedOk())) return;
+  const dest = dirOf(target), name = baseOf(target);
+  const info = await fsExists(target);
+  if (info.exists
+      && !(await eggConfirm('“' + name + '” already exists. Extract into it?', 'extract')))
+    return;
+  const r = await fetch('/open/eggy', {method: 'POST',
+    body: new URLSearchParams({archive, dest, name})});
+  let j = null; try { j = await r.json(); } catch (err) { /* non-JSON */ }
+  if (!r.ok || !j || j.error) { eggAlert((j && j.error) || 'open failed'); return; }
+  eggHideLanding();  // a project is now open
+  window.eggSetCode(j.code);
+  setFile(j.path, j.code);
+  eggForceRender(j.code);  // loading the unpacked script re-runs it
+  fsRecordRecent(j.path);
 }
 document.addEventListener('click', (e) => {
   // A run owns the view; opening/loading a different file mid-run would desync
@@ -802,38 +1710,69 @@ document.addEventListener('click', (e) => {
   if ((e.target.closest('#file-open') || e.target.closest('#file-examples'))
       && eggRunning())
     return;
-  if (e.target.closest('#file-open')) fsShow('open');
+  if (e.target.closest('#file-open')) fsShow({mode: 'open'});
   const ex = e.target.closest('#file-examples');
-  if (ex) { fsDir = ex.dataset.dir; fsShow('open'); }
-  if (e.target.closest('#file-saveas')) fsShow('save');
-  if (e.target.closest('#file-save')) curFile ? doSave(curFile) : fsShow('save');
+  if (ex) fsShow({mode: 'open', startDir: ex.dataset.dir});
+  if (e.target.closest('#file-saveas')) fsShow({mode: 'save', confirmOverwrite: true});
+  if (e.target.closest('#file-save'))
+    curFile ? doSave(curFile) : fsShow({mode: 'save', confirmOverwrite: true});
   if (e.target.closest('#fs-cancel') || e.target.id === 'fsmodal') fsHide();
   if (e.target.closest('#sug-close') || e.target.id === 'sugmodal')
     document.getElementById('sugmodal').style.display = 'none';
   if (e.target.closest('#sug-copy'))
-    navigator.clipboard.writeText(document.getElementById('sug-text').textContent);
+    eggCopyText(document.getElementById('sug-text').textContent);
   if (e.target.closest('#save-close') || e.target.id === 'savemodal')
     document.getElementById('savemodal').style.display = 'none';
   if (e.target.closest('#save-copy'))
-    navigator.clipboard.writeText(document.getElementById('save-text').textContent);
+    eggCopyText(document.getElementById('save-text').textContent);
   if (e.target.closest('#save-write')) {  // write to file / apply, maybe remember
     const rem = document.getElementById('save-remember');
     if (rem && rem.checked) eggWriteThrough = true;
-    if (eggPendingCommit != null) eggApplyCommit(eggPendingCommit);
+    if (eggPendingCommit != null) eggApplyToFile(eggPendingCommit);
     eggPendingCommit = null;
     document.getElementById('savemodal').style.display = 'none';
   }
-  if (e.target.closest('#fs-do-save')) {
-    const name = document.getElementById('fs-name').value.trim();
-    if (name) { doSave(joinP(fsDir, name)); fsHide(); }
+  if (e.target.closest('#fs-do-save')) fsDoSaveClick();
+  if (e.target.closest('#cf-yes')) cfClose(true);
+  if (e.target.closest('#cf-no') || e.target.id === 'cfmodal') cfClose(false);
+  if (e.target.closest('#fs-fav')) {
+    const isManual = fsFavs.some((f) => f.path === fsDir && !f.auto);
+    fsFavAction(fsDir, isManual ? 'remove' : 'add');
   }
+  if (e.target.closest('#fs-confirm-go')) {
+    fsNote('fs-confirm', false);
+    if (fsPendingQuery) fsRunSearch(fsPendingQuery, true);
+  }
+  if (e.target.closest('#fs-confirm-stop')) fsNote('fs-confirm', false);
+  if (e.target.closest('#fs-search-stop')) fsCancelSearch();
+});
+// picker: type a path + Enter to jump; debounced recursive search box
+document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'fs-path' && e.key === 'Enter') {
+    e.preventDefault();
+    fsList(e.target.value.trim());   // fsList records the visit itself
+  }
+});
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'fs-search') return;
+  clearTimeout(fsSearchTimer);
+  const q = e.target.value.trim();
+  if (!q) { fsCancelSearch(); if (fsDir) fsList(fsDir); return; }
+  fsSearchTimer = setTimeout(() => fsRunSearch(q, false), 250);
+});
+document.addEventListener('change', (e) => {
+  if (e.target.id !== 'fs-sort') return;
+  fsSort = e.target.value;
+  localStorage.setItem('egg-fs-sort', fsSort);
+  fsRenderListing();
 });
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
-    curFile ? doSave(curFile) : fsShow('save');
+    curFile ? doSave(curFile) : fsShow({mode: 'save', confirmOverwrite: true});
   }
   if (e.key === 'Escape') {
+    if (document.getElementById('cfmodal').style.display === 'flex') { cfClose(false); return; }
     fsHide();
     document.getElementById('sugmodal').style.display = 'none';
     document.getElementById('savemodal').style.display = 'none';
@@ -847,10 +1786,10 @@ document.addEventListener('keydown', (e) => {
   if (e.target.id === 'fs-name' && e.key === 'Enter')
     document.getElementById('fs-do-save').click();
 });
-// Ctrl+Enter (Cmd+Enter): run — or stop, when a run is streaming. Capture
-// phase, so CodeMirror's Mod-Enter (insert blank line) never sees it.
+// The run keybind (default Ctrl+Enter): run, or stop while a run streams.
+// Capture phase, so the editor's own Mod-Enter (insert blank line) never sees it.
 document.addEventListener('keydown', (e) => {
-  if (!(e.ctrlKey || e.metaKey) || e.key !== 'Enter' || e.repeat) return;
+  if (e.repeat || !eggMatchBind(e, eggBind('run', 'Ctrl+Enter'))) return;
   const btn = document.querySelector('#viewbar .btns button.primary:not(:disabled)')
            || document.querySelector('#viewbar .btns button.danger:not(:disabled)');
   if (!btn) return;
@@ -858,6 +1797,60 @@ document.addEventListener('keydown', (e) => {
   e.stopPropagation();
   btn.click();
 }, true);
+// Resume warns when the file changed since the cached result. The run button
+// carries data-resume="1" in resume mode; eggRunBaseCode is the code submitted
+// by the run that produced the cache.
+let eggRunBaseCode = null;
+// Attach to document, not document.body: this classic script runs in <head>
+// where document.body is still null. htmx events bubble up to document anyway.
+document.addEventListener('htmx:confirm', (evt) => {
+  const el = evt.detail.elt;
+  if (!el) return;
+  // leaving the topology edit view with unapplied edits: confirm first. The
+  // edits are kept in the working buffer and restored when the user returns.
+  if (el.id === 'viewmode' && el.value !== 'edit'
+      && document.body.classList.contains('editing')
+      && eggEd && eggEd.dirty) {
+    evt.preventDefault();
+    eggConfirm(
+      'You have unapplied topology edits. Leave edit view without applying '
+      + 'them? Your edits are kept and restored when you come back.',
+      'leave').then((ok) => {
+        if (ok) evt.detail.issueRequest(true);
+        else el.value = 'edit';  // cancelled: snap the dropdown back
+      });
+    return;
+  }
+  if (el.id !== 'run-btn' || el.dataset.resume !== '1') return;
+  if (currentCode() === eggRunBaseCode) return;  // unchanged: resume silently
+  evt.preventDefault();
+  eggConfirm(
+    'The file has changed since the cached result. Resume starts from that '
+    + 'cached grid and runs the remaining stages with the new values. Continue?',
+    'resume').then((ok) => { if (ok) evt.detail.issueRequest(true); });
+});
+// Native-app close: prompt if there is unsaved work (file edits or unapplied
+// topology edits) before the window is destroyed. Uses the themed confirm, not
+// a native dialog. The frameless titlebar close button calls this.
+function eggHasUnsavedWork() {
+  const fileDirty = !!(curFile && lastSaved !== null
+                       && !eggSameCode(currentCode(), lastSaved));
+  const topoDirty = !!(eggEd && eggEd.dirty);
+  return fileDirty || topoDirty;
+}
+window.eggDesktopClose = async () => {
+  if (eggHasUnsavedWork()) {
+    const ok = await eggConfirm(
+      'There are unsaved changes or unapplied topology edits. Close egg anyway?',
+      'close');
+    if (!ok) return;
+  }
+  window.pywebview?.api?.close?.();
+};
+document.addEventListener('htmx:beforeRequest', (evt) => {
+  const el = evt.detail.elt;
+  if (el && el.id === 'run-btn') eggRunBaseCode = currentCode();
+});
 // --- watch mode: the user edits the file in their own editor; the UI
 // hides the editor pane, polls the opened file, and re-renders on change
 // (the run button keeps working against the synced buffer).
@@ -873,10 +1866,12 @@ async function maybeSuggest() {
   } catch (err) { /* ignore */ }
 }
 async function watchTick() {
-  if (!curFile) return;
+  const f = curFile;
+  if (!f) return;
   try {
-    const r = await fetch('/api/file?path=' + encodeURIComponent(curFile) + '&check=0');
+    const r = await fetch('/api/file?path=' + encodeURIComponent(f) + '&check=0');
     const j = await r.json();
+    if (f !== curFile) return;  // the watched file changed mid-flight; discard
     if (j.error || j.code === watchLast) return;
     const changed = watchLast !== null;
     watchLast = j.code;
@@ -885,26 +1880,34 @@ async function watchTick() {
       lastSaved = j.code;
       updateChip();
     }
+    eggForceRender(j.code);  // watch: re-run whenever the file changes on disk
     if (changed) { watchSuggested = false; maybeSuggest(); }
   } catch (err) { /* transient; next tick retries */ }
 }
-function setWatch(on) {
+async function setWatch(on) {
   const cb = document.getElementById('watch-toggle');
   const panes = document.querySelector('.panes');
   if (on && !curFile) {
-    alert('open a file first — watch mode follows the opened file');
+    eggAlert('Open a file first.');
     cb.checked = false;
     return;
   }
   if (on && lastSaved !== null && currentCode() !== lastSaved
-      && !confirm('discard unsaved editor changes and follow the file on disk?')) {
+      && !(await eggConfirm('Discard unsaved editor changes and follow the file on disk?', 'discard'))) {
     cb.checked = false;
     return;
   }
   cb.checked = on;
   panes.classList.toggle('watching', on);
+  // The editor's hover/signature/completion tooltips are appended to <body>, so
+  // hiding the editor pane doesn't hide them. Suppress them entirely while
+  // watching via a root class the CSS keys off (declarative, so one that tries
+  // to open later, e.g. from a programmatic setValue, stays hidden too).
+  document.documentElement.classList.toggle('egg-watching', on);
   localStorage.setItem('egg-webui-watch', on ? '1' : '');
   if (on) {
+    const ta = document.querySelector('.editor textarea');
+    if (ta) ta.blur();  // close any open completion popup
     if (splitInst) { splitInst.destroy(); splitInst = null; }
     panes.classList.remove('split-active');
     watchLast = null;
@@ -924,10 +1927,15 @@ document.addEventListener('change', (e) => {
 // restore the file association: CLI-passed script wins, else localStorage
 window.addEventListener('DOMContentLoaded', () => {
   const t = document.querySelector('.editor textarea');
+  let sessionActive = false;
+  try { sessionActive = !!sessionStorage.getItem('egg-webui-session'); } catch (e) { /* ignore */ }
   if (t && t.dataset.file) {
     setFile(t.dataset.file, t.value);
     if (t.dataset.watch === '1') { setWatch(true); return; }
-  } else {
+  } else if (sessionActive) {
+    // Refresh with an active session: restore the file association so the chip,
+    // save, and watch keep working. On the startup landing we skip this, so
+    // opening a file there doesn't wrongly prompt about "unsaved changes".
     const sp = localStorage.getItem('egg-webui-path');
     if (sp) setScriptPath(sp);
     const saved = localStorage.getItem('egg-webui-file');
@@ -943,6 +1951,8 @@ window.addEventListener('DOMContentLoaded', () => {
         .catch(() => {});
     }
   }
+  const asv = document.getElementById('autosave-toggle');
+  if (asv) asv.checked = localStorage.getItem('egg-webui-autosave') === '1';
   if (localStorage.getItem('egg-webui-watch') && curFile) setWatch(true);
 });
 
@@ -1013,8 +2023,13 @@ function eggBuildGraph(data) {
     const m = /^u(\d+)$/.exec(id);
     if (m) seq = Math.max(seq, +m[1] + 1);
   }
+  // Sections the editor has no UI for (fan_frames, ...) must survive the
+  // load -> edit -> save round trip verbatim.
+  const extra = {};
+  for (const k of Object.keys(f))
+    if (k !== 'nodes' && k !== 'edges' && k !== 'res') extra[k] = f[k];
   return {geometry: data.geometry || [], res: f.res == null ? 10 : f.res,
-          nodes, edges, drawing: null, cursor: null, seq, dirty: false,
+          nodes, edges, extra, drawing: null, cursor: null, seq, dirty: false,
           hist: {undo: [], redo: []}, last: null,
           selN: new Set(), selE: new Set()};
 }
@@ -1036,7 +2051,7 @@ function eggToBlocking(g) {
     if (e.res) o.res = e.res;     // explicit resolution -> drives its loop
     return o;
   });
-  return {nodes, edges, res: g.res};
+  return Object.assign({}, g.extra || {}, {nodes, edges, res: g.res});
 }
 function eggSnapshot() { return JSON.stringify(eggToBlocking(eggEd)); }
 function eggRestore(json) {  // replace the graph, keep history + geometry
@@ -1092,6 +2107,12 @@ function eggEditInit() {
   const bg = data.base || {nodes: {}, edges: []};
   eggEd.baseGraph = {nodes: new Map(Object.entries(bg.nodes || {})),
                      edges: bg.edges || []};
+  // loop-propagated per-edge resolutions from the source flatten; a dirty
+  // buffer gets fresh ones from the validate below
+  if (!eggEd.effRes) {
+    eggEd.effRes = data.edge_res || null;
+    eggEd.resClasses = data.res_classes || null;
+  }
   eggEnsureControls();
   eggEditRender();
   if (eggEd.dirty) eggValidate();
@@ -1117,11 +2138,11 @@ function eggEnsureControls() {
     ab.id = 'ed-auto';
     ab.textContent = eggAuto ? 'auto: on' : 'auto: off';
     ab.title = 'auto-commit each valid edit to the source (writes to the file)';
-    ab.addEventListener('click', () => {
+    ab.addEventListener('click', async () => {
       if (!eggAuto) {  // turning ON: auto-commit writes the file every edit
-        if (curFile && eggIsWatching() && !confirm(
-            'Auto-save will write the drawing to the WATCHED file on every valid '
-            + 'edit. Continue?')) return;  // declined -> stay off
+        if (curFile && eggIsWatching() && !(await eggConfirm(
+            'Auto-save will write the topology to the WATCHED file on every valid '
+            + 'edit. Continue?', 'continue'))) return;  // declined -> stay off
         eggAuto = true; eggWriteThrough = true; eggMaybeAuto();
       } else { eggAuto = false; }
       ab.textContent = eggAuto ? 'auto: on' : 'auto: off';
@@ -1132,8 +2153,9 @@ function eggEnsureControls() {
     const cb = document.createElement('button');
     cb.id = 'ed-commit';
     cb.className = 'primary';
-    cb.textContent = 'save edits';
-    cb.title = 'write the drawing into the editable({...}) source (only when valid)';
+    cb.textContent = 'apply edits';
+    cb.title = 'apply the drawing to the editable({...}) source and re-run '
+      + '(only when valid); save the file to disk yourself';
     cb.addEventListener('click', eggCommit);
     bar.insertBefore(cb, bar.firstChild);
     eggUpdateCommitBtn();
@@ -1144,10 +2166,24 @@ function eggEnsureControls() {
     sel.title = 'assign the selected edge / nodes to a geometry curve (F pins a node)';
     sel.addEventListener('change', () => {
       const v = sel.value;
-      if (v) eggBindSelection(v === '__none__' ? null : v);
+      if (v === '__fix__') eggSetFixed(true);
+      else if (v === '__unfix__') eggSetFixed(false);
+      else if (v) eggBindSelection(v === '__none__' ? null : v);
       sel.value = '';
     });
     bar.insertBefore(sel, bar.firstChild);
+  }
+  if (!document.getElementById('ed-snap')) {
+    const sb = document.createElement('button');
+    sb.id = 'ed-snap';
+    sb.textContent = eggSnap ? 'snap: on' : 'snap: off';
+    sb.title = 'snap newly placed nodes onto a nearby geometry curve and bind '
+             + 'them to it (off: nodes place freely; use bind to… to attach)';
+    sb.addEventListener('click', () => {
+      eggSnap = !eggSnap;
+      sb.textContent = eggSnap ? 'snap: on' : 'snap: off';
+    });
+    bar.insertBefore(sb, bar.firstChild);
   }
   eggRefreshBindOptions();
 }
@@ -1157,9 +2193,14 @@ function eggRefreshBindOptions() {
   const labels = (eggEd.geometry || []).map((g) => g.label);
   sel.innerHTML = '<option value="">bind to…</option>'
     + labels.map((l) => `<option value="${l}">${l}</option>`).join('')
-    + '<option value="__none__">— unbind —</option>';
+    + '<option value="__fix__">(fix in place)</option>'
+    + '<option value="__unfix__">(unfix)</option>'
+    + '<option value="__none__">(unbind)</option>';
 }
 let eggAuto = false;
+// place-time geometry snapping, off by default: a click near a curve places a
+// free node; the snap toggle (or the bind to… dropdown) opts into binding
+let eggSnap = false;
 // "save edits writes straight to the file" — off by default (so a watched file
 // is never modified without consent), remembered for the session, reset on load
 let eggWriteThrough = false;
@@ -1172,13 +2213,34 @@ function eggUpdateCommitBtn() {
   const cb = document.getElementById('ed-commit');
   if (cb) cb.disabled = !(eggEd && eggEd.valid);
 }
-// land a committed source: update the editor buffer, and persist to the file
-// when one is open (the write-through / popup path has already consented)
-function eggApplyCommit(code) {
+// Land a committed source into the editor buffer and re-run it. The user
+// saves the file themselves (Ctrl+S / auto-save). In watch mode the editor
+// pane is display:none, where the prism setValue no-ops, so un-hide it just
+// for the synchronous set (no paint happens in between).
+function eggApplyToBuffer(code) {
   eggClearBuffer();
   eggEd.dirty = false;
+  const panes = document.querySelector('.panes');
+  const hidden = panes && panes.classList.contains('watching');
+  if (hidden) panes.classList.remove('watching');
   window.eggSetCode(code);
-  if (curFile) doSave(curFile);
+  if (hidden) panes.classList.add('watching');
+  eggForceRender(code);
+}
+// Apply the edits and write them straight to the open file. Used by the
+// watch-mode "write to file" button and the write-through opt-in. Writes the
+// given code directly (not currentCode(), which is stale while the pane hides).
+async function eggApplyToFile(code) {
+  eggApplyToBuffer(code);
+  if (!curFile) return;
+  const r = await fetch('/api/file/save',
+    {method: 'POST', body: new URLSearchParams({path: curFile, code})});
+  const j = await r.json();
+  if (j.error) { eggAlert('save failed: ' + j.error); return; }
+  setFile(j.path, code);
+  fsRecordRecent(j.path);
+  updateChip(true);
+  setTimeout(() => updateChip(), 1200);
 }
 async function eggCommit() {
   if (!eggEd || !eggEd.valid) return;
@@ -1186,17 +2248,20 @@ async function eggCommit() {
   const sp = document.getElementById('scriptpath');
   if (!t) return;
   const body = new URLSearchParams({code: t.value, path: sp ? sp.value : '',
-                                    blocking: JSON.stringify(eggToBlocking(eggEd))});
+                                    blocking: JSON.stringify(eggToBlocking(eggEd)),
+                                    sid: eggSessionId()});
   let j;
   try {
     const res = await fetch('/api/topo/commit', {method: 'POST', body});
     j = await res.json();
-    if (!res.ok) { alert(j.error || 'commit failed'); return; }
-  } catch (e) { alert('commit failed: ' + e); return; }
-  // Not watching -> clicking save is explicit permission to write the file.
-  // Watching -> show the block to paste (never silently touch a watched file),
-  // unless the user opted into write-through this session.
-  if (!eggIsWatching() || eggWriteThrough) { eggApplyCommit(j.code); return; }
+    if (!res.ok) { eggAlert(j.error || 'commit failed'); return; }
+  } catch (e) { eggAlert('commit failed: ' + e); return; }
+  // Not watching -> apply to the buffer; the user saves the file themselves
+  // (Ctrl+S / auto-save). Watching + write-through opted in -> write straight
+  // to the watched file. Watching otherwise -> show the block to copy, or a
+  // button to write the watched file (never touch it silently).
+  if (!eggIsWatching()) { eggApplyToBuffer(j.code); return; }
+  if (eggWriteThrough) { eggApplyToFile(j.code); return; }
   eggPendingCommit = j.code;
   const m = document.getElementById('savemodal');
   document.getElementById('save-text').textContent = j.block || j.code;
@@ -1312,9 +2377,8 @@ function eggIsFixedNode(id) {
   const bn = eggEd.baseGraph && eggEd.baseGraph.nodes.get(id);
   return !!(bn && bn.fixed);
 }
-function eggToggleFixed() {  // F: pin / unpin the selected nodes
+function eggSetFixed(target) {  // pin / unpin the selected nodes explicitly
   if (!eggEd || !eggEd.selN.size) return;
-  const target = ![...eggEd.selN].every(eggIsFixedNode);  // all fixed -> unfix
   for (const id of eggEd.selN) {
     eggPromoteAny(id);
     const n = eggEd.nodes.get(id);
@@ -1322,18 +2386,32 @@ function eggToggleFixed() {  // F: pin / unpin the selected nodes
   }
   eggEditChanged();
 }
+function eggToggleFixed() {  // F: pin / unpin the selected nodes
+  if (!eggEd || !eggEd.selN.size) return;
+  eggSetFixed(![...eggEd.selN].every(eggIsFixedNode));  // all fixed -> unfix
+}
 function eggSetOn(id, label) {
   eggPromoteAny(id);
   const n = eggEd.nodes.get(id);
   if (n) n.on = label ? [label] : [];
 }
+function eggAddOn(id, label) {  // additive: a junction node keeps its other curves
+  eggPromoteAny(id);
+  const n = eggEd.nodes.get(id);
+  if (n && !(n.on || []).includes(label)) n.on = [...(n.on || []), label];
+}
 // assign the selection to a geometry curve (declarative associate): a selected
-// edge becomes a block face on the curve; nodes get bound to it
+// edge becomes a block face on the curve; its endpoints gain the curve on top
+// of any they already carry (a node on two curves is a pinned junction), while
+// a directly selected node is set to exactly this curve
 function eggBindSelection(label) {
   if (!eggEd || (!eggEd.selN.size && !eggEd.selE.size)) return;
   for (const ek of eggEd.selE) {
     const e = eggEd.edges.find((x) => eggEK(x.a, x.b) === ek);
-    if (e) { e.bind = label || null; eggSetOn(e.a, label); eggSetOn(e.b, label); }
+    if (!e) continue;
+    e.bind = label || null;
+    if (label) { eggAddOn(e.a, label); eggAddOn(e.b, label); }
+    else { eggSetOn(e.a, null); eggSetOn(e.b, null); }
   }
   for (const id of eggEd.selN) eggSetOn(id, label);
   eggEditChanged();
@@ -1419,7 +2497,10 @@ function eggMakeCoincident() {
 // set resolution: cell count along the selected edge(s). Because opposite faces
 // of a block share a resolution (and shared faces link blocks), the flatten
 // propagates one setting around the whole loop — so the user sets one edge and
-// every edge that must stay consistent follows. A blocking edge stores it inline;
+// every edge that must stay consistent follows. The modal opens at the edge's
+// EFFECTIVE (loop-propagated) value, and applying a new one also rewrites any
+// stale explicit override elsewhere in the loop, so no old driver lingers to
+// fight it via the flatten's max() rule. A blocking edge stores it inline;
 // a base edge gets a res-only blocking edge (no cut, no re-block). Opens a themed
 // input (not a browser prompt), applied on 'set'/Enter, dismissed on cancel/Esc.
 let eggResPending = null;  // selE snapshot awaiting the res modal
@@ -1427,6 +2508,7 @@ function eggSetEdgeRes() {
   if (!eggEd || !eggEd.selE.size) return;
   let cur = null;
   for (const ek of eggEd.selE) {
+    if (eggEd.effRes && eggEd.effRes[ek]) { cur = eggEd.effRes[ek]; break; }
     const fe = eggEd.edges.find((e) => eggEK(e.a, e.b) === ek);
     if (fe && fe.res) { cur = fe.res; break; }
   }
@@ -1448,6 +2530,20 @@ function eggResApply() {
       if (fe) { fe.res = n; continue; }
       const [a, b] = ek.split('|');  // an uncut base edge -> res-only override
       eggEd.edges.push({a, b, bind: null, base: null, res: n});
+    }
+    // Propagate through the touched loops: rewrite other explicit overrides
+    // in the same class, and update the effective map optimistically so the
+    // hover text is right before the next validate round-trip lands.
+    if (eggEd.resClasses) {
+      for (const cls of eggEd.resClasses) {
+        if (!cls.some((k) => eggResPending.has(k))) continue;
+        for (const k of cls) {
+          if (eggEd.effRes) eggEd.effRes[k] = n;
+          if (eggResPending.has(k)) continue;
+          const fe = eggEd.edges.find((e) => eggEK(e.a, e.b) === k);
+          if (fe && fe.res) fe.res = n;
+        }
+      }
     }
     eggEditChanged();
   }
@@ -1484,6 +2580,26 @@ document.addEventListener('click', (e) => {
   else if (e.target.closest('#tool-join')) eggJoinNodes();
   else if (e.target.closest('#tool-coincident')) eggMakeCoincident();
   else if (e.target.closest('#tool-res')) eggSetEdgeRes();
+});
+// Node-operation keybinds in the topology edit view (configurable, bare keys).
+// Ignored while typing; each fires only when its toolbar button is enabled, so
+// the same precondition (right selection) gates the key and the click alike.
+document.addEventListener('keydown', (e) => {
+  if (!eggEd || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.matches('input, textarea, select') || e.target.closest('.editor')) return;
+  const ops = [
+    ['node_split', 's', 'tool-split', eggSplitAtNode],
+    ['node_join', 'j', 'tool-join', eggJoinNodes],
+    ['node_coincident', 'c', 'tool-coincident', eggMakeCoincident],
+    ['node_set_res', 'r', 'tool-res', eggSetEdgeRes],
+  ];
+  for (const [name, def, id, fn] of ops) {
+    if (eggMatchBind(e, eggBind(name, def))) {
+      const btn = document.getElementById(id);
+      if (btn && !btn.disabled) { e.preventDefault(); fn(); }
+      return;
+    }
+  }
 });
 // nearest snap-able node within maxD viewBox units of a world point
 function eggPickNode(svg, wx, wy, maxD) {
@@ -1628,11 +2744,13 @@ function eggMoveNodes() {
 //   plain drag on item  -> move that node/edge; on empty -> pan
 //   shift|ctrl click    -> toggle-select the item under the cursor
 //   shift|ctrl drag     -> rubber-band box select
-//   middle button       -> always pan (not grabbed here)
+//   middle/right button -> always pan (not grabbed here; right-click rename
+//                          rides the contextmenu event)
 function eggEdPointerDown(e) {
   const svg = svgEl();
   if (!svg || !eggEd || !svg.getScreenCTM()) return;
-  if (e.pointerType === 'mouse' && e.button === 1) return;  // middle -> pan
+  if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2))
+    return;  // middle/right -> pan
   const vb = eggClientVB(svg, e.clientX, e.clientY);
   if (!vb) return;
   const [wx, wy] = eggV2W(svg, vb[0], vb[1]);
@@ -1767,7 +2885,7 @@ function eggRenameNode(id) {
   if (!eggIsBlockingNode(id)) return;
   const nn = (prompt('rename node "' + id + '" to:', id) || '').trim();
   if (!nn || nn === id) return;
-  if (eggIdTaken(nn)) { alert('name "' + nn + '" is already in use'); return; }
+  if (eggIdTaken(nn)) { eggAlert('name "' + nn + '" is already in use'); return; }
   eggEd.nodes.set(nn, eggEd.nodes.get(id));
   eggEd.nodes.delete(id);
   for (const e of eggEd.edges) { if (e.a === id) e.a = nn; if (e.b === id) e.b = nn; }
@@ -1777,14 +2895,16 @@ function eggRenameNode(id) {
   eggEditChanged();
 }
 document.addEventListener('contextmenu', (e) => {
+  if (!(e.target instanceof Element) || !e.target.closest('.canvas')) return;
+  e.preventDefault();  // right button is a pan gesture on the canvas, not a menu
   if (!eggEd) return;
   const svg = svgEl();
-  if (!svg || !svg.getScreenCTM() || !e.target.closest('.canvas')) return;
+  if (!svg || !svg.getScreenCTM()) return;
   const vb = eggClientVB(svg, e.clientX, e.clientY);
   if (!vb) return;
   const [wx, wy] = eggV2W(svg, vb[0], vb[1]);
   const node = eggPickNode(svg, wx, wy, 16 / svg.getScreenCTM().a);
-  if (node && eggIsBlockingNode(node)) { e.preventDefault(); eggRenameNode(node); }
+  if (node && eggIsBlockingNode(node)) eggRenameNode(node);
 });
 // place / snap a node at a click (existing node, edge split, curve, or free)
 function eggPlaceNode(svg, vb, wx, wy, coarse, maxD) {
@@ -1800,7 +2920,8 @@ function eggPlaceNode(svg, vb, wx, wy, coarse, maxD) {
   if (be)  // base block edge -> cut it into two editable sub-edges
     return eggCutBaseEdge(be.a, be.b, be.curve, be.xy);
   const target = 'u' + (eggEd.seq++);
-  const hit = eggPickCurve(svg, vb, coarse ? 24 : 12);  // snap+bind to a curve
+  // snap+bind to a curve only when the snap toggle is on
+  const hit = eggSnap ? eggPickCurve(svg, vb, coarse ? 24 : 12) : null;
   if (hit) eggEd.nodes.set(target, {xy: hit.xy, split: null, on: [hit.label]});
   else eggEd.nodes.set(target, {xy: [wx, wy], split: null, on: []});
   return target;
@@ -1890,10 +3011,16 @@ function eggValidate() {
     const sp = document.getElementById('scriptpath');
     if (!t) return;
     const body = new URLSearchParams({code: t.value, path: sp ? sp.value : '',
-                                      blocking: JSON.stringify(eggToBlocking(eggEd))});
+                                      blocking: JSON.stringify(eggToBlocking(eggEd)),
+                                      sid: eggSessionId()});
     try {
       const res = await fetch('/api/topo/validate', {method: 'POST', body});
       const j = await res.json();
+      // effective per-edge resolution + the loop classes that must share one,
+      // from the flatten, so hover text and the res modal show the value an
+      // edge actually grids at, not just its own stored override
+      eggEd.effRes = j.edge_res || null;
+      eggEd.resClasses = j.res_classes || null;
       eggShowValidity(j.diagnostics || []);
     } catch (e) {}
   }, 350);
@@ -1914,9 +3041,16 @@ function eggShowValidity(diags) {
   eggUpdateCommitBtn();
   eggMaybeAuto();
   if (!chip) return;
+  chip.onclick = null; chip.style.cursor = '';  // reset the clickable state
   if (errs.length) {
     chip.className = 'bad';
     chip.textContent = errs.length + ' issue' + (errs.length > 1 ? 's' : '');
+    // click the error chip to copy the full issue text; the tooltip says so
+    const text = errs.map((d) => d.msg).join('\n');
+    chip.title = text + '\n\nclick to copy';
+    chip.style.cursor = 'pointer';
+    chip.onclick = () => eggCopyChip(chip, text);
+    return;
   } else if (warns.length) {
     chip.className = 'warn';
     chip.textContent = warns.length + ' warning' + (warns.length > 1 ? 's' : '');
@@ -1925,6 +3059,36 @@ function eggShowValidity(diags) {
     chip.textContent = 'valid';
   }
   chip.title = diags.map((d) => d.msg).join('\n');
+}
+// Copy text to the clipboard. Use the execCommand fallback in two cases: a
+// non-secure context (plain http / Tailscale) where navigator.clipboard is
+// missing, and the native app (pywebview), where navigator.clipboard triggers a
+// Qt clipboard-permission request that crashes some pywebview builds. In a real
+// browser prefer the async clipboard API.
+function eggCopyText(text) {
+  if (!window.pywebview && navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).catch(() => eggCopyFallback(text));
+  }
+  eggCopyFallback(text);
+  return Promise.resolve();
+}
+window.eggCopyText = eggCopyText;  // the editor module (editor.js) reuses it
+function eggCopyFallback(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+  document.body.removeChild(ta);
+}
+// Copy the chip's text and flash "copied" briefly (restored on the next
+// validate round-trip anyway).
+function eggCopyChip(chip, text) {
+  eggCopyText(text);
+  const prev = chip.textContent;
+  chip.textContent = 'copied';
+  setTimeout(() => { if (chip.textContent === 'copied') chip.textContent = prev; }, 900);
 }
 // what the cursor is over, for the properties readout: node, edge, and any
 // geometry curve — all of them, so an overlap (edge on a boundary) shows both
@@ -1949,7 +3113,10 @@ function eggEdgeDesc(ek) {
   let s = (isBase ? 'base edge ' : 'edge ') + p[0] + '–' + p[1];
   const bind = (fe && fe.bind) || curve;
   if (bind) s += ' · projected onto ' + bind;
-  if (fe && fe.res) s += ' · ' + fe.res + ' cells';
+  // effective (loop-propagated) resolution first; a stored override is only
+  // shown raw while the blocking is invalid and no flatten result exists
+  const r = (eggEd.effRes && eggEd.effRes[ek]) || (fe && fe.res);
+  if (r) s += ' · ' + r + ' cells' + (fe && fe.res ? '' : ' (shared)');
   return s;
 }
 function eggHoverInfo(svg, vb, wx, wy) {

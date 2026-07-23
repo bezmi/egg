@@ -108,19 +108,17 @@ def build_circle_in_rectangle(rough: bool = False, R: int = 1, bl=None):
     # Connectivity and wall associations are inferred; the O-ring faces on
     # the circle (rough corners) and the corner-block faces (corners shared
     # by two walls) stay explicit.
-    for blk in ("o_s", "o_e", "o_n", "o_w"):
-        b.associate(blk, 1, 1, circle)
+    b.associate(circle, north=["o_s", "o_e", "o_n", "o_w"])
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_se", bottom, right),
         ("c_ne", right, top),
         ("c_nw", top, left),
     ]:
-        b.associate(blk, 0, 0, a0)
-        b.associate(blk, 1, 0, a1)
+        b[blk].west.on(a0).south.on(a1)
 
     if bl is not None:
-        b.set_boundary_layer(circle, **bl)
+        circle.clustered(**bl)
 
     topology = b.build()
     return topology, topology.entities
@@ -208,34 +206,69 @@ def build_twin_circle(rough: bool = False, bl=None, R: int = 1):
     # Connectivity and wall associations are inferred; the O-ring faces on
     # the circles (rough corners) and the corner-block faces (corners shared
     # by two walls) stay explicit.
-    for blk in ("o_s", "o_e", "o_n", "o_w"):
-        b.associate(blk, 1, 1, circle)
-    for blk in ("o2_s", "o2_e", "o2_n", "o2_w"):
-        b.associate(blk, 1, 1, circle2)
+    b.associate(circle, north=["o_s", "o_e", "o_n", "o_w"])
+    b.associate(circle2, north=["o2_s", "o2_e", "o2_n", "o2_w"])
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_nw", top, left),
         ("c2_ne", right, top),
         ("c2_se", bottom, right),
     ]:
-        b.associate(blk, 0, 0, a0)
-        b.associate(blk, 1, 0, a1)
+        b[blk].west.on(a0).south.on(a1)
 
     if bl is not None:
-        b.set_boundary_layer(circle, **bl["circle"])
-        b.set_boundary_layer(circle2, **bl["circle2"])
+        circle.clustered(**bl["circle"])
+        circle2.clustered(**bl["circle2"])
 
     topology = b.build()
     return topology, topology.entities
 
 
-def setup_single(a, rough: bool = False):
-    """Wiring shared by good-topo.py / untangle.py and their web-UI guards:
-    optional circle bl spec, TFI grid, PipelineConfig. The pipeline builds the
-    clustering target from the bl spec automatically (cluster_boundary_layers).
-    """
-    from egg.pipeline import PipelineConfig
+def _pipeline(a, *, direct, pin_sweeps):
+    """The stage list shared by every circles demo.
 
+    The pipeline builds the clustering target from the bl specs automatically,
+    so the smoother stage carries only the plain knobs.
+    """
+    from egg.pipeline import (
+        ControlPointSmoother,
+        FasSmoother,
+        JacobiSmoother,
+        Presmooth,
+        Pin,
+        Untangle,
+    )
+
+    s = a["smoother"]
+    if s == "fas":
+        smoothing = [
+            FasSmoother(sweeps=a["tmop_sweeps"], chunk=a["chunk"], omega=a["omega"])
+        ]
+    elif s == "control_point":
+        # A nodal pre-pass gives the net fit a smooth, valid start.
+        smoothing = [
+            Presmooth(JacobiSmoother(sweeps=100, chunk=100, omega=a["omega"])),
+            ControlPointSmoother(chunk=a["chunk"], omega=a["omega"]),
+        ]
+    else:
+        smoothing = [
+            JacobiSmoother(sweeps=a["tmop_sweeps"], chunk=a["chunk"], omega=a["omega"])
+        ]
+    stages = [
+        Untangle(sweeps_per_delta=a["sweeps_per_delta"], direct=direct),
+        *smoothing,
+    ]
+    if pin_sweeps > 0:
+        stages.append(
+            Pin(JacobiSmoother(sweeps=pin_sweeps, chunk=a["chunk"], omega=a["omega"]))
+        )
+    return stages
+
+
+def setup_single(a, rough: bool = False, *, direct=True):
+    """Wiring shared by good-topo.py / untangle.py and their web-UI guards:
+    optional circle bl spec, TFI grid, stage list.
+    """
     bl = (
         dict(
             first_height=a["bl_first_height"],
@@ -247,25 +280,15 @@ def setup_single(a, rough: bool = False):
     )
     topo, ents = build_circle_in_rectangle(rough=rough, bl=bl)
     grid = topo.initialize_grid()
-    cfg = PipelineConfig(
-        sweeps_per_delta=a["sweeps_per_delta"],
-        tmop_sweeps=a["tmop_sweeps"],
-        tmop_chunk=a["chunk"],
-        tmop_smoother=a["smoother"],
-        omega=a["omega"],
-        device=a["device"],
-        pin_sweeps=a["pin_sweeps"] if bl and a["pin_layers"] > 0 else 0,
-    )
-    return topo, ents, grid, cfg
+    pin_sweeps = a["pin_sweeps"] if bl and a["pin_layers"] > 0 else 0
+    stages = _pipeline(a, direct=direct, pin_sweeps=pin_sweeps)
+    return topo, ents, grid, stages
 
 
-def setup_twin(a, rough: bool = False):
+def setup_twin(a, rough: bool = False, *, direct=True):
     """Wiring shared by the *_side-by-side demos and their web-UI guards:
-    per-wall bl specs, TFI grid, PipelineConfig. The pipeline builds the
-    clustering target from the bl specs automatically (cluster_boundary_layers).
+    per-wall bl specs, TFI grid, stage list.
     """
-    from egg.pipeline import PipelineConfig
-
     bl = {
         "circle": dict(
             first_height=a["bl_first_height"],
@@ -280,13 +303,6 @@ def setup_twin(a, rough: bool = False):
     }
     topo, ents = build_twin_circle(rough=rough, bl=bl, R=a["resolution"])
     grid = topo.initialize_grid()
-    cfg = PipelineConfig(
-        sweeps_per_delta=a["sweeps_per_delta"],
-        tmop_sweeps=a["tmop_sweeps"],
-        tmop_chunk=a["chunk"],
-        tmop_smoother=a["smoother"],
-        omega=a["omega"],
-        device=a["device"],
-        pin_sweeps=a["pin_sweeps"] if a["pin_layers"] > 0 else 0,
-    )
-    return topo, ents, grid, cfg
+    pin_sweeps = a["pin_sweeps"] if a["pin_layers"] > 0 else 0
+    stages = _pipeline(a, direct=direct, pin_sweeps=pin_sweeps)
+    return topo, ents, grid, stages

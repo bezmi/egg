@@ -14,7 +14,22 @@
    the --ctp-* / semantic --egg-* custom properties, so a small override
    restyles everything — exports included. */
 :root {
-  font-family: system-ui, sans-serif;
+  /* Two independent font knobs, both defaulting to the built-in monospace
+     stack. --font-ui drives the interface chrome (fonts.interface); --font-editor
+     drives the code editor and code/output surfaces (fonts.editor). Both are
+     overridden server-side from config.toml (see _font_css in app.py), keeping
+     --font-mono-fallback as the safety net when a configured font is missing. */
+  --font-mono-fallback: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace;
+  --font-ui: var(--font-mono-fallback);
+  --font-editor: var(--font-mono-fallback);
+  font-family: var(--font-ui);
+  /* Configurable base font sizes (fonts.interface_size / fonts.editor_size,
+     injected server-side in app.py). Every other size in the UI is authored as
+     a fixed factor of one of these - calc(var(--fs-*) * N / 13), where 13px is
+     the size these were designed at - so changing a base scales the rest. */
+  --fs-ui: 13px;
+  --fs-editor: 13px;
+  font-size: var(--fs-ui);
   color-scheme: light;
   accent-color: var(--ctp-blue);
   --ctp-rosewater: #dc8a78; --ctp-flamingo: #dd7878; --ctp-pink: #ea76cb;
@@ -110,15 +125,77 @@ body { margin: 0; height: 100vh; height: 100dvh;
        padding-bottom: env(safe-area-inset-bottom);
        box-sizing: border-box;
        display: flex; flex-direction: column; overflow: hidden; }
+/* Form controls do not inherit font-family by default, so without this buttons /
+   inputs / selects fall back to the UA font instead of --font-ui (this is why the
+   landing-page, right-click-menu and edit-toolbar buttons ignored the configured
+   font). The code editor sets --font-editor through a more specific rule, so it
+   still wins there. */
+button, input, select, textarea { font-family: inherit; }
 header { padding: 6px 12px; background: var(--ctp-crust); color: var(--ctp-text);
-         font-size: 14px; display: flex; gap: 8px 14px; align-items: center;
+         font-size: calc(var(--fs-ui) * 14 / 13); display: flex; gap: 8px 14px; align-items: center;
          flex-wrap: wrap; }
-header .hint { color: var(--ctp-overlay1); font-size: 12px; margin-left: auto; }
-header label { font-size: 12px; display: flex; gap: 3px; align-items: center; }
+header label { font-size: calc(var(--fs-ui) * 12 / 13); display: flex; gap: 3px; align-items: center; }
+
+/* Native-app (pywebview) titlebar; replaces the browser header at
+   /?desktop=1 (egg-desktop launcher). Hosts the same file/view/help menus
+   plus the window controls, themed off --ctp-* so it tracks the active
+   flavor. Dragging the .desktop-titlebar__drag spacer starts a window move
+   (app.js -> start_drag); the control buttons call window.pywebview.api
+   (frameless window). Right edge is flush (padding-right: 0) so the controls
+   reach the corner. */
+header.desktop-titlebar { flex: 0 0 auto; height: 34px; align-items: center;
+  padding: 0 0 0 10px; gap: 0 8px; flex-wrap: nowrap;
+  background: var(--ctp-mantle); border-bottom: 1px solid var(--ctp-surface0);
+  user-select: none; }
+.desktop-titlebar .egg-logo { width: 20px; height: 20px; flex: 0 0 auto; }
+/* Empty flex spacer that doubles as the window-drag handle. */
+.desktop-titlebar__drag { flex: 1; align-self: stretch; min-width: 24px; }
+.desktop-titlebar__controls { display: flex; flex: 0 0 auto; align-self: stretch;
+  margin-left: 8px; }
+.desktop-titlebar__btn { width: 46px; height: 100%; padding: 0; border: 0;
+  background: transparent; color: inherit; font: inherit; font-size: calc(var(--fs-ui) * 15 / 13);
+  line-height: 1; cursor: default; display: flex; align-items: center;
+  justify-content: center; }
+.desktop-titlebar__btn:hover { background: var(--ctp-surface0); }
+.desktop-titlebar__close:hover { background: #c42b1c; color: #fff; }
+
+/* Themed scrollbars. QtWebEngine (the desktop app's Chromium engine) and
+   Chromium browsers otherwise draw the chunky default OS scrollbar, which
+   clashes with the flavor; this thins and recolors it off --ctp-*. Firefox
+   uses the standardized scrollbar-* properties. */
+* { scrollbar-width: thin;
+  scrollbar-color: var(--ctp-surface2) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--ctp-surface2);
+  border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--ctp-overlay0);
+  background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Themed checkboxes. accent-color only tints a native box, whose shape/size
+   (and, under color-scheme, its light background on dark flavors) still comes
+   from the OS. That is most jarring in the desktop app's QtWebEngine, so
+   appearance:none replaces it with a --ctp-* box and a drawn checkmark. */
+input[type="checkbox"] { -webkit-appearance: none; appearance: none;
+  box-sizing: border-box; flex: none; width: 15px; height: 15px; margin: 0;
+  border: 1px solid var(--ctp-surface2); border-radius: 4px;
+  background: var(--ctp-base); cursor: pointer; display: inline-flex;
+  align-items: center; justify-content: center;
+  transition: background 0.1s, border-color 0.1s; }
+input[type="checkbox"]:hover { border-color: var(--ctp-overlay0); }
+input[type="checkbox"]:checked { background: var(--ctp-blue);
+  border-color: var(--ctp-blue); }
+input[type="checkbox"]:checked::after { content: ''; width: 4px; height: 8px;
+  margin-top: -1px; border: solid var(--ctp-base); border-width: 0 2px 2px 0;
+  transform: rotate(45deg); }
+input[type="checkbox"]:focus-visible { outline: 2px solid var(--ctp-blue);
+  outline-offset: 1px; }
+
 /* header dropdown menus (file / view) */
 header .menu { position: relative; }
 header .menu-btn { background: none; border: 1px solid var(--ctp-surface1); color: var(--ctp-text);
-  border-radius: 5px; padding: 3px 10px; font: inherit; font-size: 13px;
+  border-radius: 5px; padding: 3px 10px; font: inherit; font-size: var(--fs-ui);
   cursor: pointer; }
 header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surface0); }
 .menu-items { display: none; position: absolute; top: calc(100% + 4px); left: 0;
@@ -127,26 +204,40 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
   min-width: 150px; flex-direction: column; }
 .menu.open .menu-items { display: flex; }
 .menu-items button { text-align: left; background: none; border: 0;
-  padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer;
+  padding: 7px 12px; font: inherit; font-size: var(--fs-ui); cursor: pointer;
   border-radius: 4px; white-space: nowrap; color: var(--ctp-text); }
 .menu-items button:hover:not(:disabled) { background: var(--ctp-surface0); }
 .menu-items button:disabled { opacity: 0.4; cursor: default; }
 .menu-items label:has(> :disabled) { opacity: 0.4; }
-.menu-items a { display: block; padding: 7px 12px; font-size: 13px;
+.menu-items a { display: block; padding: 7px 12px; font-size: var(--fs-ui);
   color: var(--ctp-text); text-decoration: none; border-radius: 4px;
   white-space: nowrap; }
 .menu-items a:hover { background: var(--ctp-surface0); }
-.menu-note { display: block; padding: 7px 12px; font-size: 12px;
+.menu-note { display: block; padding: 7px 12px; font-size: calc(var(--fs-ui) * 12 / 13);
   color: var(--ctp-overlay1); max-width: 230px; }
-.menu-items label { padding: 6px 12px; }
+.menu-items label { padding: 6px 12px; gap: 9px; align-items: center; }
 .menu-sep { border-top: 1px solid var(--ctp-surface0); margin: 3px 2px; }
-#filechip { font-size: 12px; font-family: ui-monospace, monospace;
+/* nested flyout submenu (file > export > …), opens on hover to the side */
+.menu-sub { position: relative; }
+.menu-sub-btn { width: 100%; display: flex; justify-content: space-between;
+  align-items: center; }
+.menu-sub-btn::after { content: '▸'; color: var(--ctp-overlay1); margin-left: 12px; }
+.menu-sub-items { display: none; position: absolute; left: 100%; top: -4px;
+  margin-left: 2px; z-index: 41; background: var(--ctp-base); color: var(--ctp-text);
+  border: 1px solid var(--ctp-surface1); border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(20,26,34,0.25); padding: 4px; min-width: 150px;
+  flex-direction: column; }
+.menu-sub:hover .menu-sub-items { display: flex; }
+#filechip { font-size: calc(var(--fs-ui) * 12 / 13); font-family: var(--font-editor);
   color: var(--ctp-subtext1); }
 #filechip:empty { display: none; }
 /* open / save-as file browser modal (+ the watch + save-edits popups) */
-#fsmodal, #sugmodal, #savemodal, #resmodal { display: none; position: fixed; inset: 0;
-  z-index: 60;
+#fsmodal, #sugmodal, #savemodal, #resmodal, #cfmodal { display: none; position: fixed;
+  inset: 0; z-index: 60;
   background: rgba(20,26,34,0.45); align-items: center; justify-content: center; }
+#cfmodal { z-index: 70; }  /* confirm sits above the picker */
+#cfmodal .cf-box { width: min(400px, 92vw); }
+#cf-text { font-size: var(--fs-ui); line-height: 1.4; white-space: pre-wrap; }
 #resmodal .fs-box { width: min(320px, 92vw); }
 .res-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .res-row input { width: 96px; padding: 6px 8px; border: 1px solid var(--ctp-surface1);
@@ -155,26 +246,77 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 .res-row input.invalid { border-color: var(--ctp-red); }
 #sug-text, #save-text { overflow: auto; background: var(--ctp-mantle);
   border: 1px solid var(--ctp-surface1);
-  border-radius: 6px; padding: 8px; font-size: 12px; margin: 0; }
+  border-radius: 6px; padding: 8px; font-size: calc(var(--fs-ui) * 12 / 13); margin: 0; }
 #save-remember { margin-right: 5px; }
 #save-remember-row { display: flex; align-items: center; cursor: pointer; }
 .fs-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .fs-box { background: var(--ctp-base); border-radius: 8px; width: min(460px, 92vw);
   max-height: min(540px, 80dvh); display: flex; flex-direction: column;
-  padding: 10px; gap: 8px; font-size: 13px; }
+  padding: 16px; gap: 8px; font-size: var(--fs-ui); }
 .fs-head { display: flex; justify-content: space-between; align-items: center;
   font-weight: 600; }
-.fs-path { font-family: ui-monospace, monospace; font-size: 11px;
+.fs-path { font-family: var(--font-editor); font-size: calc(var(--fs-ui) * 11 / 13);
   color: var(--ctp-subtext0); word-break: break-all; }
 #fs-list { overflow-y: auto; border: 1px solid var(--ctp-surface1); border-radius: 6px;
   min-height: 140px; }
 .fs-entry { display: block; width: 100%; text-align: left; padding: 8px 12px;
-  border: 0; background: none; font: inherit; font-size: 13px; cursor: pointer; }
+  border: 0; background: none; font: inherit; font-size: var(--fs-ui); cursor: pointer; }
 .fs-entry:hover { background: var(--ctp-surface0); }
 .fs-dirent { font-weight: 600; }
 .fs-saverow { display: none; gap: 6px; }
 .fs-saverow input { flex: 1; padding: 6px 8px; border: 1px solid var(--ctp-surface1);
-  border-radius: 5px; font: inherit; }
+  border-radius: 5px; font: inherit; background: var(--ctp-mantle); color: var(--ctp-text); }
+.fs-saverow input:focus { outline: none; border-color: var(--ctp-mauve); }
+
+/* file picker: wider box with an editable path, favourite toggle, a quick-
+   locations sidebar, and a recursive fuzzy search. */
+#fsmodal .fs-box { width: min(780px, 94vw); }
+.fs-pathrow { display: flex; gap: 6px; }
+.fs-path-input, .fs-search { padding: 6px 8px; border: 1px solid var(--ctp-surface1);
+  border-radius: 5px; background: var(--ctp-mantle); color: var(--ctp-text);
+  font: inherit; font-size: calc(var(--fs-ui) * 12 / 13); }
+.fs-path-input { flex: 1; min-width: 0; font-family: var(--font-editor); }
+.fs-path-input:focus, .fs-search:focus { outline: none; border-color: var(--ctp-mauve); }
+.fs-searchrow { display: flex; gap: 6px; }
+.fs-searchrow .fs-search { flex: 1; min-width: 0; }
+#fs-sort { flex: 0 0 auto; }
+.fs-fav { flex: 0 0 auto; width: 34px; padding: 0; border: 1px solid var(--ctp-surface1);
+  border-radius: 5px; background: var(--ctp-mantle); color: var(--ctp-overlay1);
+  cursor: pointer; font-size: calc(var(--fs-ui) * 16 / 13); line-height: 1; }
+.fs-fav:hover { background: var(--ctp-surface0); }
+.fs-fav.on { color: var(--ctp-yellow); }
+/* transient notes (deep-search confirm, live "searching…"); JS toggles .show */
+.fs-note { display: none; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 8px; font-size: calc(var(--fs-ui) * 12 / 13); border-radius: 5px;
+  color: var(--ctp-text); background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1); }
+.fs-note.show { display: flex; }
+.fs-note .fs-actions { gap: 6px; }
+.fs-main { display: flex; gap: 8px; flex: 1; min-height: 0; }
+.fs-main #fs-list { flex: 1; }
+.fs-sidebar { flex: 0 0 190px; overflow-y: auto; padding: 4px;
+  border: 1px solid var(--ctp-surface1); border-radius: 6px;
+  display: flex; flex-direction: column; gap: 1px; }
+.fs-side-group { font-size: calc(var(--fs-ui) * 10 / 13); text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--ctp-overlay0); padding: 10px 8px 5px; }
+.fs-side-group:first-child { padding-top: 6px; }
+.fs-side-entry { display: flex; align-items: center; gap: 7px; width: 100%;
+  text-align: left; padding: 6px 8px; border: 0; border-radius: 5px; background: none;
+  color: var(--ctp-text); font: inherit; font-size: calc(var(--fs-ui) * 12 / 13); cursor: pointer; }
+.fs-side-entry:hover { background: var(--ctp-surface0); }
+.fs-side-icon { flex: 0 0 auto; display: flex; color: var(--ctp-subtext0); }
+.fs-side-icon svg { width: 15px; height: 15px; display: block; }
+.fs-side-entry:hover .fs-side-icon { color: var(--ctp-text); }
+.fs-side-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.fs-side-rm { flex: 0 0 auto; opacity: 0; border: 0; background: none; padding: 0 2px;
+  color: var(--ctp-overlay1); cursor: pointer; font-size: var(--fs-ui); }
+.fs-side-entry:hover .fs-side-rm { opacity: 1; }
+.fs-side-rm:hover { color: var(--ctp-red); }
+/* search-result rows show the relative path under the name */
+.fs-entry-sub { display: block; color: var(--ctp-overlay0); font-size: calc(var(--fs-ui) * 11 / 13);
+  font-family: var(--font-editor); margin-top: 1px; }
+.fs-note-row { padding: 10px 12px; color: var(--ctp-overlay0); font-size: calc(var(--fs-ui) * 12 / 13); }
 .panes { flex: 1; display: flex; min-height: 0; }
 /* Static 42/58 fallback; Split.js (when loaded) takes over the sizing. */
 /* egg mark in the header; tinted by the flavor and re-themes for free */
@@ -186,49 +328,162 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 .editor, .editor > textarea, .editor .prism-code-editor {
   touch-action: pan-x pan-y; }
 .editor > textarea, .editor .prism-code-editor {
-  font-size: var(--egg-edfont, 13px) !important; }
+  font-size: var(--egg-edfont, var(--fs-editor)) !important; }
 .panes.split-active .editor, .panes.split-active .viewer { flex: none; }
-/* Split.js gutter (created at runtime); ::after widens the touch target,
-   ::before is the visible grip handle. */
+/* the split gutter (created at runtime by initSplit): the whole strip is the
+   grab target (::after just widens the hit area for the pointer) and it tints on
+   hover. No visible grip handle (it read as a redundant scrollbar). */
 .gutter { flex: none; cursor: col-resize; touch-action: none; position: relative;
           background: var(--ctp-surface1); transition: background 0.15s; z-index: 5; }
 .gutter:hover { background: var(--ctp-overlay0); }
+/* Widen the grab area on the VIEWER side only. The editor sits to the left and
+   its scrollbar hugs the gutter, so do not extend left over it (that stole the
+   scrollbar's clicks). */
 .gutter::after { content: ''; position: absolute; top: 0; bottom: 0;
-                 left: -10px; right: -10px; }
-.gutter::before { content: ''; position: absolute; top: 50%; left: 50%;
-                  transform: translate(-50%, -50%); width: 4px; height: 48px;
-                  border-radius: 2px; background: var(--ctp-overlay1);
-                  box-shadow: -3px 0 0 -1px var(--ctp-overlay1), 3px 0 0 -1px var(--ctp-overlay1); }
-.gutter:hover::before { background: var(--ctp-surface0);
-                        box-shadow: -3px 0 0 -1px var(--ctp-base), 3px 0 0 -1px var(--ctp-base); }
+                 left: 0; right: -8px; }
 /* stacked (vertical) mode: the gutter is a horizontal strip */
 .gutter.gutter-vertical { cursor: row-resize; }
 .gutter.gutter-vertical::after { left: 0; right: 0; top: -10px; bottom: -10px; }
-.gutter.gutter-vertical::before { width: 48px; height: 4px;
-  box-shadow: 0 -3px 0 -1px var(--ctp-overlay1), 0 3px 0 -1px var(--ctp-overlay1); }
-.gutter.gutter-vertical:hover::before {
-  box-shadow: 0 -3px 0 -1px var(--ctp-base), 0 3px 0 -1px var(--ctp-base); }
 /* narrow windows stack the panes vertically (editor above viewer) */
 .panes.stacked { flex-direction: column; }
 .panes.stacked .editor { width: auto; }
 /* watch mode: the file on disk is the source of truth — no editor pane */
 .panes.watching .editor, .panes.watching .gutter { display: none !important; }
+/* editor tooltips are appended to <body>; hide them entirely while watching */
+html.egg-watching .pce-diag-tip,
+html.egg-watching .pce-sig-tip { display: none !important; }
 .panes.watching .viewer { flex: 1 !important; width: auto !important; }
+/* While dragging the split gutter, hide the dense SVG layers (grid lines, nodes,
+   curves, net) so the viewer re-rasterizes cheaply on each frame. Block fills
+   and outlines stay for context; full detail returns on release. */
+html.egg-resizing .grid-lines,
+html.egg-resizing .layer-curves,
+html.egg-resizing .layer-points,
+html.egg-resizing .layer-ctrl,
+html.egg-resizing .layer-net,
+html.egg-resizing .layer-tangled { display: none; }
+/* landing page: full-window splash + entry points shown when nothing is open */
+#landing { position: fixed; inset: 0; z-index: 30; display: none;
+  align-items: center; justify-content: center; background: var(--ctp-base); }
+/* native app: the minimal titlebar sits at the top of the overlay (out of the
+   centered card's flow) so the window controls stay clickable */
+.landing-titlebar { position: absolute; top: 0; left: 0; right: 0; z-index: 1; }
+.landing-card { display: flex; flex-direction: column; align-items: center;
+  gap: 4px; padding: 32px; max-width: 90vw; }
+.landing-logo svg, .landing-logo { width: 84px; height: 84px; color: var(--ctp-yellow); }
+.landing-title { font-size: calc(var(--fs-ui) * 46 / 13); font-weight: 700; letter-spacing: 0.02em;
+  color: var(--ctp-text); line-height: 1.1; }
+.landing-sub { font-size: calc(var(--fs-ui) * 14 / 13); color: var(--ctp-subtext0);
+  margin-top: 12px; margin-bottom: 22px; }
+.landing-opts { display: flex; flex-direction: column; gap: 6px; width: 300px;
+  max-width: 90vw; }
+.landing-opt { text-align: left; background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface0); color: var(--ctp-text);
+  padding: 10px 16px; border-radius: 8px; font-size: calc(var(--fs-ui) * 14 / 13); cursor: pointer;
+  transition: background 0.1s, border-color 0.1s; }
+.landing-opt:hover { background: var(--ctp-surface0); border-color: var(--ctp-surface1); }
+/* right-click editor menu: a vertical list of actions with group separators */
+.pce-ctx { position: fixed; z-index: 40; min-width: 200px; padding: 4px;
+  background: var(--ctp-mantle); border: 1px solid var(--ctp-surface1);
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+  display: flex; flex-direction: column; align-items: stretch; gap: 1px;
+  font-size: var(--fs-ui); }
+.pce-ctx-item { display: block; width: 100%; text-align: left; background: none;
+  border: 0; color: var(--ctp-text); padding: 5px 10px; border-radius: 5px;
+  cursor: pointer; font-size: var(--fs-ui); }
+.pce-ctx-item:hover:not(:disabled) { background: var(--ctp-surface0); }
+.pce-ctx-item:disabled { color: var(--ctp-surface2); cursor: default; }
+.pce-ctx-sep { height: 1px; margin: 3px 6px; background: var(--ctp-surface1); }
+html.egg-watching .pce-ctx { display: none !important; }
+/* LSP documentation pane: floats over the bottom, never reflows the layout */
+/* Unified dismissable bottom pane (documentation, go-to-definition warning): a
+   bar fixed across the whole bottom of the app, with a title, optional copy
+   button, and a × (also dismissed with esc). Severity tints the top border and
+   warning text. The doc pane adds a top grip to resize it up/down. */
+.egg-pane { position: fixed; left: 0; right: 0; bottom: 0; z-index: 38;
+  max-height: 85vh; display: flex; flex-direction: column;
+  background: var(--ctp-mantle); border-top: 2px solid var(--ctp-surface2);
+  box-shadow: 0 -6px 24px rgba(0,0,0,0.35); }
+.egg-pane-warn { border-top-color: var(--ctp-yellow); }
+.egg-pane-error { border-top-color: var(--ctp-red); }
+.egg-pane-error .egg-pane-title { color: var(--ctp-red); }
+.egg-pane-error .egg-pane-body { color: var(--ctp-red);
+  background: color-mix(in srgb, var(--ctp-red) 8%, var(--ctp-mantle)); }
+.egg-pane-pre { margin: 0; font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 12 / 13); line-height: 1.5;
+  white-space: pre-wrap; }
+/* a docs/warning pane covers the error overlay while it is open */
+body.egg-pane-open .egg-pane-error { display: none; }
+/* drag handle on the top edge to resize the pane up/down (doc pane), coloured
+   and hover-tinted like the split gutter. */
+.egg-pane-resize { flex: 0 0 auto; height: 10px; cursor: ns-resize;
+  touch-action: none; background: var(--ctp-surface1); }
+.egg-pane-resize:hover { background: var(--ctp-surface2); }
+.egg-pane-head { display: flex; align-items: center; gap: 8px;
+  padding: 5px 12px; border-bottom: 1px solid var(--ctp-surface0);
+  font-size: calc(var(--fs-ui) * 12 / 13); color: var(--ctp-subtext0); }
+.egg-pane-title { flex: 1; text-transform: uppercase; letter-spacing: 0.05em; }
+.egg-pane-warn .egg-pane-title { color: var(--ctp-yellow); }
+.egg-pane-close { flex: 0 0 auto; background: none; border: 0;
+  color: var(--ctp-text); font-size: calc(var(--fs-ui) * 18 / 13); line-height: 1; cursor: pointer;
+  padding: 0 4px; }
+.egg-pane-body { flex: 1; min-height: 0; overflow: auto; padding: 10px 16px 14px;
+  font-size: var(--fs-ui); line-height: 1.55; color: var(--ctp-text);
+  word-break: break-word; }
+.egg-pane-warn .egg-pane-body { color: var(--ctp-yellow); font-size: calc(var(--fs-ui) * 12 / 13); }
+.egg-pane-body hr { border: 0; border-top: 1px solid var(--ctp-surface0); margin: 10px 0; }
+.egg-pane-body code { font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 12 / 13); line-height: 1.4;
+  background: var(--ctp-surface0); padding: 1px 4px; border-radius: 4px; }
+.egg-doc-h { font-weight: 600; font-size: var(--fs-ui); margin: 10px 0 4px;
+  color: var(--ctp-subtext1); }
+.egg-doc-p { margin: 6px 0; white-space: pre-wrap; }
+.egg-doc-code { overflow-x: auto; margin: 8px 0; padding: 8px 10px;
+  background: var(--ctp-crust); border: 1px solid var(--ctp-surface0);
+  border-radius: 6px; font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 12 / 13); line-height: 1.5;
+  color: var(--ctp-text); white-space: pre; }
+/* the leading signature block of an LSP-hover fallback (matches the Sphinx sig) */
+.egg-doc-sig { overflow-x: auto; margin: 4px 0 8px; padding: 6px 10px;
+  background: var(--ctp-crust); border-left: 3px solid var(--ctp-blue);
+  border-radius: 4px; font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 12 / 13); line-height: 1.5;
+  color: var(--ctp-text); white-space: pre-wrap; word-break: break-word; }
+/* embedded Sphinx documentation fragment (dl/dt/dd from the built docs) */
+.egg-doc-sphinx dl { margin: 0 0 10px; }
+.egg-doc-sphinx dt.sig, .egg-doc-sphinx .sig { display: block; margin: 6px 0 4px;
+  padding: 6px 10px; background: var(--ctp-crust);
+  border-left: 3px solid var(--ctp-blue); border-radius: 4px;
+  font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 12 / 13); line-height: 1.5; color: var(--ctp-text);
+  overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+.egg-doc-sphinx .sig-name, .egg-doc-sphinx .descname { color: var(--ctp-blue);
+  font-weight: 600; }
+.egg-doc-sphinx .sig-prename, .egg-doc-sphinx .descclassname { color: var(--ctp-subtext0); }
+.egg-doc-sphinx .property, .egg-doc-sphinx .k { color: var(--ctp-mauve); }
+.egg-doc-sphinx .sig-param, .egg-doc-sphinx .n { color: var(--ctp-text); }
+.egg-doc-sphinx .default_value, .egg-doc-sphinx .o { color: var(--ctp-peach); }
+.egg-doc-sphinx dd { margin: 4px 0 8px; padding-left: 8px; }
+.egg-doc-sphinx .headerlink { display: none; }
+.egg-doc-sphinx p { margin: 6px 0; }
+.egg-doc-sphinx code, .egg-doc-sphinx .pre { font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 12 / 13); line-height: 1.4; }
+.egg-doc-sphinx dl.field-list { display: grid;
+  grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 8px 0; }
+.egg-doc-sphinx dl.field-list > dt { font-weight: 600; color: var(--ctp-subtext1); }
+.egg-doc-sphinx dl.field-list > dd { margin: 0; padding: 0; }
+.egg-doc-sphinx ul { margin: 4px 0; padding-left: 18px; }
+.egg-doc-sphinx table { border-collapse: collapse; margin: 8px 0; }
+.egg-doc-sphinx th, .egg-doc-sphinx td { border: 1px solid var(--ctp-surface0);
+  padding: 3px 8px; text-align: left; }
 @media (max-width: 900px) {
-  header .hint { display: none; }
   /* static no-JS fallback for the stacked layout */
   .panes { flex-direction: column; }
   .editor { width: auto; height: 42%; }
 }
 .editor > textarea { flex: 1; border: 0; outline: none; resize: none;
-                   padding: 10px; font: 13px/1.45 ui-monospace, monospace;
+                   padding: 10px; font-family: var(--font-editor); font-size: var(--fs-editor); line-height: 1.45;
                    background: var(--ctp-base); color: var(--ctp-text); tab-size: 4; }
 /* once prism-code-editor mounts, hide the (mirrored) server textarea; its
    sibling hidden path input is untouched by the child combinator */
 .editor.pce-active > textarea { display: none; }
 .editor .prism-code-editor { flex: 1; min-width: 0; outline: none;
                              background: var(--ctp-base);
-                             font: 13px/1.45 ui-monospace, monospace; }
+                             font-family: var(--font-editor); font-size: var(--fs-editor); line-height: 1.45; }
 /* prism adds a screenful of scroll-past-last-line padding (computed on
    container resize, so it goes stale on font zoom and leaves empty space).
    We want the scroll to end at the file, so drop it. */
@@ -243,11 +498,11 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
           background: color-mix(in srgb, var(--ctp-mantle) 88%, transparent);
           color: var(--ctp-text);
           border: 1px solid var(--ctp-surface1);
-          font: 11px ui-monospace, monospace; padding: 2px 7px;
+          font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 11 / 13); padding: 2px 7px;
           border-radius: 3px; pointer-events: none; display: none; }
 #axes { position: absolute; left: 8px; bottom: 8px; z-index: 4;
         pointer-events: none; opacity: 0.85; }
-#axes text { font: 11px ui-monospace, monospace; }
+#axes text { font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 11 / 13); }
 /* editing-tools toolbar: its own floating group on the left edge, clear of the
    top view bar and the bottom axis/coord readouts */
 #ed-tools { position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
@@ -255,13 +510,13 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 body.editing #ed-tools { display: flex; }
 #ed-tools button { background: color-mix(in srgb, var(--ctp-mantle) 92%, transparent);
             border: 1px solid var(--ctp-surface1); color: var(--ctp-text);
-            font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer; }
+            font-size: calc(var(--fs-ui) * 11 / 13); padding: 3px 8px; border-radius: 4px; cursor: pointer; }
 #ed-tools button:hover:not(:disabled) { background: var(--ctp-surface0); }
 #ed-tools button:disabled { opacity: 0.4; cursor: default; }
 #selinfo { position: absolute; left: 50%; transform: translateX(-50%);
            bottom: 8px; z-index: 4; background: color-mix(in srgb, var(--ctp-mantle) 88%, transparent);
            color: var(--ctp-text);
-           border: 1px solid var(--ctp-surface1); font: 11px ui-monospace, monospace;
+           border: 1px solid var(--ctp-surface1); font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 11 / 13);
            padding: 2px 7px; border-radius: 3px; pointer-events: none;
            display: none; max-width: 55%; overflow: hidden;
            text-overflow: ellipsis; white-space: nowrap; }
@@ -279,7 +534,7 @@ html.restoring .canvas svg { visibility: hidden; }
 /* Placeholder shown in place of the (discarded) default grid while a restored
    script is rendering — see the DOMContentLoaded restore in app.js. */
 .canvas-wait { width: 100%; height: 100%; display: flex; align-items: center;
-   justify-content: center; color: var(--ctp-overlay0); font-size: 13px;
+   justify-content: center; color: var(--ctp-overlay0); font-size: var(--fs-ui);
    background: var(--ctp-base); }
 .canvas svg polyline, .canvas svg polygon,
 .canvas svg circle, .canvas svg rect { vector-effect: non-scaling-stroke; }
@@ -313,6 +568,19 @@ html.restoring .canvas svg { visibility: hidden; }
 #view.no-block-fill .grid-outline.b4, #view.no-block-fill .grid-outline.b5
   { stroke: var(--egg-grid-line); }
 #view.no-block-outline .grid-outline { display: none; }
+/* "grid" hides only the interior grid lines, independent of the block
+   boundaries (.grid-outline) and fills, so each can be toggled on its own. */
+#view.no-grid-lines .grid-lines { display: none; }
+/* text selection app-wide: match the editor's selection tint (--pce-selection)
+   instead of the browser's default system blue */
+::selection { background: var(--ctp-surface2); }
+::-moz-selection { background: var(--ctp-surface2); }
+/* one-click copy button on the error box and the warning flash */
+.copybtn { flex: 0 0 auto; padding: 1px 8px; font-size: calc(var(--fs-ui) * 11 / 13); line-height: 1.5;
+  border-radius: 4px; cursor: pointer; background: var(--ctp-surface0);
+  color: var(--ctp-text); border: 1px solid var(--ctp-surface1); }
+.copybtn:hover { background: var(--ctp-surface1); }
+.copytext { user-select: text; }
 .layer-tangled { fill: var(--egg-tangled); fill-opacity: 0.35; }
 .topo-block { fill: var(--egg-topo-line); fill-opacity: 0.02;
               stroke: var(--egg-topo-line); stroke-width: 1.6; }
@@ -331,7 +599,7 @@ html.restoring .canvas svg { visibility: hidden; }
 .layer-points .pt-node { fill: var(--ctp-base); stroke: var(--egg-pt-node); stroke-width: 2; }
 /* parameter panel: a slim strip over the guard dict, collapsed by default */
 #params { border-bottom: 1px solid var(--ctp-surface1); background: var(--ctp-mantle);
-          font-size: 12px; }
+          font-size: calc(var(--fs-ui) * 12 / 13); }
 #params:empty { display: none; }
 #params summary { padding: 3px 10px; cursor: pointer; color: var(--ctp-subtext0);
                   user-select: none; }
@@ -340,13 +608,13 @@ html.restoring .canvas svg { visibility: hidden; }
 #params label { display: flex; gap: 5px; align-items: center;
                 color: var(--ctp-text); white-space: nowrap; }
 #params input[type=text], #params select {
-  font: inherit; font-size: 12px; width: 6.5em; padding: 1px 4px;
+  font: inherit; font-size: calc(var(--fs-ui) * 12 / 13); width: 6.5em; padding: 1px 4px;
   border: 1px solid var(--ctp-surface1); border-radius: 4px; background: var(--ctp-base); }
 #params select { width: auto; }
 #params .param-bad { border-color: var(--ctp-red); background: color-mix(in srgb, var(--ctp-red) 10%, var(--ctp-base)); }
 /* grid quality strip: one line of summary chips */
 #quality { border-bottom: 1px solid var(--ctp-surface1); background: var(--ctp-mantle);
-           font-size: 12px; color: var(--ctp-subtext0); padding: 3px 10px;
+           font-size: calc(var(--fs-ui) * 12 / 13); color: var(--ctp-subtext0); padding: 3px 10px;
            display: flex; gap: 12px; flex-wrap: wrap; }
 #quality:empty { display: none; padding: 0; }
 #quality .q-tag { font-weight: 600; color: var(--ctp-text); }
@@ -369,13 +637,13 @@ html.restoring .canvas svg { visibility: hidden; }
 .corner.fixed { fill: var(--egg-corner-fixed); }
 .corner.free { fill: var(--egg-corner-free); }
 .singular-box { fill: none; stroke: var(--egg-singular); stroke-width: 2; }
-.empty-note { fill: var(--ctp-overlay1); font-size: 24px; }
+.empty-note { fill: var(--ctp-overlay1); font-size: calc(var(--fs-ui) * 24 / 13); }
 #chart .spark { fill: none; stroke-width: 1.5; }
 #chart .spark-prev { stroke-width: 1; opacity: 0.3; }
 #chart .spark-zero { fill: none; stroke-width: 0.6; stroke-dasharray: 4 3; }
 #chart .spark-energy { stroke: var(--egg-spark-energy); }
 #chart .spark-mindet { stroke: var(--egg-spark-mindet); }
-#chart text { font-size: 10px; fill: var(--ctp-subtext0); }
+#chart text { font-size: calc(var(--fs-ui) * 10 / 13); fill: var(--ctp-subtext0); }
 #chart .spark-lab.spark-energy { fill: var(--egg-spark-energy); stroke: none; }
 #chart .spark-lab.spark-mindet { fill: var(--egg-spark-mindet); stroke: none; }
 #chart .spark-tick { stroke: var(--ctp-overlay0); stroke-width: 1; }
@@ -421,7 +689,7 @@ body.editing .layer-blocks, body.editing .layer-corners { opacity: 0.18; }
 #chart { border-top: 1px solid var(--ctp-surface1); background: var(--ctp-mantle); }
 #chart:empty { display: none; }
 #chart svg.sparkchart { width: 100%; height: 118px; display: block; }
-.bar { padding: 4px 10px; font-size: 12px; color: var(--ctp-subtext0);
+.bar { padding: 4px 10px; font-size: calc(var(--fs-ui) * 12 / 13); color: var(--ctp-subtext0);
        background: var(--ctp-crust); display: flex; gap: 10px; align-items: center;
        flex-wrap: wrap; }
 /* Chip box: display:contents so its chips remain direct flex children of .bar
@@ -431,18 +699,18 @@ body.editing .layer-blocks, body.editing .layer-corners { opacity: 0.18; }
 .bar .bad { color: var(--ctp-red); font-weight: 600; }
 .bar .errline { cursor: pointer; }
 /* edit view with nothing editable: a banner under the view bar */
-.editnote { padding: 6px 10px; font-size: 12px; display: flex; gap: 8px;
+.editnote { padding: 6px 10px; font-size: calc(var(--fs-ui) * 12 / 13); display: flex; gap: 8px;
             align-items: baseline; color: var(--ctp-subtext1);
             background: color-mix(in srgb, var(--ctp-yellow) 12%, var(--ctp-mantle));
             border-bottom: 1px solid var(--ctp-surface1); }
 .editnote .ed-off-tag { font-weight: 600; color: var(--ctp-yellow);
-            text-transform: uppercase; font-size: 11px; letter-spacing: 0.03em;
+            text-transform: uppercase; font-size: calc(var(--fs-ui) * 11 / 13); letter-spacing: 0.03em;
             flex: none; }
 .bar .phase { color: var(--ctp-text); font-weight: 600; }
 .bar .btns { margin-left: auto; display: flex; gap: 6px; align-items: center; }
 /* shared button chrome: viewbar buttons + modal buttons (not the file list) */
 .bar .btns button, .fs-box button:not(.fs-entry) {
-  font: inherit; font-size: 12px; padding: 3px 12px;
+  font: inherit; font-size: calc(var(--fs-ui) * 12 / 13); padding: 3px 12px;
   border: 1px solid var(--ctp-surface1); border-radius: 5px;
   background: var(--ctp-base); color: var(--ctp-text); cursor: pointer;
   transition: background 0.1s, border-color 0.1s;
@@ -462,29 +730,34 @@ button.primary:not(:disabled) { background: var(--egg-spark-energy);
                                           border-color: color-mix(in srgb, var(--ctp-red) 35%, var(--ctp-base)); }
 .bar .btns button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--ctp-red) 10%, var(--ctp-base));
                                                 border-color: var(--ctp-red); }
-.bar .btns select { font: inherit; font-size: 12px; padding: 3px 26px 3px 10px;
+/* #theme-select (the flavor picker in the view menu) shares this: without
+   appearance:none a native <select> falls back to OS chrome, most visible
+   in the desktop app's QtWebEngine, where it clashes with the flavor. */
+.bar .btns select, #theme-select, #fs-sort { font: inherit; font-size: calc(var(--fs-ui) * 12 / 13); padding: 3px 26px 3px 10px;
   border: 1px solid var(--ctp-surface1); border-radius: 5px; color: var(--ctp-text);
   cursor: pointer; -webkit-appearance: none; appearance: none;
   background: var(--ctp-base) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5'><path d='M0 0l4 5 4-5z' fill='%234a5568'/></svg>")
     no-repeat right 9px center;
   transition: background-color 0.1s, border-color 0.1s; }
-.bar .btns select:hover { background-color: var(--ctp-surface0); border-color: var(--ctp-overlay0); }
+.bar .btns select:hover, #theme-select:hover, #fs-sort:hover { background-color: var(--ctp-surface0); border-color: var(--ctp-overlay0); }
 [data-theme="frappe"] .bar .btns select, [data-theme="macchiato"] .bar .btns select,
-[data-theme="mocha"] .bar .btns select {
+[data-theme="mocha"] .bar .btns select,
+[data-theme="frappe"] #theme-select, [data-theme="macchiato"] #theme-select,
+[data-theme="mocha"] #theme-select,
+[data-theme="frappe"] #fs-sort, [data-theme="macchiato"] #fs-sort,
+[data-theme="mocha"] #fs-sort {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5'><path d='M0 0l4 5 4-5z' fill='%23a5adce'/></svg>"); }
 /* finger-sized targets on touch devices */
 @media (pointer: coarse) {
   .bar .btns button, .fs-box button:not(.fs-entry), .bar .btns select {
-    padding: 8px 14px; font-size: 13px; }
+    padding: 8px 14px; font-size: var(--fs-ui); }
 }
-pre.err { margin: 0; padding: 8px 10px; max-height: 12em; overflow: auto;
-          background: color-mix(in srgb, var(--ctp-red) 10%, var(--ctp-base)); color: var(--ctp-red); border-top: 2px solid var(--ctp-red);
-          font-size: 12px; white-space: pre-wrap; }
-details.out { border-top: 1px solid var(--ctp-surface1); font-size: 12px; }
-details.out pre { margin: 0; padding: 6px 10px; max-height: 8em; overflow: auto; }
+details.out { border-top: 1px solid var(--ctp-surface1); font-size: calc(var(--fs-ui) * 12 / 13); }
+details.out pre { margin: 0; padding: 6px 10px; max-height: 8em; overflow: auto;
+  font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 12 / 13); }
 /* live run log: script egg.webui_print output, streamed during a run */
 #runlog { border-top: 1px solid var(--ctp-surface1); background: var(--ctp-mantle); }
 #runlog:empty { display: none; }
 #runlog pre { margin: 0; padding: 6px 10px; max-height: 8em; overflow: auto;
-              font: 11px/1.5 ui-monospace, monospace; color: var(--ctp-subtext1);
+              font-family: var(--font-editor); font-size: calc(var(--fs-editor) * 11 / 13); line-height: 1.5; color: var(--ctp-subtext1);
               white-space: pre-wrap; }

@@ -98,8 +98,8 @@ template <int D> BlockLayout<D> layout_from_context(const SweepContextHostT<D>& 
     std::vector<typename BlockLayout<D>::Shape> shapes(nb);
     for (std::size_t b = 0; b < nb; ++b) {
         const auto off = static_cast<std::size_t>(host.block_off[b]);
-        const std::size_t end =
-          (b + 1 < nb) ? static_cast<std::size_t>(host.block_off[b + 1]) : host.num_nodes;
+        const std::size_t end = (b + 1 < nb) ? static_cast<std::size_t>(host.block_off[b + 1])
+                                             : host.num_nodes - host.num_overflow;
         const std::size_t count = end - off;
         typename BlockLayout<D>::Shape padded {};
         const auto stride = [&](int k) {
@@ -113,7 +113,9 @@ template <int D> BlockLayout<D> layout_from_context(const SweepContextHostT<D>& 
             shapes[b][static_cast<std::size_t>(k)] = padded[static_cast<std::size_t>(k)] - 2;
         }
     }
-    return BlockLayout<D> {shapes};
+    BlockLayout<D> layout {shapes};
+    layout.add_overflow_nodes(host.num_overflow);  // keep total_reals() == num_nodes * D
+    return layout;
 }
 
 /// Fine-level relaxability masks (per packed node id) from the host context:
@@ -226,6 +228,9 @@ inline void reduce_linesearch_pair(sycl::queue& q,
                        eval(a0, e0_sum, m0_min);
                        eval(a1, e1_sum, m1_min);
                    });
+    // Directional soft-energy totals for both trials (accumulating reduction
+    // on the in-order queue; no-op when the stencil carries none).
+    reduce_directional_linesearch_pair<D>(q, es.dir, X, corr, a0, a1, out);
 }
 
 /// One V-cycle leg on coarse level @p li of @p levels, in place. On entry

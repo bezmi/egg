@@ -11,13 +11,15 @@
 from __future__ import annotations
 
 from itertools import product
-from typing import Any, Iterator
+from typing import Iterator
 
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 if TYPE_CHECKING:
+    from egg.geometry.base import GeometryEntity
+    from egg.smoothing.control_topology import ControlTopology
     from egg.topology.block_topology import BlockTopology
 
 __all__ = ["Block", "MultiBlockGrid"]
@@ -45,19 +47,21 @@ class Block:
         offsets = product((0, 1), repeat=self.d)
         return [tuple(b + o for b, o in zip(cell_base, offset)) for offset in offsets]
 
-    def iter_boundary_faces(self) -> Iterator[tuple[int, int, tuple[Any, ...]]]:
+    def iter_boundary_faces(
+        self,
+    ) -> Iterator[tuple[int, int, tuple[slice | int, ...]]]:
         """Yield (axis, side, slice_expr) for each boundary face."""
         for axis in range(self.d):
             for side in (0, 1):
                 yield axis, side, self._face_node_idx(axis, side)
 
-    def _face_node_idx(self, axis: int, side: int) -> tuple[Any, ...]:
+    def _face_node_idx(self, axis: int, side: int) -> tuple[slice | int, ...]:
         """Return the numpy index tuple for all nodes on the given face."""
-        idx: list[Any] = [slice(None)] * self.d
+        idx: list[slice | int] = [slice(None)] * self.d
         idx[axis] = 0 if side == 0 else self.logical_shape[axis] - 1
         return tuple(idx)
 
-    def face_node_slice(self, axis: int, side: int) -> tuple[Any, ...]:
+    def face_node_slice(self, axis: int, side: int) -> tuple[slice | int, ...]:
         """Return the numpy index tuple for all nodes on the given face."""
         return self._face_node_idx(axis, side)
 
@@ -131,13 +135,13 @@ class MultiBlockGrid:
         )
         # Sliding geometry constraints: global DOF index -> GeometryEntity.
         # Populated by BlockTopology.initialize_grid; empty means all free/fixed.
-        self.dof_constraints: dict[int, Any] = {}
+        self.dof_constraints: dict[int, GeometryEntity] = {}
         # Control-net representation of the smoothed grid (a
         # egg.smoothing.control_topology.ControlTopology), set by the
         # pipeline's control-point smoother phase. When present the block
         # shapes are algebraic: refine/derefine/cluster by re-evaluating the
         # net at new node parameters, no re-solve.
-        self.control_net: Any = None
+        self.control_net: ControlTopology | None = None
 
     @property
     def total_free_dofs(self) -> int:

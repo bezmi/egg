@@ -23,9 +23,20 @@ axis 0 most significant: ``b = sum_k o_k << (d - 1 - k)`` — the C-order of
 the concatenated blocks.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from egg.geometry.entity_soa import group_entities_by_type
+
+if TYPE_CHECKING:
+    from egg.geometry.base import GeometryEntity
+    from egg.smoothing.config_types import CellStencil, FlatWire
+    from egg.smoothing.directional import DirectionalSamples
+    from egg.smoothing.interface_c2 import CurvatureWindows
+    from egg.smoothing.interface_ortho import InterfaceSamples
 
 
 def _axbit(d):
@@ -50,7 +61,7 @@ def _role_table(d):
     return role
 
 
-def cell_stencil(blocks, d):
+def cell_stencil(blocks: list[np.ndarray], d: int) -> CellStencil:
     """Vectorized per-(cell, corner) sample stencil and node->sample membership.
 
     ``blocks`` is a list of integer arrays of global node ids, each of shape
@@ -123,8 +134,16 @@ def cell_stencil(blocks, d):
 
 
 def build_flat_context(
-    blocks, free_mask, dof_entities, d, *, w_inv, interface=None, curvature=None
-):
+    blocks: list[np.ndarray],
+    free_mask: np.ndarray,
+    dof_entities: dict[int, GeometryEntity],
+    d: int,
+    *,
+    w_inv: np.ndarray,
+    interface: InterfaceSamples | None = None,
+    curvature: CurvatureWindows | None = None,
+    directional: DirectionalSamples | None = None,
+) -> FlatWire:
     """Assemble the ragged ``{"groups", "energy_stencil"}`` wire format.
 
     ``blocks``       list of global-node-id arrays, one per structured block;
@@ -174,7 +193,7 @@ def build_flat_context(
         base_w = w_inv if not uniform_w else np.broadcast_to(w_inv, (ns, d, d))
         w_inv = np.concatenate([base_w, interface.W_inv], axis=0)
         weight = np.concatenate([np.ones(ns), np.asarray(interface.weight)])
-        st = dict(st)
+        st = st.copy()
         st["gc"] = np.concatenate([st["gc"], interface.gc])
         st["gn"] = [
             np.concatenate([st["gn"][0], interface.gn0]),
@@ -228,9 +247,9 @@ def build_flat_context(
     m_sid = st["m_sid"][keep]
     m_role = st["m_role"][keep]
 
-    def sample_fields(sid, *, uniform_out=False):
+    def sample_fields(sid, *, uniform_out=False) -> dict[str, np.ndarray]:
         gc = st["gc"][sid].astype(np.int32)
-        out = {"gc": gc}
+        out: dict[str, np.ndarray] = {"gc": gc}
         for k in range(d):
             out[f"gn{k}"] = st["gn"][k][sid].astype(np.int32)
             out[f"s{k}"] = st["s"][k][sid].astype(np.float64)
@@ -253,7 +272,7 @@ def build_flat_context(
     perm = np.argsort(m_node, kind="stable")
     m_node, m_sid, m_role = m_node[perm], m_sid[perm], m_role[perm]
 
-    groups = []
+    groups: list[dict[str, object]] = []
     dofs = np.flatnonzero(free_mask)
     if dofs.size:
         # P_of per DOF (0 for a DOF with no incident cell); m_node is ascending so
@@ -261,7 +280,7 @@ def build_flat_context(
         uniq, cnt = np.unique(m_node, return_counts=True)
         P_of = np.zeros(dofs.size, dtype=np.int32)
         P_of[np.searchsorted(dofs, uniq)] = cnt
-        g = {
+        g: dict[str, object] = {
             "D": int(dofs.size),
             "role": m_role.astype(np.int32),
             "dof_idx": dofs.astype(np.int32),
@@ -283,11 +302,45 @@ def build_flat_context(
                 g["curv_nodes"] = np.ascontiguousarray(tab["curv_nodes"].reshape(-1))
                 g["curv_slot"] = np.ascontiguousarray(tab["curv_slot"].reshape(-1))
                 g["curv_weight"] = np.ascontiguousarray(tab["curv_weight"].reshape(-1))
+        # Directional soft-energy sample table (per-DOF, same alignment as the
+        # curvature table). Node ids are global; the structured remap rewrites
+        # them to owner slots.
+        if directional is not None and directional.n > 0:
+            from .directional import directional_dof_table
+
+            tab = directional_dof_table(free_mask, directional)
+            if tab:
+                g["dir_k"] = tab["dir_k"]
+                g["dir_eps"] = tab["dir_eps"]
+                g["dir_nodes"] = np.ascontiguousarray(tab["dir_nodes"].reshape(-1))
+                g["dir_slot"] = np.ascontiguousarray(tab["dir_slot"].reshape(-1))
+                g["dir_kind"] = np.ascontiguousarray(tab["dir_kind"].reshape(-1))
+                g["dir_ref"] = np.ascontiguousarray(tab["dir_ref"].reshape(-1))
+                g["dir_axis"] = np.ascontiguousarray(tab["dir_axis"].reshape(-1))
+                g["dir_weight"] = np.ascontiguousarray(tab["dir_weight"].reshape(-1))
         groups.append(g)
 
     all_sid = np.arange(ns)
-    energy_stencil = {"num_samples": int(ns)}
+    energy_stencil: dict[str, object] = {"num_samples": int(ns)}
     # A uniform target ships as one shared W_inv row (the energy reduction reads it
     # with stride 0), same as the group table — avoids one (d, d) per sample.
     energy_stencil.update(sample_fields(all_sid, uniform_out=True))
+    # Whole-sample directional table: the energy/line-search reductions add the
+    # directional total so every accept decision sees the composed objective.
+    if directional is not None and directional.n > 0:
+        from .directional import directional_energy_table
+
+        tab = directional_energy_table(directional)
+        if tab:
+            energy_stencil["dir_num"] = tab["dir_num"]
+            energy_stencil["dir_eps"] = tab["dir_eps"]
+            energy_stencil["dir_nodes"] = np.ascontiguousarray(
+                tab["dir_nodes"].reshape(-1)
+            )
+            energy_stencil["dir_kind"] = tab["dir_kind"]
+            energy_stencil["dir_ref"] = np.ascontiguousarray(tab["dir_ref"].reshape(-1))
+            energy_stencil["dir_axis"] = np.ascontiguousarray(
+                tab["dir_axis"].reshape(-1)
+            )
+            energy_stencil["dir_weight"] = tab["dir_weight"]
     return {"groups": groups, "energy_stencil": energy_stencil}

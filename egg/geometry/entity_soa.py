@@ -61,6 +61,8 @@ The field layouts (offsets within each record) are frozen to match the C++
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 
 __all__ = [
@@ -100,6 +102,8 @@ TAG_COMPOSITE = 11
 TAG_CYLINDER = 12
 TAG_LINE3 = 13
 TAG_BSPLINESURF = 14
+TAG_LINERAIL = 15
+TAG_LINERAIL3 = 16
 
 # Per-type field counts (mirror C++ EntitySoA<E>::kFields).
 _KFIELDS = {
@@ -117,6 +121,8 @@ _KFIELDS = {
     TAG_SPHERE: 10,  # c(3), r, ax(3), ay(3)
     TAG_CYLINDER: 10,  # o(3), ax(3), ay(3), r
     TAG_LINE3: 8,  # p0(3), p1(3), t0, t1
+    TAG_LINERAIL: 4,  # start(2), end(2) — open-ended: releases beyond the ends
+    TAG_LINERAIL3: 6,  # start(3), end(3) — open-ended
     TAG_BSPLINESURF: 9,  # pu, pv, nu, nv, ku_off, kv_off, ctrl_off, w_off, has_w
 }
 
@@ -143,6 +149,8 @@ TAG_NAMES = {
     TAG_PLANE: "plane",
     TAG_CYLINDER: "cylinder",
     TAG_LINE3: "line3",
+    TAG_LINERAIL: "linerail",
+    TAG_LINERAIL3: "linerail3",
     TAG_BSPLINESURF: "bsplinesurf",
 }
 
@@ -391,6 +399,16 @@ def _encode_line3(entity) -> np.ndarray:
     )
 
 
+def _encode_linerail3(entity) -> np.ndarray:
+    """Encode an open-ended Line3 into a 6-double record [p0(3), p1(3)]."""
+    return np.concatenate(
+        [
+            np.asarray(entity.p0, dtype=np.float64).ravel(),
+            np.asarray(entity.p1, dtype=np.float64).ravel(),
+        ]
+    )
+
+
 def _encode_bsplinesurface(entity):
     """Encode a BSplineSurface into (scalars_row, segmented_data).
 
@@ -483,7 +501,16 @@ def encode_entity_soa(entity, d: int = 2):
     )
     from egg.geometry.surfaces3d import BSplineSurface
 
+    if getattr(entity, "open_ends", False) and not isinstance(
+        entity, (LineSegment, Line3)
+    ):
+        raise NotImplementedError(
+            "open_ended() is supported for straight segments (Line / Line3); "
+            f"got {type(entity).__name__}"
+        )
     if isinstance(entity, LineSegment):
+        if entity.open_ends:
+            return TAG_LINERAIL, _KFIELDS[TAG_LINERAIL], _encode_lineseg(entity), None
         return TAG_LINESEG, _KFIELDS[TAG_LINESEG], _encode_lineseg(entity), None
     if isinstance(entity, Circle):
         return TAG_CIRCLE, _KFIELDS[TAG_CIRCLE], _encode_circle(entity), None
@@ -524,6 +551,8 @@ def encode_entity_soa(entity, d: int = 2):
         return TAG_SPHERE, _KFIELDS[TAG_SPHERE], _encode_sphere(entity), None
     if isinstance(entity, Cylinder):
         return TAG_CYLINDER, _KFIELDS[TAG_CYLINDER], _encode_cylinder(entity), None
+    if isinstance(entity, Line3) and entity.open_ends:
+        return TAG_LINERAIL3, _KFIELDS[TAG_LINERAIL3], _encode_linerail3(entity), None
     if isinstance(entity, Line3):
         return TAG_LINE3, _KFIELDS[TAG_LINE3], _encode_line3(entity), None
     if isinstance(entity, BSplineSurface):
@@ -532,9 +561,43 @@ def encode_entity_soa(entity, d: int = 2):
     raise NotImplementedError(f"Entity type {type(entity)} not encodable yet")
 
 
+def project_frame_batch(entity, Q):
+    """Batched projection of ``Q`` (n, d) onto an entity via the C++ core.
+
+    Encodes the entity once (memoized on the instance — entities never move
+    during a session) and calls ``cpp_core.geometry_project_batch``, the same
+    entity reconstruction the sweep kernels use. Returns ``(feet, basis)`` —
+    feet (n, d) and the orthonormal tangent basis (n, d, tdim) — from one
+    Newton per query. This is the single source of truth for projection:
+    Python keeps no per-entity mirror.
+    """
+    import numpy as _np
+
+    from egg._cpp import cpp_core
+
+    Q = _np.ascontiguousarray(Q, dtype=_np.float64)
+    wire = getattr(entity, "_soa_wire", None)
+    if wire is None:
+        tag, _, records, seg = encode_entity_soa(entity, d=int(Q.shape[1]))
+        seg_dicts = [
+            {
+                "data": _np.asarray(a, dtype=_np.float64),
+                "off": _np.array([0, len(a)], dtype=_np.int32),
+            }
+            for a in (seg or [])
+        ]
+        wire = (tag, records, seg_dicts)
+        try:
+            entity._soa_wire = wire
+        except AttributeError:
+            pass
+    tag, records, seg_dicts = wire
+    return cpp_core.geometry_project_batch(Q, tag, records, seg_dicts)
+
+
 def group_entities_by_type(
     dof_indices: list[int],
-    entities: dict[int, object],
+    entities: Mapping[int, object],
     d: int = 2,
 ) -> dict[str, dict]:
     """Partition a set of DOFs by entity type into packed-record SoA groups.

@@ -35,10 +35,16 @@ the identity, so a wrapped script builds the same headless.
 
 from __future__ import annotations
 
-from typing import Any
+import warnings
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+if TYPE_CHECKING:
+    from .block_topology import BlockTopology
+
+from .block_topology import ParallelWalkWarning
 from .builder import TopologyBuilder
 from .trace import Diagnostic, trace_topology
 
@@ -54,6 +60,26 @@ def editable(value, *, choices=None, label=None):
     A no-op headless, so a wrapped script builds identically under the CLI.
     """
     return value
+
+
+def _lit(v) -> str:
+    """One-line Python literal for a printed blocking (dicts/lists inline,
+    booleans as ``True``/``False`` — json.dumps would emit ``true``)."""
+    import json
+
+    if v is True:
+        return "True"
+    if v is False:
+        return "False"
+    if v is None:
+        return "None"
+    if isinstance(v, str):
+        return json.dumps(v)
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_lit(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{" + ", ".join(f"{_lit(str(k))}: {_lit(x)}" for k, x in v.items()) + "}"
+    return repr(v)
 
 
 def _is_closed(entity) -> bool:
@@ -128,6 +154,28 @@ class ExplicitTopology:
         3D: ``nodes`` (``{xyz, on}``) + ``blocks`` (each ``{corners: [8 ids in
         product order], res}``); a boundary face whose four corners share a
         bound surface (via each node's ``on``) rides it.
+    relax_orthogonality : sequence, optional
+        Domain boundaries whose orthogonality requirements are relaxed —
+        geometry *labels* (or entities/Edges), passed to
+        :meth:`~egg.topology.builder.TopologyBuilder.relax_orthogonality`
+        on flatten and carried on the built topology.
+    fan_frames : dict, optional
+        Frames for singular fan nodes:
+        ``{node: {"through": [a, b], "normal": c}}`` with legs named by
+        their far node. The same section may live inside ``connectivity``
+        instead (where the web UI round-trips it); declaring one fan in
+        both places is an error. Passed to
+        :meth:`~egg.topology.builder.TopologyBuilder.fan_frame` on flatten
+        and carried resolved on the built topology.
+    parallel : sequence, optional
+        Chains of block edges held loosely parallel to a boundary:
+        ``[{"to": label, "chain": [c0, c1, ...], "weight"?, "taper"?}, ...]``
+        with ``to`` a geometry label (or entity/Edge) and the chain an
+        ordered node list whose consecutive pairs are block edges. The same
+        section may live inside ``connectivity`` (where the web UI
+        round-trips it); both are applied. Passed to
+        :meth:`~egg.topology.builder.TopologyBuilder.parallel_to` on flatten
+        and carried resolved on the built topology.
     d : int
         Spatial dimension (2 or 3).
     """
@@ -138,6 +186,9 @@ class ExplicitTopology:
         base: Any = None,
         geometry: dict[str, Any] | None = None,
         connectivity: dict | None = None,
+        relax_orthogonality: Sequence = (),
+        fan_frames: dict | None = None,
+        parallel: tuple | list | None = None,
         d: int = 2,
     ):
         if d not in (2, 3):
@@ -145,10 +196,108 @@ class ExplicitTopology:
         self.base = base
         self.geometry = dict(geometry or {})
         self.connectivity = dict(connectivity or {})
+        self.relax_orthogonality = tuple(relax_orthogonality)
+        self.fan_frames = dict(fan_frames or {})
+        self.parallel = list(parallel or [])
         self.d = d
 
     def _gents(self) -> list[tuple[str, Any, bool]]:
         return [(lbl, ent, _is_closed(ent)) for lbl, ent in self.geometry.items()]
+
+    def _relax_entries(self) -> list:
+        """relax_orthogonality entries with geometry *labels* resolved to their
+        entities; anything else passes through to the builder's resolution
+        (entity names, Edges, raw entities)."""
+        return [
+            self.geometry.get(o, o) if isinstance(o, str) else o
+            for o in self.relax_orthogonality
+        ]
+
+    def _fan_frame_decls(self, diags: list[Diagnostic]) -> list[dict]:
+        """The kwarg and connectivity fan-frame declarations merged into
+        builder call kwargs; malformed or doubly-declared entries become
+        diagnostics (blocking the flatten) instead of raising."""
+        section = self.connectivity.get("fan_frames") or {}
+        both = {str(k) for k in section} & {str(k) for k in self.fan_frames}
+        if both:
+            diags.append(
+                Diagnostic(
+                    "fan_frame_conflict",
+                    f"fan_frames for {sorted(both)} declared both as a "
+                    "kwarg and in the connectivity; declare each fan once",
+                )
+            )
+        out: list[dict] = []
+        for src in (self.fan_frames, section):
+            for node, spec in src.items():
+                spec = spec or {}
+                thr = spec.get("through")
+                nrm = spec.get("normal")
+                if not isinstance(thr, (list, tuple)) or len(thr) != 2 or not nrm:
+                    diags.append(
+                        Diagnostic(
+                            "bad_fan_frame",
+                            f"fan_frame {node!r} needs 'through': [a, b] "
+                            "and 'normal': c",
+                        )
+                    )
+                    continue
+                out.append(
+                    dict(
+                        corner=str(node),
+                        through=(str(thr[0]), str(thr[1])),
+                        normal=str(nrm),
+                    )
+                )
+        return out
+
+    def _parallel_decls(self, diags: list[Diagnostic]) -> list[dict]:
+        """The kwarg and connectivity parallel-chain declarations merged into
+        builder call kwargs; malformed entries become diagnostics (blocking
+        the flatten) instead of raising. Geometry labels resolve to their
+        entities; other names pass through to the builder's resolution."""
+        out: list[dict] = []
+        for entry in list(self.parallel) + list(
+            self.connectivity.get("parallel") or []
+        ):
+            entry = entry or {}
+            to = entry.get("to")
+            chain = entry.get("chain")
+            if not to or not isinstance(chain, (list, tuple)) or len(chain) < 2:
+                diags.append(
+                    Diagnostic(
+                        "bad_parallel",
+                        "parallel entry needs 'to': <boundary> and "
+                        "'chain': [c0, c1, ...]",
+                    )
+                )
+                continue
+            out.append(
+                dict(
+                    to=self.geometry.get(to, to) if isinstance(to, str) else to,
+                    chain=tuple(str(c) for c in chain),
+                    weight=float(entry.get("weight", 1.0)),
+                    taper=(
+                        None if entry.get("taper") is None else float(entry["taper"])
+                    ),
+                )
+            )
+        return out
+
+    @staticmethod
+    def _build_with_warn_diags(build, diags: list[Diagnostic]):
+        """Run ``build()`` converting :class:`ParallelWalkWarning` into
+        advisory ``warn_parallel_projection`` diagnostics; anything else
+        re-emits unchanged."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            topo = build()
+        for w in caught:
+            if issubclass(w.category, ParallelWalkWarning):
+                diags.append(Diagnostic("warn_parallel_projection", str(w.message)))
+            else:
+                warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
+        return topo
 
     def base_graph(self) -> dict:
         """Base corners (name -> ``{xy, fixed, on}``) and block-face edges
@@ -234,6 +383,7 @@ class ExplicitTopology:
         names: list[str] = []
         index: dict = {}
         declared: dict[int, set[str]] = {}
+        edge_binds: dict[frozenset, str] = {}
 
         def bind_on(i: int, labels):
             for lbl in labels or ():
@@ -277,7 +427,7 @@ class ExplicitTopology:
 
         def split_ends(spec):
             sp = list(spec.get("split") or ())
-            return tuple(sp[:2]) if len(sp) >= 2 else (None, None)
+            return (sp[0], sp[1]) if len(sp) >= 2 else (None, None)
 
         pending: dict = {}
         for nid, spec in nodes.items():
@@ -297,6 +447,7 @@ class ExplicitTopology:
                     pos[i] = p
                     fixed = bool(fx) if fx is not None else getattr(old, "fixed", True)
                     if old is not None:
+                        assert seed is not None  # old came from seed._corners
                         seed._corners[nid] = Corner(name=nid, position=p, fixed=fixed)
                 bind_on(i, on)
                 continue
@@ -497,6 +648,8 @@ class ExplicitTopology:
             if e.get("bind") is not None:
                 bind_on(index[a], (e["bind"],))
                 bind_on(index[b], (e["bind"],))
+                if e["bind"] in self.geometry:
+                    edge_binds[frozenset((index[a], index[b]))] = e["bind"]
 
         # new (non-base) blocking nodes explicitly pinned via a fixed flag
         fixed_nodes = {
@@ -522,6 +675,7 @@ class ExplicitTopology:
             block_regions,
             face_markers,
             user_res,
+            edge_binds,
         )
 
     def _base_wireframe_3d(self):
@@ -540,7 +694,7 @@ class ExplicitTopology:
         else:
             corners, specs, assocs = base.corners, base.block_specs, base.associations
         idx = list(_product((0, 1), repeat=3))
-        pmap = {ci: i for i, ci in enumerate(idx)}
+        pmap: dict[tuple[int, ...], int] = {ci: i for i, ci in enumerate(idx)}
         pos = {name: np.asarray(c.position, float) for name, c in corners.items()}
         fixed = {name: bool(getattr(c, "fixed", True)) for name, c in corners.items()}
         edges: set = set()
@@ -548,7 +702,7 @@ class ExplicitTopology:
             cn = spec.corner_names
             for a, ci in enumerate(idx):
                 for axis in range(3):
-                    nb = list(ci)
+                    nb = [int(x) for x in ci]
                     nb[axis] ^= 1
                     b = pmap[tuple(nb)]
                     if a < b:
@@ -620,7 +774,24 @@ class ExplicitTopology:
                 diags.append(Diagnostic("bad_node", f"node {nid!r} has no 'xyz'"))
                 continue
             fixed = bool(spec.get("fixed")) or len(known) >= 2
-            tb.add_corner(str(nid), np.asarray(xyz, dtype=float)[:3], fixed=fixed)
+            p = np.asarray(xyz, dtype=float)[:3]
+            # Snap a bound corner onto its surface(s): drawn coordinates are
+            # only approximate, and downstream sampling/constraints assume a
+            # bound corner lies ON the geometry. Two or more surfaces -> the
+            # shared junction, by alternating projection. An explicitly
+            # pinned node keeps its drawn position.
+            if known and not bool(spec.get("fixed")):
+                ents = [geometry[lbl] for lbl in sorted(set(known))]
+                if len(ents) == 1:
+                    p = np.asarray(ents[0].project(p), dtype=float)[:3]
+                else:
+                    for _ in range(24):
+                        p_prev = p
+                        for e in ents:
+                            p = np.asarray(e.project(p), dtype=float)[:3]
+                        if float(np.linalg.norm(p - p_prev)) <= 1e-14:
+                            break
+            tb.add_corner(str(nid), p, fixed=fixed)
             node_on[str(nid)] = set(known)
 
         # Blocks: an explicit list, or inferred (cube enumeration) from the
@@ -695,11 +866,21 @@ class ExplicitTopology:
                     for ent_name in sorted(common):
                         tb.associate(name, axis, side, geometry[ent_name])
 
+        fan_decls = self._fan_frame_decls(diags)
+        par_decls = self._parallel_decls(diags)
         errors = [d for d in diags if not d.kind.startswith("warn")]
         if errors:
             return None, diags
         try:
-            return tb.build(), diags
+            if self.relax_orthogonality:
+                tb.relax_orthogonality(*self._relax_entries())
+            for f in fan_decls:
+                tb.fan_frame(f["corner"], through=f["through"], normal=f["normal"])
+            for p in par_decls:
+                tb.parallel_to(
+                    p["to"], chain=p["chain"], weight=p["weight"], taper=p["taper"]
+                )
+            return self._build_with_warn_diags(tb.build, diags), diags
         except Exception as exc:  # a non-conforming assembly still fails to build
             return None, [Diagnostic("build_error", str(exc))]
 
@@ -725,6 +906,7 @@ class ExplicitTopology:
             block_regions,
             face_markers,
             user_res,
+            edge_binds,
         ) = self._merge_graph(diags)
         builder, tdiags = trace_topology(
             pos,
@@ -732,6 +914,7 @@ class ExplicitTopology:
             self._gents(),
             res=self._res(),
             declared_curves=declared,
+            declared_edge_curves=edge_binds,
             node_names=names,
             seed_builder=seed,
             base_edges=base_edges,
@@ -742,13 +925,23 @@ class ExplicitTopology:
             user_res=user_res,
         )
         diags += tdiags
+        fan_decls = self._fan_frame_decls(diags)
+        par_decls = self._parallel_decls(diags)
         # ``warn_*`` diagnostics are advisory (e.g. a dropped boundary marker):
         # they are reported but do not block a build/commit.
         errors = [d for d in diags if not d.kind.startswith("warn")]
         if errors:
             return None, diags
         try:
-            topo = builder.build()
+            if self.relax_orthogonality:
+                builder.relax_orthogonality(*self._relax_entries())
+            for f in fan_decls:
+                builder.fan_frame(f["corner"], through=f["through"], normal=f["normal"])
+            for p in par_decls:
+                builder.parallel_to(
+                    p["to"], chain=p["chain"], weight=p["weight"], taper=p["taper"]
+                )
+            topo = self._build_with_warn_diags(builder.build, diags)
         except Exception as exc:  # a non-conforming merge still fails to build
             return None, [Diagnostic("build_error", str(exc))]
         return topo, diags  # topo valid; diags holds only advisory warnings
@@ -757,7 +950,7 @@ class ExplicitTopology:
         """The flatten diagnostics; empty means green/committable."""
         return self.flatten()[1]
 
-    def build(self):
+    def build(self) -> BlockTopology:
         """The BlockTopology, raising ValueError on the first (non-warning)
         diagnostic."""
         topo, diags = self.flatten()
@@ -774,3 +967,270 @@ class ExplicitTopology:
     def initialize_grid(self):
         """TFI-initialise the flattened topology (raises if not valid)."""
         return self.build().initialize_grid()
+
+    # -- export: the flattened topology as a standalone blocking ----------
+
+    def to_connectivity(self) -> dict:
+        """The flattened topology (base included) as a standalone connectivity
+        dict — the blocking that replicates it with ``base=None`` on the same
+        geometry. See :meth:`print_topology` for the copy-pasteable block."""
+        conn, _notes = self._export_connectivity()
+        return conn
+
+    def print_topology(self, *, geometry_var: str = "geometry", file=None) -> str:
+        """Print (and return) a ready-to-paste ``ExplicitTopology(...)`` block
+        replicating the full flattened topology — base blocks and drawn overlay
+        alike — as a standalone blocking on the same geometry.
+
+        Everything expressible in a blocking round-trips: node positions and
+        pins, per-edge resolutions, and face→curve bindings (so the free /
+        sliding / fixed classification and tag-derived boundary markers are
+        preserved). What cannot ride a blocking is reported as ``# ...``
+        comment lines above the block: boundary-layer specs (re-declare via
+        ``curve.clustered(...)`` on the geometry), bindings to unnamed
+        entities, and curve-following edge seeding of corners placed on an
+        unassociated curve. 2D block names are re-derived by the tracer
+        (``blk0``, ``blk1``, ...); 3D blocks keep their names.
+
+        ``geometry_var`` is the variable name the printed block references for
+        its ``geometry=`` argument.
+        """
+        import sys
+
+        conn, notes = self._export_connectivity()
+        out: list[str] = [f"# {n}" for n in notes]
+        out += [
+            "ExplicitTopology(",
+            "    base=None,",
+            f"    geometry={geometry_var},",
+        ]
+        if self.relax_orthogonality:
+            labels = ", ".join(
+                _lit(o if isinstance(o, str) else getattr(o, "name", None) or "?")
+                for o in self.relax_orthogonality
+            )
+            out.append(f"    relax_orthogonality=({labels},),")
+        out += [
+            "    connectivity=editable({",
+            '        "nodes": {',
+        ]
+        out += [f"            {_lit(k)}: {_lit(v)}," for k, v in conn["nodes"].items()]
+        out.append("        },")
+        if self.d == 3:
+            out.append('        "blocks": [')
+            out += [f"            {_lit(b)}," for b in conn["blocks"]]
+            out.append("        ],")
+        else:
+            out.append('        "edges": [')
+            out += [f"            {_lit(e)}," for e in conn["edges"]]
+            out.append("        ],")
+        if conn.get("fan_frames"):
+            out.append('        "fan_frames": {')
+            out += [
+                f"            {_lit(k)}: {_lit(v)},"
+                for k, v in conn["fan_frames"].items()
+            ]
+            out.append("        },")
+        if conn.get("parallel"):
+            out.append('        "parallel": [')
+            out += [f"            {_lit(p)}," for p in conn["parallel"]]
+            out.append("        ],")
+        out += [f'        "res": {_lit(conn["res"])},', "    }),", ")"]
+        text = "\n".join(out)
+        print(text, file=file if file is not None else sys.stdout)
+        return text
+
+    def _export_connectivity(self) -> tuple[dict, list[str]]:
+        """Build the standalone connectivity dict plus human-readable notes on
+        anything the blocking cannot express."""
+        from collections import Counter
+
+        topo = self.build()
+        notes: list[str] = []
+
+        # entity id -> the label the printed block will reference. This
+        # object's geometry labels win; association-derived names fill in for
+        # base entities never passed in `geometry`.
+        label_of = {id(e): lbl for lbl, e in self.geometry.items()}
+        ent_of = dict(self.geometry)
+        for lbl, e in topo.entities.items():
+            label_of.setdefault(id(e), lbl)
+            ent_of.setdefault(lbl, e)
+
+        def rnd(v: float) -> float:
+            return float(f"{float(v):.10g}")
+
+        assoc_of: dict[tuple, list] = {}
+        for a in topo.associations:
+            key = (a.face.block_name, a.face.axis, a.face.side)
+            assoc_of.setdefault(key, []).append(a.entity)
+
+        nodes: dict[str, dict] = {}
+        for name, c in topo.corners.items():
+            node_dict: dict = {
+                ("xyz" if self.d == 3 else "xy"): [
+                    rnd(c.position[k]) for k in range(self.d)
+                ]
+            }
+            if getattr(c, "fixed", False):
+                node_dict["fixed"] = True
+            nodes[name] = node_dict
+
+        # Corners placed on a curve that has no association seed their edges
+        # along it at init; a blocking has no free-yet-curve-seeded notion.
+        associated_ids = {id(a.entity) for a in topo.associations}
+        seeded: dict[str, list[str]] = {}
+        for name, c in topo.corners.items():
+            edge = getattr(getattr(c, "source", None), "edge", None)
+            ent = getattr(edge, "entity", None)
+            if ent is not None and id(ent) not in associated_ids:
+                lbl = label_of.get(id(ent)) or getattr(ent, "name", None) or "?"
+                seeded.setdefault(lbl, []).append(name)
+        for lbl, names in seeded.items():
+            notes.append(
+                f"corners {', '.join(names)} were placed on {lbl!r}, which has no "
+                "association: exported as free nodes (curve-following edge "
+                "seeding at init is not replicated)"
+            )
+
+        if getattr(topo, "boundary_layer_specs", {}):
+            notes.append(
+                "boundary-layer spec(s) are not part of a blocking; re-declare "
+                "them on the geometry via <curve>.clustered(...)"
+            )
+
+        if self.d == 3:
+            blocks = [
+                {
+                    "name": bname,
+                    "corners": list(spec.corner_names),
+                    "res": [int(r) for r in spec.resolutions],
+                }
+                for bname, spec in topo.block_specs.items()
+            ]
+            # Bindings ride the corners in 3D: a boundary face whose corners
+            # all share a surface re-associates with it on flatten.
+            for (bname, axis, side), ents in assoc_of.items():
+                spec = topo.block_specs[bname]
+                for ent in ents:
+                    lbl = label_of.get(id(ent))
+                    if lbl is None:
+                        notes.append(
+                            f"face {bname}[{axis},{side}] is associated to an "
+                            "unnamed entity; binding dropped"
+                        )
+                        continue
+                    for cn in spec.face_corner_names(axis, side, 3):
+                        on = nodes[cn].setdefault("on", [])
+                        if lbl not in on:
+                            on.append(lbl)
+            for node in nodes.values():
+                if "on" in node:
+                    node["on"] = sorted(node["on"])
+            out3 = {"nodes": nodes, "blocks": blocks, "res": 10}
+            if topo.fan_frames:
+                out3["fan_frames"] = self._fan_frames_export(topo)
+            if getattr(topo, "parallel_chains", ()):
+                out3["parallel"] = self._parallel_export(topo, label_of, notes)
+            return out3, notes
+
+        entries: dict[frozenset, dict] = {}
+        order: list[frozenset] = []
+        face_label: dict[tuple, str] = {}
+        for bname, spec in topo.block_specs.items():
+            for axis in (0, 1):
+                for side in (0, 1):
+                    a_, b_ = spec.face_corner_names(axis, side, 2)
+                    if a_ == b_:
+                        notes.append(f"degenerate face {bname}[{axis},{side}] skipped")
+                        continue
+                    key = frozenset((a_, b_))
+                    r = int(spec.resolutions[1 - axis])
+                    e = entries.get(key)
+                    if e is None:
+                        e = {"a": a_, "b": b_, "res": r}
+                        entries[key] = e
+                        order.append(key)
+                    elif e["res"] != r:
+                        notes.append(
+                            f"edge {e['a']}-{e['b']}: conflicting resolutions "
+                            f"{e['res']} vs {r}; kept {max(e['res'], r)}"
+                        )
+                        e["res"] = max(e["res"], r)
+                    for ent in assoc_of.get((bname, axis, side), ()):
+                        lbl = label_of.get(id(ent))
+                        if lbl is None:
+                            notes.append(
+                                f"face {bname}[{axis},{side}] is associated to an "
+                                "unnamed entity; binding dropped"
+                            )
+                        elif "bind" not in e:
+                            e["bind"] = lbl
+                            face_label[(bname, axis, side)] = lbl
+                        elif e["bind"] != lbl:
+                            notes.append(
+                                f"edge {e['a']}-{e['b']} is associated to both "
+                                f"{e['bind']!r} and {lbl!r}; kept {e['bind']!r}"
+                            )
+                        else:
+                            face_label[(bname, axis, side)] = lbl
+
+        # A marker that does not derive from its bound curve's tag is lost.
+        for tag, faces in getattr(topo, "boundary_tags", {}).items():
+            for f in faces:
+                lbl = face_label.get((f.block_name, f.axis, f.side))
+                ent = ent_of.get(lbl) if lbl else None
+                if ent is None or getattr(ent, "tag", None) != tag:
+                    notes.append(
+                        f"boundary marker {tag!r} on {f.block_name}"
+                        f"[{f.axis},{f.side}] does not derive from a bound "
+                        "curve's tag and will be lost"
+                    )
+
+        # Modal resolution becomes the default; edges at it drop their
+        # explicit "res" (a conforming loop shares one resolution, so a loop
+        # is either fully explicit or fully default — never mixed).
+        res_default = Counter(e["res"] for e in entries.values()).most_common(1)
+        res_default = int(res_default[0][0]) if res_default else self._res()
+        edges_out = []
+        for key in order:
+            e = entries[key]
+            if e["res"] == res_default:
+                del e["res"]
+            edges_out.append(e)
+        out2 = {"nodes": nodes, "edges": edges_out, "res": res_default}
+        if topo.fan_frames:
+            out2["fan_frames"] = self._fan_frames_export(topo)
+        if getattr(topo, "parallel_chains", ()):
+            out2["parallel"] = self._parallel_export(topo, label_of, notes)
+        return out2, notes
+
+    @staticmethod
+    def _fan_frames_export(topo) -> dict:
+        """The resolved fan frames back in declaration form (corner names)."""
+        return {
+            f.corner: {"through": [f.through[0], f.through[1]], "normal": f.normal}
+            for f in topo.fan_frames
+        }
+
+    @staticmethod
+    def _parallel_export(topo, label_of: dict, notes: list[str]) -> list:
+        """The resolved parallel chains back in declaration form; a chain to
+        an entity no label reaches cannot ride the blocking and is dropped
+        with a note."""
+        out = []
+        for p in topo.parallel_chains:
+            lbl = label_of.get(id(p.to)) or getattr(p.to, "name", None)
+            if lbl is None:
+                notes.append(
+                    f"parallel chain {'-'.join(p.chain)} targets an unnamed "
+                    "entity; entry dropped"
+                )
+                continue
+            e: dict = {"to": lbl, "chain": list(p.chain)}
+            if p.weight != 1.0:
+                e["weight"] = p.weight
+            if p.taper is not None:
+                e["taper"] = p.taper
+            out.append(e)
+        return out

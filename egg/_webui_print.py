@@ -29,10 +29,10 @@ import io
 from typing import Callable
 
 # Installed by the web UI worker processes; ``None`` means headless (no-op).
-_sink: Callable[[str], None] | None = None
+_sink: Callable[[str], object] | None = None
 
 
-def _set_sink(fn: Callable[[str], None] | None) -> None:
+def _set_sink(fn: Callable[[str], object] | None) -> None:
     """Install (or, with ``None``, clear) the process-wide UI print sink.
 
     Called by the web UI's worker processes; not part of the script-facing

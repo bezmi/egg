@@ -37,11 +37,21 @@ Run: ``uv run --no-sync python cubed_sphere.py --device cpu``.
 from __future__ import annotations
 
 import argparse
+import os
 
 import numpy as np
 
 from egg.geometry.analytic3d import Plane, Sphere
-from egg.pipeline import PipelineConfig, generate_steps
+from egg.pipeline import (
+    ControlPointSmoother,
+    FasSmoother,
+    JacobiSmoother,
+    Presmooth,
+    Refit,
+    Save,
+    Untangle,
+    generate_steps,
+)
 from egg.topology.builder import TopologyBuilder
 
 # sign of (e_i x e_j) . e_k for the two axes other than k, in ascending order.
@@ -85,12 +95,12 @@ def cubed_sphere(n_rad: int, n_tan: int, r0: float = 0.5, cw: float = 1.0):
             )
             name = "blk_%d%+d" % (k, s)
             tb.add_block(name, corners=corners, resolutions=(n_rad, n_tan, n_tan))
-            tb.associate(name, 0, 0, Sphere((0, 0, 0), r0, (1, 0, 0), (0, 1, 0)))
+            tb.associate(name, "west", Sphere((0, 0, 0), r0, (1, 0, 0), (0, 1, 0)))
             o = [0.0, 0.0, 0.0]
             o[k] = s * cw
             axa = [1.0 if m == a1 else 0.0 for m in (0, 1, 2)]
             axb = [1.0 if m == a2 else 0.0 for m in (0, 1, 2)]
-            tb.associate(name, 0, 1, Plane(o, axa, axb))
+            tb.associate(name, "east", Plane(o, axa, axb))
     return tb
 
 
@@ -110,6 +120,12 @@ def main(argv=None):
         "control-net reduced Gauss-Newton solver (sliding sphere/plane "
         "walls, exact C1 seams, edge-fan fallback)",
     )
+    p.add_argument(
+        "--export-eggy",
+        metavar="PATH",
+        default=None,
+        help="after the run, pack this example folder into a .eggy archive",
+    )
     a = p.parse_args(argv)
 
     topo = cubed_sphere(a.n, a.nt, r0=a.r0).build()
@@ -119,19 +135,33 @@ def main(argv=None):
         f"singular fans={len(topo.singularities)}"
     )
 
-    cfg = PipelineConfig(
-        device=a.device,
-        tmop_sweeps=a.sweeps,
-        tmop_chunk=a.chunk,
-        tmop_smoother=a.smoother,
-    )
-    for phase, info in generate_steps(grid, config=cfg, untangle_direct=True):
+    if a.smoother == "fas":
+        smoothing = [FasSmoother(sweeps=a.sweeps, chunk=a.chunk)]
+    elif a.smoother == "control_point":
+        # A nodal pre-pass gives the net fit a smooth, valid start.
+        smoothing = [
+            Presmooth(JacobiSmoother(sweeps=100, chunk=100)),
+            ControlPointSmoother(chunk=a.chunk),
+        ]
+    else:
+        smoothing = [JacobiSmoother(sweeps=a.sweeps, chunk=a.chunk)]
+    # Refit + Save leave a control net beside the script so the exported .eggy
+    # carries one (a regrid can resample from it); control mode keeps its solved net.
+    net_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "net.npz")
+    stages = [Untangle(), *smoothing, Refit(), Save(net_path)]
+    for phase, info in generate_steps(grid, stages=stages, device=a.device):
         if phase in ("init", "untangle", "control", "final"):
             bits = " ".join(
                 f"{k}={v:.4e}" if isinstance(v, float) else f"{k}={v}"
                 for k, v in info.items()
             )
             print(f"  {phase}: {bits}")
+
+    if a.export_eggy:
+        from egg.io import eggy
+
+        eggy.pack(a.export_eggy, os.path.dirname(os.path.abspath(__file__)))
+        print(f"Exported .eggy archive to {a.export_eggy}")
     print("Done.")
 
 

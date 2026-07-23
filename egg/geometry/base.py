@@ -15,8 +15,13 @@ import numpy as np
 __all__ = ["GeometryEntity"]
 
 # Sentinel: a tag left to inherit the entity's name (distinct from tag=None,
-# which explicitly suppresses the export marker).
-_INHERIT = object()
+# which explicitly suppresses the export marker). A dedicated type makes it
+# distinguishable from a real str tag in the type checker.
+class _Inherit:
+    pass
+
+
+_INHERIT = _Inherit()
 
 
 class GeometryEntity(ABC):
@@ -69,7 +74,7 @@ class GeometryEntity(ABC):
         without emitting any marker.
         """
         t = getattr(self, "_egg_tag", _INHERIT)
-        return self.name if t is _INHERIT else t
+        return self.name if isinstance(t, _Inherit) else t
 
     @tag.setter
     def tag(self, value: str | None) -> None:
@@ -82,6 +87,29 @@ class GeometryEntity(ABC):
         self._egg_name = name
         if tag is not _INHERIT:
             self._egg_tag = tag
+        return self
+
+    @property
+    def open_ends(self) -> bool:
+        """Whether this segment releases sliding nodes beyond its ends.
+
+        Set with :meth:`open_ended`. A bound node projects onto the segment
+        while its foot parameter is within range and moves as a *free* node
+        beyond either end (recaptured if its foot re-enters), so a guide can
+        cover part of a rail of nodes without clamping the overflow at its
+        endpoints. Straight segments only (Line / Line3).
+        """
+        return bool(getattr(self, "_egg_open_ends", False))
+
+    def open_ended(self):
+        """Make this segment an open-ended rail; return ``self`` (fluent).
+
+        Nodes bound to it slide along the segment but drop off its ends and
+        become free instead of clamping at the endpoints — see
+        :attr:`open_ends`. Supported for straight segments (``Line`` /
+        ``Line3``); other entity kinds raise at encode time.
+        """
+        self._egg_open_ends = True
         return self
 
     @property
@@ -119,9 +147,21 @@ class GeometryEntity(ABC):
                 first_height=5e-3, growth=1.5, n_fixed=2
             )
 
-        ``relax_orthogonality`` accepts entities, :class:`Edge`\\ s, or the
-        *names* of other named geometry (resolved at build time).
+        ``relax_orthogonality`` is deprecated here: declare it on the topology
+        (``TopologyBuilder.relax_orthogonality(...)`` or
+        ``ExplicitTopology(relax_orthogonality=...)``); entries given here are
+        forwarded at build time.
         """
+        if relax_orthogonality:
+            import warnings
+
+            warnings.warn(
+                "clustered(relax_orthogonality=...) is deprecated; use "
+                "TopologyBuilder.relax_orthogonality(...) or "
+                "ExplicitTopology(relax_orthogonality=...)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._egg_bl = dict(
             first_height=first_height,
             growth=growth,
@@ -139,31 +179,50 @@ class GeometryEntity(ABC):
         """Dimension of the entity (0=point, 1=curve, 2=surface)."""
         ...
 
-    @abstractmethod
     def project(self, p: np.ndarray) -> np.ndarray:
         """Closest point on the entity to p. Shape (d,)."""
-        ...
+        return self.project_many(np.asarray(p, dtype=float)[None])[0]
 
     def project_many(self, pts: np.ndarray) -> np.ndarray:
         """Closest point on the entity to each row of ``pts``. Shape (n, d).
 
-        Default: a per-point :meth:`project` loop — always correct, and
-        fast enough for closed-form projections. The seeded-Newton curve
-        family overrides it with a vectorized path (same seeds and
-        iterations run lane-wise), which is what makes batch callers like
-        the boundary-layer respace pass cheap on composite curves.
+        Projection is owned by the C++ core (the same SoA entity
+        reconstruction the sweep kernels use); Python keeps no per-entity
+        mirror. One batched call regardless of entity complexity.
         """
-        pts = np.asarray(pts, dtype=float)
-        return np.stack([np.asarray(self.project(p), dtype=float) for p in pts])
+        from .entity_soa import project_frame_batch
 
-    @abstractmethod
+        return project_frame_batch(self, np.asarray(pts, dtype=float))[0]
+
     def tangent_space(self, q: np.ndarray) -> np.ndarray:
         """Orthonormal basis of the tangent space at q. Shape (d, dim)."""
-        ...
+        return self.tangent_space_many(np.asarray(q, dtype=float)[None])[0]
+
+    def tangent_space_many(self, Q: np.ndarray) -> np.ndarray:
+        """Tangent basis at the foot of each row of ``Q``. Shape (n, d, dim)."""
+        from .entity_soa import project_frame_batch
+
+        return project_frame_batch(self, np.asarray(Q, dtype=float))[1]
 
     def normal(self, q: np.ndarray) -> np.ndarray:
-        """Normal vector at q, shape (d,). Defined for codimension 1."""
-        raise NotImplementedError
+        """Normal vector at q, shape (d,). Defined for codimension 1.
+
+        Derived from the tangent basis: the 90-deg-CCW rotation for a 2D
+        curve, the (unit) cross product of the basis columns for a 3D
+        surface.
+        """
+        B = np.asarray(self.tangent_space(np.asarray(q, dtype=float)), dtype=float)
+        d, k = B.shape
+        if d == 2 and k == 1:
+            t = B[:, 0]
+            return np.array([-t[1], t[0]])
+        if d == 3 and k == 2:
+            n = np.cross(B[:, 0], B[:, 1])
+            nrm = np.linalg.norm(n)
+            if nrm < 1e-15:
+                raise ValueError("degenerate tangent basis: normal undefined here")
+            return n / nrm
+        raise NotImplementedError("normal requires codimension 1")
 
     def eval_frac(self, t: float) -> np.ndarray:
         """Evaluate at fractional parameter t in [0, 1] mapped onto [t0, t1].
@@ -173,4 +232,13 @@ class GeometryEntity(ABC):
         protocol; raises AttributeError otherwise.
         """
         t = min(max(float(t), 0.0), 1.0)
-        return self.eval(self.t0 + t * (self.t1 - self.t0))
+        # eval / t0 / t1 belong to the parametric protocol, which only curve
+        # entities implement; fetch them dynamically so the base stays honest.
+        eval_fn = getattr(self, "eval", None)
+        t0 = getattr(self, "t0", None)
+        t1 = getattr(self, "t1", None)
+        if eval_fn is None or t0 is None or t1 is None:
+            raise AttributeError(
+                f"{type(self).__name__} does not implement the parametric protocol"
+            )
+        return eval_fn(t0 + t * (t1 - t0))

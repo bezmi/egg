@@ -279,14 +279,25 @@ def test_validate_blocking_reports_green_and_red():
         ],
         "res": 3,
     }
-    assert scene.validate_blocking(code, good) == []  # green
+    green = scene.validate_blocking(code, good)
+    assert green["diagnostics"] == []
+    # Loop-propagated resolutions ride along: every edge of the single block
+    # grids at 3 cells, and the two axis loops are the must-share classes.
+    assert green["edge_res"] == {"a|b": 3, "c|d": 3, "b|c": 3, "a|d": 3}
+    assert sorted(map(sorted, green["res_classes"])) == [
+        ["a|b", "c|d"],
+        ["a|d", "b|c"],
+    ]
 
     bad = {
         "nodes": {"a": {"xy": [0, 0]}, "b": {"xy": [1, 0]}, "c": {"xy": [0.5, 1]}},
         "edges": [{"a": "a", "b": "b"}, {"a": "b", "b": "c"}, {"a": "c", "b": "a"}],
     }
     red = scene.validate_blocking(code, bad)
-    assert red and any(d["kind"] in ("non_quad_face", "no_blocks") for d in red)
+    assert "edge_res" not in red  # no flatten -> no resolution payload
+    assert red["diagnostics"] and any(
+        d["kind"] in ("non_quad_face", "no_blocks") for d in red["diagnostics"]
+    )
 
 
 def test_set_editable_blocking_round_trips_and_is_idempotent():
@@ -295,17 +306,19 @@ def test_set_editable_blocking_round_trips_and_is_idempotent():
         "topo = ExplicitTopology(connectivity=editable({'nodes': {}, 'edges': []}))\n"
     )
     blocking = {
-        "nodes": {"a": {"xy": [0, 0]}, "b": {"xy": [1, 0]}},
+        "nodes": {"a": {"xy": [0, 0], "fixed": True}, "b": {"xy": [1, 0]}},
         "edges": [{"a": "a", "b": "b"}],
         "res": 5,
     }
     new = scene.set_editable_blocking(code, blocking)
-    # still editable, and re-execs to the committed blocking
+    # still editable, and re-execs to the committed blocking (booleans must
+    # land as Python True/False, not JSON true/false)
     assert scene.explicit_topology_source(new)["editable"] is True
     ns, _o, err = scene.exec_script(new, None)
     assert err is None
     h = scene.harvest(ns, init_grid=False)
     assert set(h.editable.connectivity["nodes"]) == {"a", "b"}
+    assert h.editable.connectivity["nodes"]["a"]["fixed"] is True
     assert h.editable.connectivity["res"] == 5
     # committing the same blocking again changes nothing (no source churn)
     assert scene.set_editable_blocking(new, blocking) == new
@@ -437,9 +450,21 @@ def test_dense_grid_preview_is_decimated():
 # --- guard parameter panel: parse + span-exact rewrite ---
 
 
-def test_guard_params_of_the_egg_example():
-    code = (EXAMPLES_2D / "egg/egg.py").read_text()
-    by_name = {p.name: p for p in scene.guard_params(code)}
+# A representative editable guard block (the shape examples use when they expose
+# web-UI knobs). Kept synthetic so it does not track any one example's literals.
+_GUARD_CODE = (
+    'if __name__ == "__egg_webui__":\n'
+    "    a = egg_webui.params(\n"
+    "        bl_first_height=5.0e-3,\n"
+    "        tmop_sweeps=5000,\n"
+    "        smoother='jacobi',\n"
+    '        device="cpu",\n'
+    "    )\n"
+)
+
+
+def test_guard_params_reads_editable_literal_kinds():
+    by_name = {p.name: p for p in scene.guard_params(_GUARD_CODE)}
     assert by_name["bl_first_height"].text == "5.0e-3"
     assert by_name["bl_first_height"].kind == "float"
     assert by_name["tmop_sweeps"].kind == "int"
@@ -448,14 +473,15 @@ def test_guard_params_of_the_egg_example():
 
 
 def test_set_guard_param_rewrites_only_that_literal():
-    code = (EXAMPLES_2D / "egg/egg.py").read_text()
-    new = scene.set_guard_param(code, "tmop_sweeps", "120")
-    changed = [(a, b) for a, b in zip(code.splitlines(), new.splitlines()) if a != b]
+    new = scene.set_guard_param(_GUARD_CODE, "tmop_sweeps", "120")
+    changed = [
+        (a, b) for a, b in zip(_GUARD_CODE.splitlines(), new.splitlines()) if a != b
+    ]
     assert changed == [("        tmop_sweeps=5000,", "        tmop_sweeps=120,")]
     # user spellings survive; strings get quoted
-    new = scene.set_guard_param(code, "bl_first_height", "2.5e-3")
+    new = scene.set_guard_param(_GUARD_CODE, "bl_first_height", "2.5e-3")
     assert "bl_first_height=2.5e-3," in new
-    new = scene.set_guard_param(code, "smoother", "fas")
+    new = scene.set_guard_param(_GUARD_CODE, "smoother", "fas")
     assert "smoother='fas'," in new
 
 
@@ -547,7 +573,7 @@ def test_capsule_guard_has_metric_dropdown_and_dipole_toggle():
 def test_control_net_overlay_renders_and_roundtrips(tmp_path):
     """A grid carrying a solved control net renders the toggleable net layer,
     and the persisted npz reloads onto a fresh exec of the same script (the
-    import-net flow's core)."""
+    net overlay + persistence core)."""
     import io as _io
     import os
     import sys

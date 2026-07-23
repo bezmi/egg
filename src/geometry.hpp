@@ -40,6 +40,8 @@ inline constexpr Tag TAG_COMPOSITE = 11;
 inline constexpr Tag TAG_CYLINDER = 12;     // 3D surface
 inline constexpr Tag TAG_LINE3 = 13;        // 3D edge curve
 inline constexpr Tag TAG_BSPLINESURF = 14;  // 3D tensor-product B-spline/NURBS surface
+inline constexpr Tag TAG_LINERAIL = 15;     // 2D open-ended segment (releases beyond the ends)
+inline constexpr Tag TAG_LINERAIL3 = 16;    // 3D open-ended segment (releases beyond the ends)
 
 inline constexpr int kParamPad = 12;
 /// Arena record size of one composite-path segment: [tag, params(kParamPad)].
@@ -202,6 +204,16 @@ template <Parametrization P> struct TrimmedEntity {
     [[nodiscard]] Frame<P::edim, tdim> project_frame(const Pt& p) const
     {
         auto q = param.invert(p);
+        // Periodic parametrizations return one branch representative; pick
+        // the representative nearest the trim interval, so a foot at the
+        // period seam clamps to the near interval end, not across the whole
+        // range (e.g. an arc over [3/2 pi, 2 pi] queried at angle ~0).
+        if constexpr (requires { P::period; }) {
+            if (!trim.closed) {
+                const real mid = 0.5_r * (trim.t0 + trim.t1);
+                q[0] = mid + sycl::remainder(q[0] - mid, P::period);
+            }
+        }
         const bool inside = trim.contains(q);
         if (!inside) { q = trim.clamp(q); }
         return {.pos = param.eval(q),
@@ -298,6 +310,88 @@ struct LineSeg {
     }
     [[nodiscard]] std::array<Vec, 1> tangent_basis(const Pt& p) const { return {tangent(p)}; }
     [[nodiscard]] Frame<2, 1> project_frame(const Pt& p) const
+    { return {.pos = project(p), .basis = {tangent(p)}, .eff_tdim = 1}; }
+};
+
+/// Open-ended line segment (a "rail"): the projection foot is clamped nowhere —
+/// while the foot parameter lies in [0, 1] the node slides on the segment, and
+/// beyond either end `project` is the identity, so the node RELEASES and moves
+/// freely (newton_delta's on_rail hook switches it to the full-space step).
+/// A released node whose foot re-enters the range is recaptured. Declared via
+/// the Python entity's `.open_ended()`.
+struct LineRail {
+    using Pt = PtN<2>;
+    using Vec = VecN<2>;
+    static constexpr int tdim = 1;
+    real sx, sy, ex, ey;
+    /// Unclamped foot parameter of @p p on the segment's infinite line.
+    [[nodiscard]] real foot_t(const Pt& p) const
+    {
+        const real abx = ex - sx, aby = ey - sy;
+        const real ab_sq = (abx * abx) + (aby * aby);
+        return (((p[0] - sx) * abx) + ((p[1] - sy) * aby)) / std::fmax(ab_sq, tol::tiny);
+    }
+    /// Is the projection foot within the segment (the constraint is active)?
+    [[nodiscard]] bool on_rail(const Pt& p) const
+    {
+        const real t = foot_t(p);
+        return t >= 0.0_r && t <= 1.0_r;
+    }
+    [[nodiscard]] Pt project(const Pt& p) const
+    {
+        const real t = foot_t(p);
+        if (t < 0.0_r || t > 1.0_r) { return p; }  // beyond an end: released
+        return Pt {sx + (t * (ex - sx)), sy + (t * (ey - sy))};
+    }
+    [[nodiscard]] Vec tangent(const Pt&) const
+    {
+        const real abx = ex - sx, aby = ey - sy;
+        const real norm = sycl::sqrt((abx * abx) + (aby * aby));
+        if (norm < tol::znorm) {
+            return Vec {1.0_r, 0.0_r};  // eye[:, 0]
+        }
+        return Vec {abx / norm, aby / norm};
+    }
+    [[nodiscard]] std::array<Vec, 1> tangent_basis(const Pt& p) const { return {tangent(p)}; }
+    [[nodiscard]] Frame<2, 1> project_frame(const Pt& p) const
+    { return {.pos = project(p), .basis = {tangent(p)}, .eff_tdim = 1}; }
+};
+
+/// 3D open-ended line segment — @ref LineRail lifted to D=3 (bespoke
+/// closed-form; deliberately NOT the TrimmedEntity pipeline, whose trim
+/// clamps rather than releases).
+struct LineRail3 {
+    using Pt = PtN<3>;
+    using Vec = VecN<3>;
+    static constexpr int tdim = 1;
+    real sx, sy, sz, ex, ey, ez;
+    [[nodiscard]] real foot_t(const Pt& p) const
+    {
+        const real ax = ex - sx, ay = ey - sy, az = ez - sz;
+        const real ab_sq = (ax * ax) + (ay * ay) + (az * az);
+        return (((p[0] - sx) * ax) + ((p[1] - sy) * ay) + ((p[2] - sz) * az)) /
+               std::fmax(ab_sq, tol::tiny);
+    }
+    [[nodiscard]] bool on_rail(const Pt& p) const
+    {
+        const real t = foot_t(p);
+        return t >= 0.0_r && t <= 1.0_r;
+    }
+    [[nodiscard]] Pt project(const Pt& p) const
+    {
+        const real t = foot_t(p);
+        if (t < 0.0_r || t > 1.0_r) { return p; }
+        return Pt {sx + (t * (ex - sx)), sy + (t * (ey - sy)), sz + (t * (ez - sz))};
+    }
+    [[nodiscard]] Vec tangent(const Pt&) const
+    {
+        const real ax = ex - sx, ay = ey - sy, az = ez - sz;
+        const real norm = sycl::sqrt((ax * ax) + (ay * ay) + (az * az));
+        if (norm < tol::znorm) { return Vec {1.0_r, 0.0_r, 0.0_r}; }
+        return Vec {ax / norm, ay / norm, az / norm};
+    }
+    [[nodiscard]] std::array<Vec, 1> tangent_basis(const Pt& p) const { return {tangent(p)}; }
+    [[nodiscard]] Frame<3, 1> project_frame(const Pt& p) const
     { return {.pos = project(p), .basis = {tangent(p)}, .eff_tdim = 1}; }
 };
 /// Circle of radius r centred at (cx, cy); radial projection.
@@ -467,6 +561,10 @@ inline real
 /// by angle; closed-form inverse.
 struct CircleArcParam {
     static constexpr int edim = 2, idim = 1;
+    /// Angular period: the inverse returns one branch representative; the
+    /// trimmed entity re-represents it nearest the trim interval before
+    /// clamping (see TrimmedEntity::project_frame).
+    static constexpr real period = static_cast<real>(2.0 * std::numbers::pi);
     PtN<2> c;  ///< Centre.
     real r;    ///< Radius.
     /// Inverse: the polar angle of @p q about the centre.
@@ -483,6 +581,8 @@ struct CircleArcParam {
 /// A rotated, axis-scaled elliptical arc; nearest foot via Newton.
 struct EllipseArcParam {
     static constexpr int edim = 2, idim = 1;
+    /// Angular period (cf. CircleArcParam::period).
+    static constexpr real period = static_cast<real>(2.0 * std::numbers::pi);
     PtN<2> c;   ///< Centre.
     real a, b;  ///< Semi-axis lengths along the rotated x/y axes.
     real phi;   ///< Rotation of the major axis from +x.
@@ -1337,6 +1437,7 @@ static_assert(GeometryEntity<Free<3>> && GeometryEntity<TrimmedEntity<PlaneParam
 static_assert(Parametrization<LineParam> && Parametrization<CircleArcParam> &&
               Parametrization<EllipseArcParam> && Parametrization<QuadBezierParam> &&
               Parametrization<CubicBezierParam> && Parametrization<BSplineCurveParam>);
+static_assert(GeometryEntity<LineRail> && GeometryEntity<LineRail3>);
 static_assert(GeometryEntity<Free<2>> && GeometryEntity<LineSeg> && GeometryEntity<Circle> &&
               GeometryEntity<Ellipse> && GeometryEntity<TrimmedEntity<LineParam>> &&
               GeometryEntity<TrimmedEntity<CircleArcParam>> &&
@@ -1371,6 +1472,14 @@ template <> struct decode_entity_fn<Free<2>> {
 template <> struct decode_entity_fn<LineSeg> {
     [[nodiscard]] static LineSeg apply(const real* p, const real*)
     { return LineSeg {.sx = p[0], .sy = p[1], .ex = p[2], .ey = p[3]}; }
+};
+template <> struct decode_entity_fn<LineRail> {
+    [[nodiscard]] static LineRail apply(const real* p, const real*)
+    { return LineRail {.sx = p[0], .sy = p[1], .ex = p[2], .ey = p[3]}; }
+};
+template <> struct decode_entity_fn<LineRail3> {
+    [[nodiscard]] static LineRail3 apply(const real* p, const real*)
+    { return LineRail3 {.sx = p[0], .sy = p[1], .sz = p[2], .ex = p[3], .ey = p[4], .ez = p[5]}; }
 };
 template <> struct decode_entity_fn<Circle> {
     [[nodiscard]] static Circle apply(const real* p, const real*)
@@ -1592,6 +1701,8 @@ static_assert(to_int(EntityTag::CubicBezier) == TAG_CUBICBEZIER);
 static_assert(to_int(EntityTag::BSpline) == TAG_BSPLINE);
 static_assert(to_int(EntityTag::Composite) == TAG_COMPOSITE);
 static_assert(to_int(EntityTag::Cylinder) == TAG_CYLINDER);
+static_assert(to_int(EntityTag::LineRail) == TAG_LINERAIL);
+static_assert(to_int(EntityTag::LineRail3) == TAG_LINERAIL3);
 static_assert(to_int(EntityTag::Line3) == TAG_LINE3);
 static_assert(to_int(EntityTag::BSplineSurface) == TAG_BSPLINESURF);
 
@@ -1674,6 +1785,78 @@ template <> struct EntitySoA<LineSeg> {
         r[SY] = e.sy;
         r[EX] = e.ex;
         r[EY] = e.ey;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
+    { return View {.records = soa}; }
+};
+
+/// SoA schema for @ref LineRail — packed `(sx, sy, ex, ey)` records.
+template <> struct EntitySoA<LineRail> {
+    static constexpr EntityTag tag = EntityTag::LineRail;
+    static constexpr int kFields = 4;
+    static constexpr int kSeg = 0;
+    static constexpr int SX = 0, SY = 1, EX = 2, EY = 3;
+    struct Host {
+        std::vector<real> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<real>> seg;
+    };
+    struct View {
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
+    };
+    [[nodiscard]] static LineRail load(const View& v, std::size_t i)
+    {
+        return LineRail {.sx = v.records[i, SX],
+                         .sy = v.records[i, SY],
+                         .ex = v.records[i, EX],
+                         .ey = v.records[i, EY]};
+    }
+    static void load_into(Host& h, std::size_t i, const LineRail& e)
+    {
+        real* r = h.records.data() + i * kFields;
+        r[SX] = e.sx;
+        r[SY] = e.sy;
+        r[EX] = e.ex;
+        r[EY] = e.ey;
+    }
+    [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
+    { return View {.records = soa}; }
+};
+
+/// SoA schema for @ref LineRail3 — packed `(sx, sy, sz, ex, ey, ez)` records.
+template <> struct EntitySoA<LineRail3> {
+    static constexpr EntityTag tag = EntityTag::LineRail3;
+    static constexpr int kFields = 6;
+    static constexpr int kSeg = 0;
+    static constexpr int SX = 0, SY = 1, SZ = 2, EX = 3, EY = 4, EZ = 5;
+    struct Host {
+        std::vector<real> records;
+        std::size_t count = 0;
+        std::vector<SegmentedHost<real>> seg;
+    };
+    struct View {
+        SoAView<const real> records {nullptr, 0, kFields};
+        SegmentedView<real> seg[kMaxSoASeg] {};
+    };
+    [[nodiscard]] static LineRail3 load(const View& v, std::size_t i)
+    {
+        return LineRail3 {.sx = v.records[i, SX],
+                          .sy = v.records[i, SY],
+                          .sz = v.records[i, SZ],
+                          .ex = v.records[i, EX],
+                          .ey = v.records[i, EY],
+                          .ez = v.records[i, EZ]};
+    }
+    static void load_into(Host& h, std::size_t i, const LineRail3& e)
+    {
+        real* r = h.records.data() + i * kFields;
+        r[SX] = e.sx;
+        r[SY] = e.sy;
+        r[SZ] = e.sz;
+        r[EX] = e.ex;
+        r[EY] = e.ey;
+        r[EZ] = e.ez;
     }
     [[nodiscard]] static View tie_view(SoAView<const real> soa, const SegmentedView<real>*)
     { return View {.records = soa}; }
@@ -2320,6 +2503,7 @@ static_assert(HasEntitySoA<TrimmedEntity<SphereParam>>);
 static_assert(HasEntitySoA<TrimmedEntity<CylinderParam>>);
 static_assert(HasEntitySoA<TrimmedEntity<Line3Param>>);
 static_assert(HasEntitySoA<TrimmedEntity<BSplineSurfaceParam>>);
+static_assert(HasEntitySoA<LineRail> && HasEntitySoA<LineRail3>);
 
 /// Host-side tag -> concrete entity TYPE dispatch for the 2D entity set.
 ///
@@ -2338,14 +2522,14 @@ static_assert(HasEntitySoA<TrimmedEntity<BSplineSurfaceParam>>);
 /// @param f The type-consuming callable.
 template <int D = kDefaultDim, class F>
     requires((D == 2) && EntityDispatchFn<F, Free<2>> && EntityDispatchFn<F, LineSeg> &&
-             EntityDispatchFn<F, Circle> && EntityDispatchFn<F, Ellipse> &&
-             EntityDispatchFn<F, TrimmedEntity<CircleArcParam>> &&
+             EntityDispatchFn<F, LineRail> && EntityDispatchFn<F, Circle> &&
+             EntityDispatchFn<F, Ellipse> && EntityDispatchFn<F, TrimmedEntity<CircleArcParam>> &&
              EntityDispatchFn<F, TrimmedEntity<EllipseArcParam>> &&
              EntityDispatchFn<F, TrimmedEntity<QuadBezierParam>> &&
              EntityDispatchFn<F, TrimmedEntity<CubicBezierParam>> &&
              EntityDispatchFn<F, TrimmedEntity<BSplineCurveParam>> &&
              EntityDispatchFn<F, CompositePath>) ||
-            ((D == 3) && EntityDispatchFn<F, Free<3>> &&
+            ((D == 3) && EntityDispatchFn<F, Free<3>> && EntityDispatchFn<F, LineRail3> &&
              EntityDispatchFn<F, TrimmedEntity<PlaneParam>> &&
              EntityDispatchFn<F, TrimmedEntity<SphereParam>> &&
              EntityDispatchFn<F, TrimmedEntity<CylinderParam>> &&
@@ -2356,6 +2540,7 @@ inline void dispatch_entity_type(EntityTag tag, F f)
     if constexpr (D == 2) {
         switch (tag) {
         case EntityTag::LineSeg: f.template operator()<LineSeg>(); break;
+        case EntityTag::LineRail: f.template operator()<LineRail>(); break;
         case EntityTag::Circle: f.template operator()<Circle>(); break;
         case EntityTag::Ellipse: f.template operator()<Ellipse>(); break;
         case EntityTag::CircleArc: f.template operator()<TrimmedEntity<CircleArcParam>>(); break;
@@ -2371,6 +2556,7 @@ inline void dispatch_entity_type(EntityTag tag, F f)
         case EntityTag::Plane:
         case EntityTag::Cylinder:
         case EntityTag::Line3:
+        case EntityTag::LineRail3:
         case EntityTag::BSplineSurface:
         default: f.template operator()<Free<2>>(); break;
         }
@@ -2380,6 +2566,7 @@ inline void dispatch_entity_type(EntityTag tag, F f)
         case EntityTag::Sphere: f.template operator()<TrimmedEntity<SphereParam>>(); break;
         case EntityTag::Cylinder: f.template operator()<TrimmedEntity<CylinderParam>>(); break;
         case EntityTag::Line3: f.template operator()<TrimmedEntity<Line3Param>>(); break;
+        case EntityTag::LineRail3: f.template operator()<LineRail3>(); break;
         case EntityTag::BSplineSurface:
             f.template operator()<TrimmedEntity<BSplineSurfaceParam>>();
             break;

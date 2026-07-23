@@ -19,37 +19,34 @@ dependencies = [
   "pytest>=9.0.3",
   "pyvista>=0.48.4",
   "scipy>=1.17.1",
-]
-
-[project.optional-dependencies]
-# The web UI ships in the wheel: `pip install egg[webui]` pulls its runtime
-# deps. basedpyright provides the editor's language server (completions,
-# diagnostics, hover); the UI degrades gracefully if it is absent.
-webui = [
-  "python-fasthtml>=0.12",
-  "basedpyright>=1.29",
+  # Docs toolchain is a core dependency so `help -> documentation` in the app
+  # always has something to build/serve (it also needs the doxygen binary,
+  # which is not a Python package). Build with:
+  #   uv run sphinx-build -b html docs docs/_build/html
+  "sphinx>=8.2",
+  "pallets-sphinx-themes>=2.3",
+  "breathe>=4.36",
 ]
 
 [project.scripts]
 # serves the web UI (egg/webui/); works from a checkout or an installed wheel
 egg-webui = "egg._webui_launcher:main"
+# runs the same web UI in a native (pywebview) window
+egg-desktop = "egg._desktop:main"
 
 [dependency-groups]
-# Web UI: `uv sync --group webui` once, then `uv run --no-sync egg-webui`
-# (mirrors the [project.optional-dependencies] webui extra above).
-webui = [
+# Web UI and native desktop app (egg-webui / egg-desktop): `uv sync --group ui`.
+# The FastHTML server, basedpyright for the editor's language server
+# (completions, diagnostics, hover; the editor degrades gracefully without it),
+# and pywebview plus a Qt GUI backend for the native window.
+ui = [
   "python-fasthtml>=0.12",
   "basedpyright>=1.29",
+  "pywebview[qt]>=5.4",
 ]
 # CAD import adapter (egg.io.cad): `uv sync --group cad`
 cad = [
   "build123d>=0.7",
-]
-# Docs build: `uv run --group docs sphinx-build -b html docs docs/_build/html`
-docs = [
-  "sphinx>=8.2",
-  "pallets-sphinx-themes>=2.3",
-  "breathe>=4.36",
 ]
 
 [tool.scikit-build]
@@ -111,3 +108,27 @@ build.targets = []                  # [] = build the default (all) target, not j
 # C++ formatting/linting: .clang-format / .clang-tidy.
 [tool.ruff]
 line-length = 88
+
+[tool.ruff.lint]
+# Start narrow: require return-type annotations (the largest annotation gap).
+# Argument-type rules (ANN001/002/003) are added once the modules are annotated.
+extend-select = ["ANN201", "ANN205", "ANN206"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+
+[tool.basedpyright]
+pythonVersion = "3.13"
+include = ["egg"]
+exclude = ["**/__pycache__", "build", "egg/webui/static"]
+# "standard" catches the errors this effort targets (wrong config values, bad
+# call args, return-type mismatches) without flooding on the not-yet-annotated
+# legacy code. The four "unknown/missing type" reports below are silenced until
+# each directory is annotated; they get re-enabled per directory, then removed
+# once the whole package type-checks strict.
+typeCheckingMode = "standard"
+reportMissingParameterType = false
+reportUnknownParameterType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportMissingTypeStubs = false

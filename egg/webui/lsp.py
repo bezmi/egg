@@ -144,6 +144,7 @@ class LspProcess:
         data = _frame(msg)
         with self._wlock:
             try:
+                assert self.proc.stdin is not None  # opened with stdin=PIPE
                 self.proc.stdin.write(data)
                 self.proc.stdin.flush()
             except (BrokenPipeError, ValueError, OSError):
@@ -152,6 +153,7 @@ class LspProcess:
     def close(self) -> None:
         with self._wlock:
             try:
+                assert self.proc.stdin is not None  # opened with stdin=PIPE
                 self.proc.stdin.close()
             except Exception:
                 pass

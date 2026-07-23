@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from egg.errors import EggValidationError
 from egg.smoothing.control_topology import (
     _corner_mindet,
     build_control_topology,
@@ -35,7 +36,7 @@ from egg.smoothing.control_topology import (
 __all__ = ["fit_control_net", "ControlFitError"]
 
 
-class ControlFitError(ValueError):
+class ControlFitError(EggValidationError):
     """No fitted net keeps the evaluated grid valid.
 
     The grid itself stays valid and usable; there is simply no net to store.

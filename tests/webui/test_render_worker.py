@@ -106,6 +106,22 @@ def test_su2_export_runs_in_the_worker(worker):
     assert text is None and "no grid" in why
 
 
+def test_lmr_export_runs_in_the_worker(worker, tmp_path):
+    out = str(tmp_path / "lmrgrid")
+    payload, why = worker.lmr(GRID_SCRIPT, out).result(timeout=120)
+    assert why == "" and payload is not None
+    import os
+
+    names = os.listdir(out)
+    assert "grid.lua" in names
+    assert any(n.startswith("block-") for n in names)
+    assert isinstance(payload["written"], list) and payload["written"]
+    assert isinstance(payload["untagged"], list)  # marker groups (may be empty)
+    # failure comes back as a reason, not an exception
+    payload, why = worker.lmr("x = 1", str(tmp_path / "empty")).result(timeout=60)
+    assert payload is None and "no grid" in why
+
+
 def test_validate_blocking_runs_in_the_worker(worker):
     code = (
         "from egg.topology import ExplicitTopology, editable\n"
@@ -126,12 +142,14 @@ def test_validate_blocking_runs_in_the_worker(worker):
         ],
         "res": 3,
     }
-    assert worker.validate(code, good).result(timeout=120) == []  # green
+    green = worker.validate(code, good).result(timeout=120)
+    assert green["diagnostics"] == []
+    assert green["edge_res"]  # loop-propagated per-edge resolutions ride along
     bad = {
         "nodes": {"a": {"xy": [0, 0]}, "b": {"xy": [1, 0]}, "c": {"xy": [0.5, 1]}},
         "edges": [{"a": "a", "b": "b"}, {"a": "b", "b": "c"}, {"a": "c", "b": "a"}],
     }
-    red = worker.validate(code, bad).result(timeout=60)
+    red = worker.validate(code, bad).result(timeout=60)["diagnostics"]
     assert red and red[0]["kind"] in ("non_quad_face", "no_blocks")
 
 

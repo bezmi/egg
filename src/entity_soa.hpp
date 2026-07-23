@@ -50,6 +50,8 @@ enum class EntityTag : int {
     Cylinder = 12,        ///< 3D surface.
     Line3 = 13,           ///< 3D edge curve.
     BSplineSurface = 14,  ///< 3D tensor-product B-spline/NURBS surface.
+    LineRail = 15,        ///< 2D open-ended segment: releases beyond its ends.
+    LineRail3 = 16,       ///< 3D open-ended segment: releases beyond its ends.
 };
 
 /// Frozen integer value of @p t (wire / Python / golden boundary).

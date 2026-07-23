@@ -88,7 +88,7 @@ def grid_adjacency(grid):
         u = d / L[:, None]
         # three ways to split four dirs into two pairs; pick the one whose
         # paired dirs are most anti-parallel (sum of within-pair dots minimal).
-        best, best_score = None, np.inf
+        best, best_score = (0, 1, 2, 3), np.inf
         for p, q, r, t in ((0, 1, 2, 3), (0, 2, 1, 3), (0, 3, 1, 2)):
             score = float(u[p] @ u[q] + u[r] @ u[t])
             if score < best_score:
@@ -368,6 +368,10 @@ def highorder_smooth(
         # heavy-ball: try the momentum-augmented direction first, fall back to
         # plain steepest descent (resetting the velocity) if it is rejected.
         accepted = False
+        # Seed the trial state so it is always bound; the line search overwrites
+        # it before any accepted step is used.
+        Xt = X
+        Et, gt, mdt = E, g, md
         for direction, keep in ((steep + momentum * move_prev, True), (steep, False)):
             alpha = 1.0
             while alpha > 1e-4:

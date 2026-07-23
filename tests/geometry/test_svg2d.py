@@ -42,8 +42,13 @@ def _segments(entity):
     return entity.segments if isinstance(entity, CompositePath) else [entity]
 
 
-def _assert_on(entity, points, tol=1e-9):
-    """Every point projects onto the entity at ~zero distance."""
+def _assert_on(entity, points, tol=1e-8):
+    """Every point projects onto the entity at ~zero distance.
+
+    The tolerance is the C++ seeded-Newton projection's finishing precision
+    (fixed seed/iteration counts, shared with the sweep kernels) — still
+    orders below any curve-approximation error the tests guard against.
+    """
     for p in points:
         assert np.linalg.norm(entity.project(np.asarray(p, float)) - p) < tol, p
 

@@ -51,12 +51,11 @@ def tfi_fill_interior(block: Block) -> None:
                     sl[a] = e
                 sub = nodes[tuple(sl)]  # view: k facet axes + coords
                 core = tuple(slice(1, -1) for _ in range(k))
-                if k < d:
-                    nan_nodes = np.isnan(sub[core]).any(axis=-1)
-                    if not nan_nodes.any():
-                        continue
+                nan_nodes = np.isnan(sub[core]).any(axis=-1) if k < d else None
+                if nan_nodes is not None and not nan_nodes.any():
+                    continue
                 filled = _boolean_sum(sub)
-                if k < d:
+                if nan_nodes is not None:
                     m = np.zeros(sub.shape[:-1], dtype=bool)
                     m[core] = nan_nodes
                     sub[m] = filled[m]
