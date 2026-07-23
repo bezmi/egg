@@ -30,6 +30,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -148,6 +149,29 @@ def _theme_qt_tooltips() -> None:
             + "\nQToolTip { background: #181825; color: #cdd6f4; "
             "border: 1px solid #45475a; }"
         )
+    except Exception:
+        pass
+
+
+def _reveal_when_ready(window: Any) -> None:
+    """Reveal the window once its page has loaded, so the user never sees a
+    blank *white* screen while the app boots.
+
+    The window is created hidden. QtWebEngine paints its own default white
+    background until the page's first frame composites (the "Compositor
+    returned null texture" stall on some GPU/Wayland setups can stretch that
+    to seconds), and the dark theme is only applied once the page's <head>
+    script runs. Waiting for ``loaded`` (QWebEnginePage.loadFinished) means we
+    reveal an already-rendered, already-dark shell instead. The wait has a
+    timeout so a missed ``loaded`` can never leave the window hidden forever;
+    ``show()`` is thread-safe (it emits a Qt signal onto the GUI thread).
+    """
+    try:
+        window.events.loaded.wait(10)
+    except Exception:
+        pass
+    try:
+        window.show()
     except Exception:
         pass
 
@@ -274,6 +298,9 @@ def main() -> None:
             min_size=(800, 500),
             resizable=True,
             frameless=True,
+            # Start hidden and reveal on `loaded` (see _reveal_when_ready) so the
+            # QtWebEngine default-white pre-paint blank never shows.
+            hidden=True,
             # Disable pywebview's whole-window / absolute-move dragging; the
             # titlebar spacer starts a compositor move via start_drag instead
             # (works on Wayland), so buttons and the editor keep their clicks.
@@ -287,6 +314,11 @@ def main() -> None:
             controls.window.events.closed += lambda: _terminate_group(proc)
         except Exception:
             pass
+        # Reveal the window once its page has loaded (it is created hidden), so
+        # the boot never flashes a blank white QtWebEngine surface.
+        threading.Thread(
+            target=_reveal_when_ready, args=(controls.window,), daemon=True
+        ).start()
         # Blocks on the GUI event loop until the window is closed. The startup
         # hook recolors Qt's native tooltip (a garish yellow by default on some
         # Linux setups). Remote content is already blocked by the page CSP
