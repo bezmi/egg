@@ -29,11 +29,21 @@ extensions = [
     "pallets_sphinx_themes",
 ]
 
-# C++ core docs: Doxygen (XML only, see docs/Doxyfile) -> Breathe. Run
-# doxygen up front so a plain sphinx-build always sees fresh XML.
+# C++ core docs: Doxygen (XML only, see docs/Doxyfile) -> Breathe. Doxygen
+# re-parses the whole C++ core on every run, which dominates the build time, so
+# only regenerate when a source (or the Doxyfile) is newer than the last XML,
+# or none exists yet. This keeps the per-launch docs refresh that egg-webui /
+# egg-desktop run from a checkout cheap when the C++ has not changed; delete
+# docs/_doxygen to force a full rebuild.
 _docs_dir = Path(__file__).resolve().parent
-subprocess.run(["doxygen", "Doxyfile"], cwd=_docs_dir, check=True)
-breathe_projects = {"egg": str(_docs_dir / "_doxygen" / "xml")}
+_doxygen_xml = _docs_dir / "_doxygen" / "xml"
+_xml_index = _doxygen_xml / "index.xml"
+_src_dir = _docs_dir.parent / "src"
+_src_files = [*_src_dir.rglob("*.hpp"), *_src_dir.rglob("*.cpp"), _docs_dir / "Doxyfile"]
+_newest_src = max((p.stat().st_mtime for p in _src_files if p.exists()), default=0.0)
+if not _xml_index.exists() or _newest_src > _xml_index.stat().st_mtime:
+    subprocess.run(["doxygen", "Doxyfile"], cwd=_docs_dir, check=True)
+breathe_projects = {"egg": str(_doxygen_xml)}
 breathe_default_project = "egg"
 breathe_default_members = ("members",)
 breathe_show_include = False
