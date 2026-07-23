@@ -47,9 +47,12 @@ The command-line surface lives in ``driver.py``; run
 
 import math
 
+from egg.enums import OrthoMode, TmopMetric
 from egg.pipeline import (
     ControlPointSmoother,
     FasSmoother,
+    InterfaceC2,
+    InterfaceOrtho,
     JacobiSmoother,
     Presmooth,
     Pin,
@@ -101,15 +104,13 @@ def build_phoebus(grid_level: int = 1, n_fixed: int = 1):
             ]
         ),
         arc_length=True,
-        name="wall",
-    )
+    ).named("wall")
     inflow = Edge(
         Bezier(points=[G, Vector3(x=G.x, y=B.y), Vector3(x=B.x, y=0.8 * F.y), F]),
         arc_length=True,
-        name="inflow",
-    )
-    symm = Edge(Line(p0=G, p1=A), name="symm")  # south: symmetry axis
-    outflow = Edge(Line(p0=F, p1=E), name="outflow")  # north: outflow boundary
+    ).named("inflow")
+    symm = Edge(Line(p0=G, p1=A)).named("symm")  # south: symmetry axis
+    outflow = Edge(Line(p0=F, p1=E)).named("outflow")  # north: outflow boundary
 
     # -- 2x4 block array (nib x njb of registerFluidGridArray) ----------------
     n_refine = 2 ** (grid_level / 2)
@@ -133,8 +134,7 @@ def build_phoebus(grid_level: int = 1, n_fixed: int = 1):
     # lets the clustering target follow it with sheared cells instead of
     # trading away the near-wall layer heights.
     bld.relax_orthogonality(outflow)
-    bld.set_boundary_layer(
-        wall,
+    wall.clustered(
         first_height=H_WALL,
         growth=BL_GROWTH,
         n_fixed=n_fixed,
@@ -150,22 +150,37 @@ def _smoother(a, *, metric, cluster, c2, ortho):
     The interface C2 / orthogonality terms are node-mode, so they attach to the
     nodal smoothers; the control-point smoother has its own seam dials.
     """
-    common = dict(
-        chunk=a["chunk"],
-        omega=a["omega"],
-        metric=metric,
-        cluster_boundary_layers=cluster,
-    )
     s = a["smoother"]
     if s == "control_point":
         return [
-            Presmooth(JacobiSmoother(sweeps=100, **dict(common, chunk=100))),
-            ControlPointSmoother(**common),
+            Presmooth(
+                JacobiSmoother(
+                    sweeps=100,
+                    chunk=100,
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=cluster,
+                )
+            ),
+            ControlPointSmoother(
+                chunk=a["chunk"],
+                omega=a["omega"],
+                metric=metric,
+                cluster_boundary_layers=cluster,
+            ),
         ]
-    node = dict(
-        sweeps=a["tmop_sweeps"], interface_c2=c2, interface_ortho=ortho, **common
-    )
-    return [FasSmoother(**node) if s == "fas" else JacobiSmoother(**node)]
+    smoother_cls = FasSmoother if s == "fas" else JacobiSmoother
+    return [
+        smoother_cls(
+            sweeps=a["tmop_sweeps"],
+            chunk=a["chunk"],
+            omega=a["omega"],
+            metric=metric,
+            cluster_boundary_layers=cluster,
+            interface_c2=c2,
+            interface_ortho=ortho,
+        )
+    ]
 
 
 def setup(a, *, direct=True):
@@ -180,24 +195,24 @@ def setup(a, *, direct=True):
     # pipeline builds the clustering target from the set_boundary_layer specs.
     pin = a["pin_layers"] > 0
     grid = topo.initialize_grid()
-    metric = a.get("metric", "shape")
+    metric = TmopMetric(a.get("metric", "shape"))
     # Optional block-interface C2 curvature term (interface_only: de-kink the
     # block seams without disturbing the clustered near-wall cells).
     c2w, c2s = a.get("c2_weight", 0.0), a.get("c2_singularity", 0.0)
     c2 = (
-        {"weight": c2w, "interface_only": True, "singularity_weight": c2s}
+        InterfaceC2(weight=c2w, interface_only=True, singularity_weight=c2s)
         if (c2w > 0.0 or c2s > 0.0)
         else None
     )
     # Optional block-interface orthogonality term (cross-seam edge ⊥ seam);
     # composes with the C2 term.
     ortho = (
-        {
-            "mode": "normal",
-            "weight": a["ortho_weight"],
-            "n_layers": a.get("ortho_layers", 3),
-            "cluster_relax": a.get("ortho_relax", 1.0),
-        }
+        InterfaceOrtho(
+            mode=OrthoMode.NORMAL,
+            weight=a["ortho_weight"],
+            n_layers=a.get("ortho_layers", 3),
+            cluster_relax=a.get("ortho_relax", 1.0),
+        )
         if a.get("ortho_weight", 0.0) > 0.0
         else None
     )

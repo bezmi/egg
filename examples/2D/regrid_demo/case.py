@@ -77,8 +77,7 @@ def build_case(n: int = 1):
 
     b = TopologyBuilder(d=2)
     b.add_block("ring", sw=i0, se=o0, nw=i1, ne=o1, res=(8 * n, 16 * n))
-    b.associate("ring", 0, 0, inner)
-    b.associate("ring", 0, 1, outer)
+    b["ring"].west.on(inner).east.on(outer)
     return b.build()
 
 

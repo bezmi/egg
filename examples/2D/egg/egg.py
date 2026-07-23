@@ -42,6 +42,7 @@ import os
 import numpy as np
 
 from egg.geometry import Edge, Line, Spline, Vector3
+from egg.enums import TmopMetric
 from egg.pipeline import (
     JacobiSmoother,
     Pin,
@@ -81,7 +82,7 @@ def build_egg_in_rectangle(
         Vector3(2.0 + (0.66 - 0.15 * np.sin(t)) * np.cos(t), 2.0 + 0.85 * np.sin(t))
         for t in theta
     ]
-    egg = Edge(Spline(ring, closed=True), name="egg")
+    egg = Edge(Spline(ring, closed=True)).named("egg")
 
     # Domain walls and the sliding nodes that split them. Naming each curve
     # auto-derives its SU2 marker on every associated face. The top and bottom
@@ -89,10 +90,10 @@ def build_egg_in_rectangle(
     # export under one shared 'wall' marker — no per-face tag_boundary needed.
     sw, se = Vector3(0, 0, fixed=True), Vector3(4, 0, fixed=True)
     ne, nw = Vector3(4, 4, fixed=True), Vector3(0, 4, fixed=True)
-    bottom = Edge(Line(p0=sw, p1=se), name="wall_bottom", tag="wall")
-    right = Edge(Line(p0=se, p1=ne), name="outflow")
-    top = Edge(Line(p0=ne, p1=nw), name="wall_top", tag="wall")
-    left = Edge(Line(p0=sw, p1=nw), name="inflow")
+    bottom = Edge(Line(p0=sw, p1=se)).named("wall_bottom", tag="wall")
+    right = Edge(Line(p0=se, p1=ne)).named("outflow")
+    top = Edge(Line(p0=ne, p1=nw)).named("wall_top", tag="wall")
+    left = Edge(Line(p0=sw, p1=nw)).named("inflow")
     bsw, bse = bottom.place_node(0.25), bottom.place_node(0.75)
     rse, rne = right.place_node(0.25), right.place_node(0.75)
     tne, tnw = top.place_node(0.25), top.place_node(0.75)
@@ -134,16 +135,15 @@ def build_egg_in_rectangle(
         ("c_ne", right, top, ne, rne, tne, mne),
         ("c_nw", top, left, nw, tnw, lnw, mnw),
     ]:
-        b.add_block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=_res(10, 10))
-        b.associate(nm, 0, 0, w0)
-        b.associate(nm, 1, 0, w1)
+        blk = b.block(nm, sw=c_sw, nw=c_nw, se=c_se, ne=c_ne, res=_res(10, 10))
+        blk.west.on(w0)
+        blk.south.on(w1)
 
     if bl_first_height > 0.0:
         # Wall-normal clustering on the egg surface; the egg is a closed
         # interior wall, so no domain boundary meets it obliquely and
         # relax_orthogonality stays empty.
-        b.set_boundary_layer(
-            egg,
+        egg.clustered(
             first_height=bl_first_height,
             growth=bl_growth,
             n_fixed=n_fixed,
@@ -174,7 +174,7 @@ def pipeline():
     return [
         Untangle(),
         JacobiSmoother(
-            sweeps=200, chunk=50, metric="shape_size", bl_blend_neighbours=False
+            sweeps=200, chunk=50, metric=TmopMetric.SHAPE_SIZE, bl_blend_neighbours=False
         ),
         Pin(JacobiSmoother(sweeps=100, chunk=50)),
         Refit(),

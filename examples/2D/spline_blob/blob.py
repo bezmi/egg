@@ -110,16 +110,14 @@ def build_blob_in_rectangle():
     # the blob (rough corners) and the corner-block faces (corners shared by
     # two walls) stay explicit. Every associated face inherits its entity's
     # name as its boundary marker — no separate tag_boundary calls.
-    for blk in ("o_s", "o_e", "o_n", "o_w"):
-        b.associate(blk, 1, 1, blob)
+    b.associate(blob, north=["o_s", "o_e", "o_n", "o_w"])
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_se", bottom, right),
         ("c_ne", right, top),
         ("c_nw", top, left),
     ]:
-        b.associate(blk, 0, 0, a0)
-        b.associate(blk, 1, 0, a1)
+        b[blk].west.on(a0).south.on(a1)
 
     topology = b.build()
     return topology, topology.entities

@@ -47,6 +47,7 @@ pipeline's ``cluster_boundary_layers`` then builds the target.
 import numpy as np
 
 from egg.geometry import Line, Spline, Vector3
+from egg.enums import TmopMetric
 from egg.pipeline import (
     ControlPointSmoother,
     FasSmoother,
@@ -238,22 +239,49 @@ if __name__ == "__egg_webui__":  # this example runs ONLY in the egg web UI
         # The egg's carried .clustered() request populates the topology's
         # boundary_layer_specs, so cluster_boundary_layers builds the target and
         # the pin phase freezes the near-wall layers.
-        common = dict(
-            chunk=a["chunk"],
-            omega=a["omega"],
-            metric=a["metric"],
-            cluster_boundary_layers=a["cluster_boundary_layers"],
-            bl_blend_neighbours=a["bl_blend_neighbours"],
-        )
+        metric = TmopMetric(a["metric"])
         if a["smoother"] == "fas":
-            smoothing = [FasSmoother(sweeps=a["tmop_sweeps"], **common)]
+            smoothing = [
+                FasSmoother(
+                    sweeps=a["tmop_sweeps"],
+                    chunk=a["chunk"],
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=a["cluster_boundary_layers"],
+                    bl_blend_neighbours=a["bl_blend_neighbours"],
+                )
+            ]
         elif a["smoother"] == "control_point":
             smoothing = [
-                Presmooth(JacobiSmoother(sweeps=100, **dict(common, chunk=100))),
-                ControlPointSmoother(**common),
+                Presmooth(
+                    JacobiSmoother(
+                        sweeps=100,
+                        chunk=100,
+                        omega=a["omega"],
+                        metric=metric,
+                        cluster_boundary_layers=a["cluster_boundary_layers"],
+                        bl_blend_neighbours=a["bl_blend_neighbours"],
+                    )
+                ),
+                ControlPointSmoother(
+                    chunk=a["chunk"],
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=a["cluster_boundary_layers"],
+                    bl_blend_neighbours=a["bl_blend_neighbours"],
+                ),
             ]
         else:
-            smoothing = [JacobiSmoother(sweeps=a["tmop_sweeps"], **common)]
+            smoothing = [
+                JacobiSmoother(
+                    sweeps=a["tmop_sweeps"],
+                    chunk=a["chunk"],
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=a["cluster_boundary_layers"],
+                    bl_blend_neighbours=a["bl_blend_neighbours"],
+                )
+            ]
         stages = [Untangle(sweeps_per_delta=a["sweeps_per_delta"]), *smoothing]
         if a["pin_sweeps"] > 0:
             stages.append(

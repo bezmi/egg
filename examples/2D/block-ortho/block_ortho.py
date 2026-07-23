@@ -62,7 +62,7 @@ def pgram_grid(res=(10, 10), shear=1.0):
         b.add_corner(n, p, fixed=True)
     b.add_block("L", ("A", "D", "B", "C"), res)
     b.add_block("R", ("B", "C", "E", "F"), res)
-    b.connect("L", 0, 1, "R", 0, 0)
+    b["L"].east.join(b["R"].west)
     return b.build().initialize_grid()
 
 

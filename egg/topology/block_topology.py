@@ -17,6 +17,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 from itertools import product
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -204,7 +205,7 @@ class BlockTopology:
         associations: list[Association],
         boundary_layer_specs: dict | None = None,
         boundary_tags: dict[str, list[FaceSpec]] | None = None,
-        relax_orthogonality: tuple = (),
+        relax_orthogonality: Sequence = (),
         fan_frames: tuple = (),
         parallel_chains: tuple = (),
     ):

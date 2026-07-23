@@ -309,8 +309,9 @@ class CompositePath(GeometryEntity):
     t0: float = 0.0
     t1: float = 1.0
     closed: bool = False
-    # Construction provenance retained by frontend2d.Spline/Polyline.
-    points: list[Vector3] | None = None
+    # Construction provenance retained by frontend2d.Spline/Polyline; empty for
+    # a composite built directly from segments (no point-based constructor).
+    points: list[Vector3]
 
     def __init__(self, segments):
         segments = list(segments)
@@ -319,6 +320,7 @@ class CompositePath(GeometryEntity):
         if any(isinstance(s, CompositePath) for s in segments):
             raise ValueError("nested CompositePath segments are not supported")
         self.segments = segments
+        self.points = []
         self._breaks = None  # cumulative arc-length fractions, computed lazily
 
     @property

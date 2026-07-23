@@ -51,7 +51,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from itertools import product
 
 import numpy as np
@@ -68,11 +67,6 @@ from egg.pipeline import (
     generate_steps,
 )
 from egg.topology.builder import TopologyBuilder
-
-# the shared sphere3d driver supplies the plot panes (GridPlots, edge helpers).
-sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sphere3d")
-)
 
 # sign of (e_i x e_j) . e_k for the two axes other than k, in ascending order.
 _SIGN_IJ = {0: 1, 1: -1, 2: 1}
@@ -141,15 +135,15 @@ def sphere_in_cube_cad(n=9, m=4, n_h=3, r0=0.5, cw=0.7):
                 d[_k], d[_a1], d[_a2] = _s, t1, t2
                 return "L_%d%d%d" % (inset(d[0]), inset(d[1]), inset(d[2]))
 
-            corners = [
+            corners = tuple(
                 (sph if i0 == 0 else ins)(signs[i1], signs[i2])
                 for i0 in (0, 1)
                 for i1 in (0, 1)
                 for i2 in (0, 1)
-            ]
+            )
             name = "O_%d%+d" % (k, s)
             tb.add_block(name, corners=corners, resolutions=(c_rad, c_tan, c_tan))
-            tb.associate(name, 0, 0, sphere)  # inner face on the imported sphere
+            tb.associate(name, "west", sphere)  # inner face on the imported sphere
 
     # 26 H-grid blocks: the 3x3x3 boxes of [-1,1]^3 minus the O-shell centre box.
     def rc(b):  # middle segment reuses the O-shell tangential count; else thin
@@ -159,12 +153,12 @@ def sphere_in_cube_cad(n=9, m=4, n_h=3, r0=0.5, cw=0.7):
         if (bi, bj, bk) == (1, 1, 1):
             continue
         box = (bi, bj, bk)
-        corners = [
+        corners = tuple(
             "L_%d%d%d" % (bi + da, bj + db, bk + dc)
             for da in (0, 1)
             for db in (0, 1)
             for dc in (0, 1)
-        ]
+        )
         name = "H_%d%d%d" % (bi, bj, bk)
         tb.add_block(name, corners=corners, resolutions=(rc(bi), rc(bj), rc(bk)))
         for axis in range(3):
@@ -197,7 +191,7 @@ def _sphere_mask(grid):
 
 
 def main(argv=None):
-    from driver import (  # noqa: E402  (path-injected sphere3d/driver.py)
+    from driver import (  # local sibling module
         _plot_energy,
         grid_edges,
         plot_topology,

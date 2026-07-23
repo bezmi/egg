@@ -95,12 +95,12 @@ def cubed_sphere(n_rad: int, n_tan: int, r0: float = 0.5, cw: float = 1.0):
             )
             name = "blk_%d%+d" % (k, s)
             tb.add_block(name, corners=corners, resolutions=(n_rad, n_tan, n_tan))
-            tb.associate(name, 0, 0, Sphere((0, 0, 0), r0, (1, 0, 0), (0, 1, 0)))
+            tb.associate(name, "west", Sphere((0, 0, 0), r0, (1, 0, 0), (0, 1, 0)))
             o = [0.0, 0.0, 0.0]
             o[k] = s * cw
             axa = [1.0 if m == a1 else 0.0 for m in (0, 1, 2)]
             axb = [1.0 if m == a2 else 0.0 for m in (0, 1, 2)]
-            tb.associate(name, 0, 1, Plane(o, axa, axb))
+            tb.associate(name, "east", Plane(o, axa, axb))
     return tb
 
 

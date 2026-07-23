@@ -26,6 +26,10 @@ here too. Deeper layers live in their subpackages: geometry entities in
 
 _EXPORTS = {
     "TopologyBuilder": "egg.topology.builder",
+    "Block": "egg.topology.builder",
+    "BlockFace": "egg.topology.builder",
+    "BlockArray": "egg.topology.builder",
+    "Face": "egg.topology.faces",
     "ExplicitTopology": "egg.topology.explicit",
     "editable": "egg.topology.explicit",
     "PipelineConfig": "egg.pipeline",

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -24,8 +25,9 @@ from .block_topology import (
     FaceSpec,
     InterfaceConnection,
 )
+from .faces import FACE_NAMES, Face, as_face, is_face
 
-__all__ = ["TopologyBuilder"]
+__all__ = ["TopologyBuilder", "Block", "BlockFace", "BlockArray", "Face"]
 
 
 class TopologyBuilder:
@@ -187,14 +189,39 @@ class TopologyBuilder:
         )
         return self
 
+    def block(
+        self,
+        name: str | None = None,
+        corners: tuple | None = None,
+        resolutions: tuple[int, ...] | None = None,
+        *,
+        sw: Any = None,
+        se: Any = None,
+        nw: Any = None,
+        ne: Any = None,
+        res: tuple[int, ...] | None = None,
+    ) -> "Block":
+        """Like :meth:`add_block`, but return a :class:`Block` handle for fluent
+        face operations (``.north.on(edge)``, ``.east.tag("wall")``,
+        ``.west.join(other.east)``) instead of the builder itself."""
+        self.add_block(name, corners, resolutions, sw=sw, se=se, nw=nw, ne=ne, res=res)
+        actual = name if name is not None else next(reversed(self._block_specs))
+        return Block(self, actual)
+
+    def __getitem__(self, name: str) -> "Block":
+        """``builder[name]`` -> a :class:`Block` handle for an existing block."""
+        if name not in self._block_specs:
+            raise KeyError(f"no block named {name!r}")
+        return Block(self, name)
+
     def connect(
         self,
         block_a: str,
-        axis_a: int,
-        side_a: int,
-        block_b: str,
-        axis_b: int,
-        side_b: int,
+        axis_a: Any = None,
+        side_a: Any = None,
+        block_b: Any = None,
+        axis_b: Any = None,
+        side_b: Any = None,
     ) -> "TopologyBuilder":
         """Declare that two block faces are shared.
 
@@ -202,15 +229,23 @@ class TopologyBuilder:
         corners. Orientation is auto-detected by corner-name matching at
         build time.
 
-        Parameters
-        ----------
-        block_a, block_b : str
-            Block names.
-        axis_a, axis_b : int
-            Logical axis the face lies on (0..d-1).
-        side_a, side_b : int
-            0 = low side, 1 = high side.
+        Two call forms:
+
+        - integer faces — ``connect(block_a, axis_a, side_a, block_b, axis_b, side_b)``
+        - named faces — ``connect(block_a, "east", block_b, "west")`` (a
+          :class:`Face` or its name in each ``axis`` slot)
         """
+        if is_face(axis_a):
+            # named form: connect(block_a, face_a, block_b, face_b)
+            fa, fb = as_face(axis_a), as_face(block_b)
+            self._check_face(fa.axis, fa.side, "connect", fa)
+            self._check_face(fb.axis, fb.side, "connect", fb)
+            block_b, axis_a, side_a, axis_b, side_b = (
+                side_a, fa.axis, fa.side, fb.axis, fb.side
+            )
+        else:
+            self._check_face(axis_a, side_a, "connect")
+            self._check_face(axis_b, side_b, "connect")
         for name in (block_a, block_b):
             if name not in self._block_specs:
                 raise ValueError(f"connect() references unknown block '{name}'")
@@ -225,41 +260,82 @@ class TopologyBuilder:
 
     def associate(
         self,
-        block_name: str,
-        axis: int,
-        side: int,
-        entity: Any,
+        block_name: Any = None,
+        axis: Any = None,
+        side: Any = None,
+        entity: Any = None,
+        *,
+        west: Sequence[str] | None = None,
+        east: Sequence[str] | None = None,
+        south: Sequence[str] | None = None,
+        north: Sequence[str] | None = None,
+        bottom: Sequence[str] | None = None,
+        top: Sequence[str] | None = None,
     ) -> "TopologyBuilder":
-        """Tag a block face as lying on a geometry entity.
+        """Tag block faces as lying on a geometry entity.
+
+        Three equivalent call forms:
+
+        - integer face — ``associate(block, axis, side, entity)``
+        - named face — ``associate(block, "north", entity)`` (or ``Face.NORTH``)
+        - batch — ``associate(entity, west=[...], north=[...], ...)`` attaches
+          one entity to a whole set of blocks on the named face(s), replacing a
+          per-block loop.
 
         Face nodes are snapped/slid on the entity during initialisation and
-        smoothing.
-
-        Parameters
-        ----------
-        block_name : str
-        axis, side : int
-            Face selector (axis 0..d-1; side 0 = low, 1 = high).
-        entity : GeometryEntity or Edge
-            An :class:`~egg.geometry.frontend2d.Edge` is unwrapped to its
-            underlying entity, so the pure-Python wrapper never reaches the
-            entity-encoding path.
+        smoothing. An :class:`~egg.geometry.frontend2d.Edge` is unwrapped to its
+        underlying entity.
         """
+        batch = {
+            Face.WEST: west,
+            Face.EAST: east,
+            Face.SOUTH: south,
+            Face.NORTH: north,
+            Face.BOTTOM: bottom,
+            Face.TOP: top,
+        }
+        if any(v is not None for v in batch.values()):
+            # batch form: the first positional is the entity, not a block name
+            for face, blocks in batch.items():
+                if blocks is None:
+                    continue
+                self._check_face(face.axis, face.side, "associate", face)
+                for b in blocks:
+                    self._associate_one(b, face.axis, face.side, block_name)
+            return self
+        ax, sd, ent = self._face_args(axis, side, entity, "associate")
+        self._associate_one(block_name, ax, sd, ent)
+        return self
+
+    def _associate_one(self, block_name, axis, side, entity) -> None:
         if isinstance(entity, Edge):
             entity = entity.entity
         if block_name not in self._block_specs:
             raise ValueError(f"associate() references unknown block '{block_name}'")
-        self._check_face(axis, side, "associate")
         self._associations.append(
             Association(face=FaceSpec(block_name, axis, side), entity=entity)
         )
-        return self
 
-    def _check_face(self, axis: int, side: int, who: str) -> None:
+    def _face_args(self, axis, side, entity, who):
+        """Normalise a single-face selector to ``(axis:int, side:int, entity)``.
+
+        Accepts the integer pair, or a named face (:class:`Face` or its name) in
+        the ``axis`` slot — in which case the entity was passed in the ``side``
+        slot, one argument earlier.
+        """
+        if is_face(axis):
+            face = as_face(axis)
+            self._check_face(face.axis, face.side, who, face)
+            return face.axis, face.side, side
+        self._check_face(axis, side, who)
+        return axis, side, entity
+
+    def _check_face(self, axis, side, who: str, face: Face | None = None) -> None:
         """Reject an out-of-range face selector before it reaches the grid build."""
         if not isinstance(axis, int) or not 0 <= axis < self._d:
+            extra = f" (face {face.value!r} needs d>{axis})" if face is not None else ""
             raise ValueError(
-                f"{who}() axis must be in 0..{self._d - 1}, got {axis!r}"
+                f"{who}() axis must be in 0..{self._d - 1}, got {axis!r}{extra}"
             )
         if side not in (0, 1):
             raise ValueError(f"{who}() side must be 0 (low) or 1 (high), got {side!r}")
@@ -268,8 +344,8 @@ class TopologyBuilder:
         self,
         name: str,
         block_name: str,
-        axis: int,
-        side: int,
+        axis: Any = None,
+        side: Any = None,
     ) -> "TopologyBuilder":
         """Tag a block face with a named boundary marker (e.g. for export).
 
@@ -282,15 +358,14 @@ class TopologyBuilder:
         name : str
             Marker name, e.g. ``"inlet"`` or ``"wall"``.
         block_name : str
-        axis, side : int
-            Face selector (side 0 = low, 1 = high).
+        axis, side : int or Face
+            Face selector: the integer pair (side 0 = low, 1 = high), or a named
+            face (``"north"`` / :class:`Face.NORTH`) in the ``axis`` slot.
         """
+        ax, sd, _ = self._face_args(axis, side, None, "tag_boundary")
         if block_name not in self._block_specs:
             raise ValueError(f"tag_boundary() references unknown block '{block_name}'")
-        self._check_face(axis, side, "tag_boundary")
-        self._boundary_tags.setdefault(name, []).append(
-            FaceSpec(block_name, axis, side)
-        )
+        self._boundary_tags.setdefault(name, []).append(FaceSpec(block_name, ax, sd))
         return self
 
     def add_block_array(
@@ -307,7 +382,7 @@ class TopologyBuilder:
         corner_prefix: str = "c",
         block_prefix: str = "b",
         skip: set[tuple[int, int]] | None = None,
-    ) -> tuple[dict, list[list[str]]]:
+    ) -> "BlockArray":
         """Add an ``nib x njb`` array of blocks over a four-edge patch.
 
         The Eilmer ``registerFluidGridArray`` analogue: sub-block corners
@@ -342,12 +417,14 @@ class TopologyBuilder:
 
         Returns
         -------
-        corner : dict
-            Shared corner objects keyed ``(i, j)``.
-        block_names : list of list of str
-            Block-name grid ``block_names[i][j]``, for tagging boundaries
-            or attaching further structure. Skipped cells keep their name
-            in the grid but no block is declared for them.
+        BlockArray
+            A handle over the array: ``.block(i, j)`` / ``.name(i, j)`` /
+            ``.corner(i, j)`` and ``.edge("west"|"east"|"south"|"north")`` (the
+            outer blocks on a side, as :class:`Block` handles, skipped cells
+            omitted). It also unpacks as ``corner, names = add_block_array(...)``
+            for backward compatibility: ``corner`` is the shared-corner dict
+            keyed ``(i, j)`` and ``names`` the block-name grid ``names[i][j]``
+            (skipped cells keep their name but declare no block).
 
         Notes
         -----
@@ -403,7 +480,7 @@ class TopologyBuilder:
                 self.associate(names[0][j], 0, 0, west)
             if (nib - 1, j) not in skip:
                 self.associate(names[nib - 1][j], 0, 1, east)
-        return corner, names
+        return BlockArray(self, corner, names, nib, njb)
 
     def set_boundary_layer(
         self,
@@ -415,7 +492,7 @@ class TopologyBuilder:
         max_height: float | None = None,
         tangential_spacing: float | None = None,
         n_fixed: int = 1,
-        relax_orthogonality: tuple = (),
+        relax_orthogonality: Sequence = (),
         blocks: tuple | None = None,
     ) -> "TopologyBuilder":
         """Request wall-normal clustering on every block face lying on ``entity``.
@@ -812,3 +889,122 @@ class TopologyBuilder:
                 tags.setdefault(tag, []).append(face)
                 tagged.add(key)
         return tags
+
+
+class BlockFace:
+    """A ``(block, face)`` pair, from :attr:`Block.west` etc. Lowers to the
+    builder's :meth:`~TopologyBuilder.associate` / :meth:`tag_boundary` /
+    :meth:`connect`, returning the :class:`Block` so calls chain."""
+
+    def __init__(self, builder: "TopologyBuilder", block_name: str, face: Face):
+        self._b = builder
+        self.block_name = block_name
+        self.face = face
+
+    def on(self, entity: Any) -> "Block":
+        """Associate this face with the geometry ``entity`` it lies on."""
+        self._b.associate(self.block_name, self.face, entity)
+        return Block(self._b, self.block_name)
+
+    def tag(self, name: str) -> "Block":
+        """Tag this face with a named boundary marker."""
+        self._b.tag_boundary(name, self.block_name, self.face)
+        return Block(self._b, self.block_name)
+
+    def join(self, other: "BlockFace") -> "Block":
+        """Declare this face shared with ``other`` (another block's face)."""
+        self._b.connect(self.block_name, self.face, other.block_name, other.face)
+        return Block(self._b, self.block_name)
+
+    def __repr__(self) -> str:
+        return f"BlockFace({self.block_name!r}, {self.face.value!r})"
+
+
+class Block:
+    """A handle to a declared block. Its compass properties (:attr:`west`,
+    :attr:`east`, :attr:`south`, :attr:`north`, and in 3D :attr:`bottom` /
+    :attr:`top`) return a :class:`BlockFace` for fluent face operations; a face
+    invalid for the grid dimension (e.g. ``top`` on a 2D grid) raises."""
+
+    def __init__(self, builder: "TopologyBuilder", name: str):
+        self._b = builder
+        self.name = name
+
+    def face(self, face: Face | str) -> BlockFace:
+        """The named :class:`BlockFace` (validated against the grid dimension)."""
+        f = as_face(face)
+        self._b._check_face(f.axis, f.side, "block", f)
+        return BlockFace(self._b, self.name, f)
+
+    @property
+    def west(self) -> BlockFace:
+        return self.face(Face.WEST)
+
+    @property
+    def east(self) -> BlockFace:
+        return self.face(Face.EAST)
+
+    @property
+    def south(self) -> BlockFace:
+        return self.face(Face.SOUTH)
+
+    @property
+    def north(self) -> BlockFace:
+        return self.face(Face.NORTH)
+
+    @property
+    def bottom(self) -> BlockFace:
+        return self.face(Face.BOTTOM)
+
+    @property
+    def top(self) -> BlockFace:
+        return self.face(Face.TOP)
+
+    def __repr__(self) -> str:
+        return f"Block({self.name!r})"
+
+
+class BlockArray:
+    """The result of :meth:`TopologyBuilder.add_block_array`: a named ``nib x
+    njb`` grid of blocks with lookup and outer-edge helpers. Unpacks as
+    ``corner, names = ...`` for backward compatibility."""
+
+    def __init__(self, builder: "TopologyBuilder", corners, names, nib: int, njb: int):
+        self._b = builder
+        self.corners = corners
+        self.names = names
+        self.nib = nib
+        self.njb = njb
+
+    def __iter__(self):
+        # legacy unpacking: corner, names = add_block_array(...)
+        return iter((self.corners, self.names))
+
+    def name(self, i: int, j: int) -> str:
+        """Block name at grid cell ``(i, j)`` (i: west->east, j: south->north)."""
+        return self.names[i][j]
+
+    def corner(self, i: int, j: int):
+        """Shared corner object at ``(i, j)``."""
+        return self.corners[i, j]
+
+    def block(self, i: int, j: int) -> Block:
+        """:class:`Block` handle at grid cell ``(i, j)``."""
+        return Block(self._b, self.names[i][j])
+
+    def edge(self, face: Face | str) -> list[Block]:
+        """The array's outer blocks on ``face`` (``west`` / ``east`` / ``south``
+        / ``north``), as :class:`Block` handles, skipped cells omitted."""
+        f = as_face(face)
+        if f is Face.WEST or f is Face.EAST:
+            i = 0 if f is Face.WEST else self.nib - 1
+            row = [self.names[i][j] for j in range(self.njb)]
+        elif f is Face.SOUTH or f is Face.NORTH:
+            j = 0 if f is Face.SOUTH else self.njb - 1
+            row = [self.names[i][j] for i in range(self.nib)]
+        else:
+            raise ValueError(f"a 2D block array has no {f.value!r} outer edge")
+        return [Block(self._b, n) for n in row if n in self._b._block_specs]
+
+    def __repr__(self) -> str:
+        return f"BlockArray({self.nib}x{self.njb})"

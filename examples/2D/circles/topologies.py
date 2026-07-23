@@ -108,19 +108,17 @@ def build_circle_in_rectangle(rough: bool = False, R: int = 1, bl=None):
     # Connectivity and wall associations are inferred; the O-ring faces on
     # the circle (rough corners) and the corner-block faces (corners shared
     # by two walls) stay explicit.
-    for blk in ("o_s", "o_e", "o_n", "o_w"):
-        b.associate(blk, 1, 1, circle)
+    b.associate(circle, north=["o_s", "o_e", "o_n", "o_w"])
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_se", bottom, right),
         ("c_ne", right, top),
         ("c_nw", top, left),
     ]:
-        b.associate(blk, 0, 0, a0)
-        b.associate(blk, 1, 0, a1)
+        b[blk].west.on(a0).south.on(a1)
 
     if bl is not None:
-        b.set_boundary_layer(circle, **bl)
+        circle.clustered(**bl)
 
     topology = b.build()
     return topology, topology.entities
@@ -208,22 +206,19 @@ def build_twin_circle(rough: bool = False, bl=None, R: int = 1):
     # Connectivity and wall associations are inferred; the O-ring faces on
     # the circles (rough corners) and the corner-block faces (corners shared
     # by two walls) stay explicit.
-    for blk in ("o_s", "o_e", "o_n", "o_w"):
-        b.associate(blk, 1, 1, circle)
-    for blk in ("o2_s", "o2_e", "o2_n", "o2_w"):
-        b.associate(blk, 1, 1, circle2)
+    b.associate(circle, north=["o_s", "o_e", "o_n", "o_w"])
+    b.associate(circle2, north=["o2_s", "o2_e", "o2_n", "o2_w"])
     for blk, a0, a1 in [
         ("c_sw", left, bottom),
         ("c_nw", top, left),
         ("c2_ne", right, top),
         ("c2_se", bottom, right),
     ]:
-        b.associate(blk, 0, 0, a0)
-        b.associate(blk, 1, 0, a1)
+        b[blk].west.on(a0).south.on(a1)
 
     if bl is not None:
-        b.set_boundary_layer(circle, **bl["circle"])
-        b.set_boundary_layer(circle2, **bl["circle2"])
+        circle.clustered(**bl["circle"])
+        circle2.clustered(**bl["circle2"])
 
     topology = b.build()
     return topology, topology.entities

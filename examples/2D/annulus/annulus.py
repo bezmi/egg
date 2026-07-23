@@ -57,8 +57,7 @@ def build_annulus():
 
     b = TopologyBuilder(d=2)
     b.add_block("ring", sw=i0, se=o0, nw=i1, ne=o1, res=(10, 24))
-    b.associate("ring", 0, 0, inner)
-    b.associate("ring", 0, 1, outer)
+    b["ring"].west.on(inner).east.on(outer)
 
     topology = b.build()
     return topology, topology.entities

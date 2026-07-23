@@ -50,6 +50,7 @@ The command-line surface lives in ``driver.py``; run
 
 from pathlib import Path
 
+from egg.enums import TmopMetric
 from egg.pipeline import (
     ControlPointSmoother,
     FasSmoother,
@@ -91,8 +92,7 @@ def build_egg_from_svg(bl_first_height=0.0, bl_growth=1.5, n_fixed=2, res=12):
         # Wall-normal clustering on the imported egg curve; the egg is a
         # closed interior wall, so no domain boundary meets it obliquely
         # and relax_orthogonality stays empty.
-        b.set_boundary_layer(
-            dom.edge("egg"),
+        dom.edge("egg").clustered(
             first_height=bl_first_height,
             growth=bl_growth,
             n_fixed=n_fixed,
@@ -109,22 +109,48 @@ def _smoother(a, *, metric, cluster):
     on. Control mode is preceded by a matching nodal pre-pass so the net fit
     starts from a smooth grid.
     """
-    common = dict(
-        chunk=a["chunk"],
-        omega=a["omega"],
-        metric=metric,
-        cluster_boundary_layers=cluster,
-        bl_blend_neighbours=False,
-    )
     s = a["smoother"]
     if s == "fas":
-        return [FasSmoother(sweeps=a["tmop_sweeps"], **common)]
+        return [
+            FasSmoother(
+                sweeps=a["tmop_sweeps"],
+                chunk=a["chunk"],
+                omega=a["omega"],
+                metric=metric,
+                cluster_boundary_layers=cluster,
+                bl_blend_neighbours=False,
+            )
+        ]
     if s == "control_point":
         return [
-            Presmooth(JacobiSmoother(sweeps=100, **dict(common, chunk=100))),
-            ControlPointSmoother(**common),
+            Presmooth(
+                JacobiSmoother(
+                    sweeps=100,
+                    chunk=100,
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=cluster,
+                    bl_blend_neighbours=False,
+                )
+            ),
+            ControlPointSmoother(
+                chunk=a["chunk"],
+                omega=a["omega"],
+                metric=metric,
+                cluster_boundary_layers=cluster,
+                bl_blend_neighbours=False,
+            ),
         ]
-    return [JacobiSmoother(sweeps=a["tmop_sweeps"], **common)]
+    return [
+        JacobiSmoother(
+            sweeps=a["tmop_sweeps"],
+            chunk=a["chunk"],
+            omega=a["omega"],
+            metric=metric,
+            cluster_boundary_layers=cluster,
+            bl_blend_neighbours=False,
+        )
+    ]
 
 
 def setup(a, *, direct=True):
@@ -154,7 +180,7 @@ def setup(a, *, direct=True):
     # outer rows reach the neighbour spacing on their own.
     pin = a["bl_first_height"] > 0.0 and a["pin_layers"] > 0
     grid = topo.initialize_grid()
-    metric = a.get("metric", "shape")
+    metric = TmopMetric(a.get("metric", "shape"))
     stages = [
         Untangle(sweeps_per_delta=a["sweeps_per_delta"], direct=direct),
         *_smoother(a, metric=metric, cluster=pin),

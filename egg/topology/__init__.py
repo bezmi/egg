@@ -8,7 +8,16 @@
 
 """Multiblock topology: fluent builder, data model, and editable overlay."""
 
-from .builder import TopologyBuilder
+from .builder import Block, BlockArray, BlockFace, TopologyBuilder
 from .explicit import ExplicitTopology, editable
+from .faces import Face
 
-__all__ = ["TopologyBuilder", "ExplicitTopology", "editable"]
+__all__ = [
+    "TopologyBuilder",
+    "Block",
+    "BlockFace",
+    "BlockArray",
+    "Face",
+    "ExplicitTopology",
+    "editable",
+]

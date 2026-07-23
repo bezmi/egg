@@ -36,6 +36,7 @@ the identity, so a wrapped script builds the same headless.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -185,7 +186,7 @@ class ExplicitTopology:
         base: Any = None,
         geometry: dict[str, Any] | None = None,
         connectivity: dict | None = None,
-        relax_orthogonality: tuple = (),
+        relax_orthogonality: Sequence = (),
         fan_frames: dict | None = None,
         parallel: tuple | list | None = None,
         d: int = 2,

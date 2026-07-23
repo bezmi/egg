@@ -59,9 +59,12 @@ The command-line surface lives in ``driver.py``; run
 import math
 
 from egg.geometry import Arc, Line, Polyline, Vector3
+from egg.enums import OrthoMode, TmopMetric
 from egg.pipeline import (
     ControlPointSmoother,
     FasSmoother,
+    InterfaceC2,
+    InterfaceOrtho,
     JacobiSmoother,
     Presmooth,
     Pin,
@@ -209,58 +212,71 @@ if __name__ == "__egg_webui__":  # this example runs ONLY in the egg web UI
         # itself, sizing the shape_size far field correctly.
         pin = a["bl_first_height"] > 0.0 and a["pin_layers"] > 0
         grid = topo.initialize_grid()
-        metric = a.get("metric", "shape")
+        metric = TmopMetric(a.get("metric", "shape"))
         # Optional block-interface C2 curvature term (interface_only: de-kink the
         # seams between the O-grid and the wake/outer blocks, without touching the
         # legitimately curved clustered near-wall cells).
         c2w, c2s = a.get("c2_weight", 0.0), a.get("c2_singularity", 0.0)
         c2 = (
-            {"weight": c2w, "interface_only": True, "singularity_weight": c2s}
+            InterfaceC2(weight=c2w, interface_only=True, singularity_weight=c2s)
             if (c2w > 0.0 or c2s > 0.0)
             else None
         )
         # Optional block-interface orthogonality term (pulls the cross-seam edge
         # perpendicular to the seam); composes with the C2 term.
         ortho = (
-            {
-                "mode": "normal",
-                "weight": a["ortho_weight"],
-                "n_layers": a.get("ortho_layers", 3),
-                "cluster_relax": a.get("ortho_relax", 1.0),
-            }
+            InterfaceOrtho(
+                mode=OrthoMode.NORMAL,
+                weight=a["ortho_weight"],
+                n_layers=a.get("ortho_layers", 3),
+                cluster_relax=a.get("ortho_relax", 1.0),
+            )
             if a.get("ortho_weight", 0.0) > 0.0
             else None
         )
         # The interface C2 / orthogonality terms act on grid nodes, so they
         # attach to the nodal smoothers only; the control-point smoother has its
         # own seam dials.
-        common = dict(
-            chunk=a["chunk"],
-            omega=a["omega"],
-            metric=metric,
-            cluster_boundary_layers=pin,
-        )
         if a["smoother"] == "control_point":
             smoothing = [
-                Presmooth(JacobiSmoother(sweeps=100, **dict(common, chunk=100))),
-                ControlPointSmoother(**common),
+                Presmooth(
+                    JacobiSmoother(
+                        sweeps=100,
+                        chunk=100,
+                        omega=a["omega"],
+                        metric=metric,
+                        cluster_boundary_layers=pin,
+                    )
+                ),
+                ControlPointSmoother(
+                    chunk=a["chunk"],
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=pin,
+                ),
             ]
         elif a["smoother"] == "fas":
             smoothing = [
                 FasSmoother(
                     sweeps=a["tmop_sweeps"],
+                    chunk=a["chunk"],
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=pin,
                     interface_c2=c2,
                     interface_ortho=ortho,
-                    **common,
                 )
             ]
         else:
             smoothing = [
                 JacobiSmoother(
                     sweeps=a["tmop_sweeps"],
+                    chunk=a["chunk"],
+                    omega=a["omega"],
+                    metric=metric,
+                    cluster_boundary_layers=pin,
                     interface_c2=c2,
                     interface_ortho=ortho,
-                    **common,
                 )
             ]
         stages = [Untangle(sweeps_per_delta=a["sweeps_per_delta"]), *smoothing]
