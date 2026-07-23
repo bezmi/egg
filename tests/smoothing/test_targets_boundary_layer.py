@@ -71,9 +71,7 @@ def test_metric_selects_far_field_default():
 
     # an explicit default always wins over metric
     idt = IdentityTarget(2)
-    tgt_override = build_topology_target(
-        topo, grid, default=idt, metric="shape_size"
-    )
+    tgt_override = build_topology_target(topo, grid, default=idt, metric="shape_size")
     assert abs(np.linalg.det(tgt_override(far, block, cb, (0, 0))) - 1.0) < 1e-12
 
     # shape_size without a grid is a clear error, not a silent Identity fallback

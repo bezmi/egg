@@ -23,6 +23,7 @@ from egg.smoothing.directional import (
     KIND_PARALLEL,
     KIND_STEM,
     DirectionalSamples,
+    _chain_consistent_normals,
     build_directional_samples,
     directional_energy_grad,
 )
@@ -95,6 +96,56 @@ def _fan2d(res: int = 3):
         b.associate(f"b{k}", 0, 1, rim)
         b.associate(f"b{k}", 1, 1, rim)
     return b, rim, C, R, M
+
+
+# ---- frozen-normal de-outliering -------------------------------------------
+
+
+def _unit(v):
+    v = np.asarray(v, dtype=float)
+    return v / np.linalg.norm(v)
+
+
+def test_chain_normals_reject_a_curled_endpoint():
+    """A chain node whose wall projection lands on a degenerate/extrapolated
+    endpoint hands back a normal ~90 deg off the trend (the wedge inflow
+    spline's exit-plane tip); it must be replaced by its consistent neighbour
+    so it cannot corrupt the last segment's reference."""
+    good = _unit([-0.558, 0.83])
+    n = np.tile(good, (6, 1))
+    n[-1] = _unit([-0.83, -0.558])  # the curled endpoint (~90 deg off)
+    out = _chain_consistent_normals(n)
+    # every node now agrees with the trend (no ~90 deg outlier survives)
+    assert np.all(np.abs(out @ good) > 0.9)
+    # the good interior nodes are untouched
+    assert np.allclose(out[:-1], good)
+
+
+def test_chain_normals_replace_a_middle_outlier():
+    good = _unit([0.0, 1.0])
+    n = np.tile(good, (7, 1))
+    n[3] = _unit([1.0, 0.0])  # a lone perpendicular spike mid-chain
+    out = _chain_consistent_normals(n)
+    assert np.allclose(np.abs(out), good)
+
+
+def test_chain_normals_align_sign_flips():
+    """A sign flip between neighbours would cancel in a segment average
+    ``n[k] + n[k+1]`` — orientation is unified."""
+    g = _unit([0.3, 0.95])
+    n = np.array([g, g, -g, g, g])
+    out = _chain_consistent_normals(n)
+    # all oriented the same way, so no adjacent pair cancels
+    for k in range(len(out) - 1):
+        assert np.dot(out[k], out[k + 1]) > 0.0
+
+
+def test_chain_normals_leave_consistent_and_short_arrays():
+    g = _unit([0.1, 1.0])
+    n = np.tile(g, (5, 1))
+    assert np.allclose(_chain_consistent_normals(n), n)
+    two = np.tile(g, (2, 1))  # < 3 nodes: nothing to compare against
+    assert np.allclose(_chain_consistent_normals(two), two)
 
 
 # ---- builder ---------------------------------------------------------------

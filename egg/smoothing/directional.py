@@ -115,6 +115,44 @@ def _normals_at(entity, W: np.ndarray) -> np.ndarray:
     raise NotImplementedError("directional samples need a codimension-1 boundary")
 
 
+def _chain_consistent_normals(
+    n_node: np.ndarray, cos_thresh: float = 0.5
+) -> np.ndarray:
+    """De-outlier the per-node frozen wall normals along a chain.
+
+    A chain node's frozen normal is the wall entity's normal at that node's
+    projection. Where the projection lands on a degenerate or extrapolated wall
+    endpoint (e.g. a spline run past its data to meet an exit plane), the
+    analytic normal can curl ~90° off the chain's trend — and that single bad
+    value then corrupts the adjacent segment reference, pulling that segment's
+    cells off in the wrong direction. Any node whose normal agrees (up to sign)
+    with NEITHER neighbour beyond ``cos_thresh`` is replaced by the nearest
+    consistent node's; orientation is then aligned so a sign flip cannot cancel
+    a segment average ``n[k] + n[k+1]``.
+    """
+    n = np.asarray(n_node, dtype=float).copy()
+    N = len(n)
+    if N < 3:
+        return n
+    good = np.ones(N, dtype=bool)
+    for i in range(N):
+        agree = -1.0
+        if i > 0:
+            agree = max(agree, abs(float(np.dot(n[i], n[i - 1]))))
+        if i < N - 1:
+            agree = max(agree, abs(float(np.dot(n[i], n[i + 1]))))
+        good[i] = agree >= cos_thresh
+    gi = np.flatnonzero(good)
+    if not good.all() and gi.size:
+        for i in np.flatnonzero(~good):
+            j = int(gi[np.argmin(np.abs(gi - i))])
+            n[i] = n[j]
+    for i in range(1, N):
+        if float(np.dot(n[i], n[i - 1])) < 0.0:
+            n[i] = -n[i]
+    return n
+
+
 def _singular_dofs(topo) -> set[int]:
     """Global DOFs of framed fan corners and detected singular nodes."""
     out = {f.dof for f in topo.fan_frames}
@@ -191,7 +229,7 @@ def build_directional_samples(
         W[hit] = X[wall[hit]]
         if np.any(~hit):
             W[~hit] = np.asarray(c.to.project_many(P[~hit]), dtype=float)
-        n_node = _normals_at(c.to, W)
+        n_node = _chain_consistent_normals(_normals_at(c.to, W))
         seg = P[1:] - P[:-1]
         ell = np.linalg.norm(seg, axis=1)
         n_seg = _unit(n_node[:-1] + n_node[1:], eps)

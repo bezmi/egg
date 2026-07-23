@@ -587,8 +587,40 @@ class MeshState:
         return _cpp_reduce(self.grid, score_ctx, self.device, phase=phase)[0]
 
 
+def _directional_config(directional) -> dict | None:
+    """The directional-samples config dict (pipeline defaults merged with the
+    caller's keys), or ``None`` when disabled (``False``) or absent (``None``).
+
+    The pipeline's default scale: the directional penalties compete with the
+    shape energy's own preference (a singular fan's 72-degree sectors, a rail's
+    resistance to transverse cell shear), so unit weights barely move anything.
+    200 straightens a framed five-fan to ~1 degree and pulls a marked wedge
+    rail to a few degrees while the accept rule keeps the term soft
+    (energy-monotone, barrier intact). The chain fairness term rides at the
+    same lambda: orientation-only, it rounds block-corner kinks on a marked
+    rail and damps the short-wavelength ripples a pure parallelism pull can
+    leave, without hurting alignment. User keys override; the per-declaration
+    ``"weight"`` tunes a single chain.
+    """
+    if directional is False or directional is None:
+        return (
+            None
+            if directional is False
+            else {"energy_scale": 200.0, "lambda_fair": 1.0}
+        )
+    return {"energy_scale": 200.0, "lambda_fair": 1.0, **directional}
+
+
 def _establish_objective(
-    s: MeshState, *, metric, cluster, blend, interior, io, ic2, directional=None
+    s: MeshState,
+    *,
+    metric,
+    cluster,
+    blend,
+    interior,
+    io,
+    ic2,
+    directional=None,
 ):
     """Fix the TMOP target + sweep context a smoother (and pin/respace) uses.
 
@@ -623,22 +655,7 @@ def _establish_objective(
 
             target = mean_size_target(s.grid)
         # else (shape metric, no clustering) stays None and reuses ctx_iso.
-    # The pipeline's default scale: the directional penalties compete with
-    # the shape energy's own preference (a singular fan's 72-degree sectors,
-    # a rail's resistance to transverse cell shear), so unit weights barely
-    # move anything. 200 straightens a framed five-fan to ~1 degree and pulls
-    # a marked wedge rail to a few degrees while the accept rule keeps the
-    # term soft (energy-monotone, barrier intact). The chain fairness term
-    # rides at the same lambda: orientation-only, it rounds block-corner
-    # kinks on a marked rail and damps the short-wavelength ripples a pure
-    # parallelism pull can leave, without hurting alignment (measured on the
-    # wedge rails: worst kink 24 -> 4 degrees, alignment unchanged). User
-    # keys override; the per-declaration "weight" tunes a single chain.
-    dir_cfg = (
-        None
-        if directional is False
-        else {"energy_scale": 200.0, "lambda_fair": 1.0, **(directional or {})}
-    )
+    dir_cfg = _directional_config(directional)
     dir_samples = None
     if dir_cfg is not None:
         from .smoothing.directional import build_directional_samples
@@ -1223,16 +1240,23 @@ class Pin(Stage):
     is the node smoother (a :class:`JacobiSmoother` or :class:`FasSmoother`) to
     run for that re-smooth, so the pin phase is not tied to the main smoother's
     kind. It runs under the objective the main smoother established.
+
+    ``Pin()`` (no smoother) stamps and freezes the layers WITHOUT any
+    re-smooth: the layers are placed at their exact per-column heights and
+    left, with nothing after them re-disturbing the grid. The stamp itself is
+    per-column exact (``respace_first_layers`` slides each column's rows along
+    its own polyline), so this is the reliable way to land absolute layer
+    heights; the far cells above the band keep whatever the smoother left.
     """
 
     requires = frozenset({"smoothed"})
     produces = frozenset({"smoothed"})
 
-    def __init__(self, smoother):
-        if not isinstance(smoother, _NodalSmoother):
+    def __init__(self, smoother=None):
+        if smoother is not None and not isinstance(smoother, _NodalSmoother):
             raise TypeError(
-                "Pin takes a JacobiSmoother or FasSmoother for the re-smooth, "
-                f"got {type(smoother).__name__}"
+                "Pin takes a JacobiSmoother or FasSmoother for the re-smooth "
+                f"(or None for a stamp-only pin), got {type(smoother).__name__}"
             )
         self.smoother = smoother
 
@@ -1249,14 +1273,30 @@ class Pin(Stage):
         yield ("pin", {"n_dofs": int(pinned.size), "min_det": s.md_now()})
         if not pinned.size:
             return
-        # s.directional is the recorded config dict, so the sample references
-        # re-freeze from the pinned grid's current node positions.
+        if self.smoother is None:
+            # Stamp-only: the layers are at their exact heights and frozen;
+            # leave the rest of the grid exactly as the main smoother left it.
+            project_nodes(s.grid, s.grid.dof_constraints)
+            s.net_stale = True
+            return
+        sm = self.smoother
+        # The pin re-smooth uses ITS OWN smoother's composed terms, not the
+        # main smoother's: whatever interface_ortho / interface_c2 / directional
+        # the given smoother carries is applied; a term left unset (None) on it
+        # is simply off (no fall-back to what the main phase used). The target
+        # stays the main smoother's so the re-smooth scores the same energy
+        # above the frozen band, and directional references re-freeze from the
+        # pinned grid's current node positions.
+        pin_dir = (
+            None if sm.directional is None else _directional_config(sm.directional)
+        )
         pin_ctx = build_sweep_context(
             s.grid,
             s.iso if s.active_target is None else s.active_target,
-            interface_ortho=s.interface_ortho,
-            interface_c2=s.interface_c2,
-            directional=s.directional,
+            interface_ortho=sm.interface_ortho,
+            interface_c2=sm.interface_c2,
+            directional=pin_dir,
+            frozen_interface=pinned,
         )
         session = CppStructuredSweepSession(
             pin_ctx,
@@ -1264,7 +1304,6 @@ class Pin(Stage):
             s.grid.global_nodes,
             device=s.device,
         )
-        sm = self.smoother
         phase = "shape_size" if s.score_metric == "shape_size" else "barrier"
         total = max((sm.sweeps // sm.chunk) * sm.chunk, sm.chunk)
         done = 0

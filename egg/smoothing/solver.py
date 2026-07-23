@@ -202,6 +202,7 @@ def build_sweep_context(
     interface_ortho: dict | None = None,
     interface_c2: dict | None = None,
     directional=None,
+    frozen_interface=None,
 ) -> SweepContext:
     """Build the sweep context: energy stencil, constraint encoding, C++ wire.
 
@@ -219,20 +220,33 @@ def build_sweep_context(
     prebuilt :class:`~egg.smoothing.directional.DirectionalSamples` table, or a
     dict of keyword args for
     :func:`egg.smoothing.directional.build_directional_samples`.
+
+    ``frozen_interface`` (optional) is the set/array of DOF ids frozen by a Pin
+    stamp. When given, the continuity terms treat the pinned/free boundary
+    inside a block as an interface — curvature windows crossing it get the
+    ``iface_boost`` and orthogonality crossing samples are emitted there — so
+    the free grid continues smoothly out of the frozen boundary-layer band
+    instead of kinking at its edge.
     """
     from egg.smoothing.flat_context import cell_stencil
+
+    frozen_arr = None
+    if frozen_interface is not None:
+        frozen_arr = np.asarray(list(frozen_interface), dtype=np.int64)
+        if frozen_arr.size == 0:
+            frozen_arr = None
 
     iface = None
     if interface_ortho:
         from egg.smoothing.interface_ortho import interface_ortho_samples
 
-        iface = interface_ortho_samples(grid, **interface_ortho)
+        iface = interface_ortho_samples(grid, pinned=frozen_arr, **interface_ortho)
 
     curvature = None
     if interface_c2:
         from egg.smoothing.interface_c2 import curvature_windows
 
-        curvature = curvature_windows(grid, **interface_c2)
+        curvature = curvature_windows(grid, frozen=frozen_arr, **interface_c2)
 
     # Directional soft-energy samples: a prebuilt DirectionalSamples table, or a
     # dict of keyword args for build_directional_samples (references frozen from

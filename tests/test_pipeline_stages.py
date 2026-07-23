@@ -124,6 +124,12 @@ def test_presmooth_and_pin_reject_a_control_smoother():
         Pin(ControlPointSmoother())
 
 
+def test_validate_accepts_a_stamp_only_pin():
+    # Pin() without a smoother stamps and freezes the layers, no re-smooth.
+    validate([Untangle(), JacobiSmoother(), Pin()])
+    validate([Untangle(), ControlPointSmoother(), Pin()])
+
+
 # --------------------------------------------------------------------------- #
 # Running stages needs the C++ backend.
 # --------------------------------------------------------------------------- #
@@ -189,3 +195,214 @@ def test_stage_run_matches_the_deprecated_config_run():
     # Same grid, same stage params: final numbers agree up to reduction noise.
     assert ev1[-1][1]["min_det"] == pytest.approx(ev2[-1][1]["min_det"], rel=1e-3)
     assert ev1[-1][1]["energy"] == pytest.approx(ev2[-1][1]["energy"], rel=1e-3)
+
+
+# --------------------------------------------------------------------------- #
+# Stamp-only pin.
+# --------------------------------------------------------------------------- #
+
+FIRST_H = 0.02
+GROWTH = 1.2
+
+
+def _clustered_strip():
+    """One block over a clustered wall (uniform first height 0.02)."""
+    from egg.geometry import LineSegment
+    from egg.topology.builder import TopologyBuilder
+
+    wall = (
+        LineSegment((0.0, 0.0), (4.0, 0.0))
+        .named("wall")
+        .clustered(first_height=FIRST_H, growth=GROWTH, n_layers=4, n_fixed=4)
+    )
+    b = TopologyBuilder(d=2)
+    for n, p in [("A", (0, 0)), ("B", (4, 0)), ("C", (0, 2)), ("D", (4, 2))]:
+        b.add_corner(n, p, fixed=True)
+    b.add_block("main", ("A", "C", "B", "D"), (12, 12))
+    b.associate("main", 1, 0, wall)
+    topo = b.build()
+    topo.initialize_grid()
+    return topo.grid
+
+
+def _first_layer_heights(grid):
+    import numpy as np
+
+    dm = grid.block_dof_maps[0]
+    X = np.asarray(grid.global_nodes)
+    return np.linalg.norm(X[dm[:, 1]] - X[dm[:, 0]], axis=1)
+
+
+@cpp
+def test_stamp_only_pin_sets_exact_heights_without_resmoothing():
+    import numpy as np
+
+    from egg.pipeline import generate_steps
+
+    grid = _clustered_strip()
+    events = list(
+        generate_steps(
+            grid,
+            stages=[
+                Untangle(),
+                JacobiSmoother(sweeps=100, chunk=50, metric="shape_size"),
+                Pin(),
+            ],
+        )
+    )
+    phases = [p for p, _ in events]
+    assert "pin" in phases
+    # stamp-only: no smoothing events after the pin
+    assert "tmop" not in phases[phases.index("pin") :]
+    # the first n_fixed layer heights are stamped to the exact per-column
+    # profile regardless of what the smoother left
+    h0 = _first_layer_heights(grid)
+    interior = slice(1, -1)  # corner columns meet the side boundaries
+    assert np.allclose(h0[interior], FIRST_H, rtol=1e-4)
+    assert events[-1][1]["min_det"] > 0.0
+
+
+def _spy_sweep_contexts(monkeypatch):
+    """Capture the kwargs of every build_sweep_context call during a run."""
+    import egg.smoothing.solver as solver_mod
+
+    calls = []
+    orig = solver_mod.build_sweep_context
+
+    def spy(grid, target, **kw):
+        calls.append(kw)
+        return orig(grid, target, **kw)
+
+    monkeypatch.setattr(solver_mod, "build_sweep_context", spy)
+    return calls
+
+
+@cpp
+def test_pin_applies_its_own_smoother_interface_terms(monkeypatch):
+    """The pin re-smooth builds its context from ITS OWN smoother's composed
+    terms — a term set on the Pin's smoother is applied even when the main
+    smoother carried none."""
+    from egg.pipeline import generate_steps
+
+    calls = _spy_sweep_contexts(monkeypatch)
+    grid = _clustered_strip()
+    list(
+        generate_steps(
+            grid,
+            stages=[
+                Untangle(),
+                JacobiSmoother(sweeps=40, chunk=40, metric="shape_size"),
+                Pin(
+                    JacobiSmoother(
+                        sweeps=40,
+                        chunk=40,
+                        metric="shape_size",
+                        interface_c2={"weight": 3.0},
+                        interface_ortho={"weight": 2.0},
+                    )
+                ),
+            ],
+        )
+    )
+    # the pin context (the last one built) carries the Pin smoother's terms...
+    assert calls[-1].get("interface_c2") == {"weight": 3.0}
+    assert calls[-1].get("interface_ortho") == {"weight": 2.0}
+    # ...and no earlier (main) context did
+    assert all(c.get("interface_c2") is None for c in calls[:-1])
+
+
+@cpp
+def test_pin_bare_smoother_does_not_inherit_main_interface_terms(monkeypatch):
+    """A term left unset on the Pin's smoother is off — no fall-back to what
+    the main phase used."""
+    from egg.pipeline import generate_steps
+
+    calls = _spy_sweep_contexts(monkeypatch)
+    grid = _clustered_strip()
+    list(
+        generate_steps(
+            grid,
+            stages=[
+                Untangle(),
+                JacobiSmoother(
+                    sweeps=40,
+                    chunk=40,
+                    metric="shape_size",
+                    interface_c2={"weight": 9.0},  # MAIN carries a c2 term
+                ),
+                Pin(JacobiSmoother(sweeps=40, chunk=40, metric="shape_size")),
+            ],
+        )
+    )
+    # the main context carried weight 9, but the pin context (last) carries none
+    assert any(c.get("interface_c2") == {"weight": 9.0} for c in calls[:-1])
+    assert calls[-1].get("interface_c2") is None
+
+
+def _sheared_clustered_strip():
+    """A clustered wall under a sloped top, so the wall-normal columns are
+    non-trivial and a kink at the pinned/free boundary can actually appear."""
+    from egg.geometry import LineSegment
+    from egg.topology.builder import TopologyBuilder
+
+    wall = (
+        LineSegment((0.0, 0.0), (4.0, 0.0))
+        .named("wall")
+        .clustered(first_height=FIRST_H, growth=GROWTH, n_layers=6, n_fixed=4)
+    )
+    b = TopologyBuilder(d=2)
+    for n, p in [("A", (0, 0)), ("B", (4, 0)), ("C", (0.6, 2)), ("D", (4.6, 2))]:
+        b.add_corner(n, p, fixed=True)
+    b.add_block("main", ("A", "C", "B", "D"), (10, 14))
+    b.associate("main", 1, 0, wall)
+    topo = b.build()
+    topo.initialize_grid()
+    return topo.grid
+
+
+def _boundary_kink(grid, n_fixed=4):
+    import numpy as np
+
+    nodes = np.asarray(grid.blocks[0].nodes)  # (n_tan, n_normal, 2)
+    ks = []
+    for i in range(nodes.shape[0]):
+        col = nodes[i]
+        a = col[n_fixed] - col[n_fixed - 1]
+        c = col[n_fixed + 1] - col[n_fixed]
+        a /= np.linalg.norm(a)
+        c /= np.linalg.norm(c)
+        ks.append(np.degrees(np.arccos(np.clip(np.dot(a, c), -1, 1))))
+    return float(np.mean(ks))
+
+
+@cpp
+def test_frozen_boundary_c2_boost_reduces_the_pinned_free_kink():
+    """End to end: the frozen-band-edge C2 boost (threaded Pin -> context ->
+    C++) leaves the free grid continuing more smoothly out of the pinned band
+    than a plain pin does."""
+    from egg.pipeline import generate_steps
+
+    def run(pin_c2):
+        grid = _sheared_clustered_strip()
+        list(
+            generate_steps(
+                grid,
+                stages=[
+                    Untangle(),
+                    JacobiSmoother(sweeps=100, chunk=100, metric="shape_size"),
+                    Pin(
+                        JacobiSmoother(
+                            sweeps=250,
+                            chunk=100,
+                            metric="shape_size",
+                            interface_c2=pin_c2,
+                        )
+                    ),
+                ],
+            )
+        )
+        return _boundary_kink(grid)
+
+    plain = run(None)
+    boosted = run({"weight": 5.0, "iface_boost": 40.0})
+    assert boosted < 0.75 * plain, (boosted, plain)
