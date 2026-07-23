@@ -234,10 +234,10 @@ docstrings) and the C++ core (Doxygen -> Breathe, from the `///` comments in
 `src/`). Configuration lives in `docs/conf.py` and `docs/Doxyfile`.
 
 Requires the `doxygen` binary on PATH (distro package; not a Python dep).
-Everything else comes from the `docs` dependency group:
+Everything else is a core dependency (installed by `uv sync`):
 
 ```bash
-uv run --group docs sphinx-build -W -b html docs docs/_build/html
+uv run sphinx-build -W -b html docs docs/_build/html
 ```
 
 `conf.py` runs Doxygen automatically at the start of every build, so there is

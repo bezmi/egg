@@ -107,13 +107,13 @@ def _ensure_assets(repo: Path | None, dev: bool) -> None:
 
 def _build_docs(repo: Path) -> None:
     """Best-effort docs refresh: the UI serves ``docs/_build/html`` when it
-    exists (help → documentation). Missing sphinx (docs group) or doxygen
-    just means the previously built docs — if any — keep being served."""
+    exists (help -> documentation). Missing sphinx or the doxygen binary just
+    means the previously built docs, if any, keep being served."""
     try:
         import sphinx  # noqa: F401
     except ImportError:
         print(
-            "egg-webui: sphinx not installed (uv sync --group docs) — "
+            "egg-webui: sphinx not installed (uv sync), "
             "serving previously built docs, if any",
             file=sys.stderr,
         )
@@ -204,7 +204,7 @@ def main() -> None:
         import uvicorn
     except ImportError:
         raise SystemExit(
-            "egg-webui needs the webui dependency group: uv sync --group webui"
+            "egg-webui needs the ui dependency group: uv sync --group ui"
         ) from None
 
     if a.script:

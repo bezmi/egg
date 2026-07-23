@@ -8,7 +8,7 @@
 
 """FastHTML "code as CAD" prototype: live SVG view of an egg geometry script.
 
-Run (after ``uv sync --group webui``)::
+Run (after ``uv sync --group ui``)::
 
     egg-webui [path/to/script.py]
 
@@ -270,7 +270,7 @@ app.router.routes.insert(
 # The Sphinx site. In an installed wheel it ships under egg/webui/docs
 # (built at wheel time by tools/vendor_webui.py --docs). In a checkout it is
 # whatever `egg-webui` refreshed into docs/_build/html at startup (also
-# `uv run --group docs sphinx-build -b html docs docs/_build/html`).
+# `uv run sphinx-build -b html docs docs/_build/html`).
 _PACKAGED_DOCS = _STATIC.parent / "docs"
 if _PACKAGED_DOCS.is_dir():
     DOCS_DIR = _PACKAGED_DOCS
@@ -2326,7 +2326,7 @@ async def get(view: str = "grid", desktop: int = 0):
                 A("documentation", href="/docs/", target="_blank")
                 if DOCS_DIR and DOCS_DIR.is_dir()
                 else Span(
-                    "docs not built — uv sync --group docs, then restart egg-webui",
+                    "docs not built; restart the app to build them",
                     cls="menu-note",
                 ),
                 Button(

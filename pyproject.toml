@@ -19,21 +19,13 @@ dependencies = [
   "pytest>=9.0.3",
   "pyvista>=0.48.4",
   "scipy>=1.17.1",
-]
-
-[project.optional-dependencies]
-# The web UI ships in the wheel: `pip install egg[webui]` pulls its runtime
-# deps. basedpyright provides the editor's language server (completions,
-# diagnostics, hover); the UI degrades gracefully if it is absent.
-webui = [
-  "python-fasthtml>=0.12",
-  "basedpyright>=1.29",
-]
-# Native desktop app: the same web UI in a frameless pywebview window
-# (`pip install egg[desktop]`). Builds on [webui]; [qt] pulls a GUI backend.
-desktop = [
-  "egg[webui]",
-  "pywebview[qt]>=5.4",
+  # Docs toolchain is a core dependency so `help -> documentation` in the app
+  # always has something to build/serve (it also needs the doxygen binary,
+  # which is not a Python package). Build with:
+  #   uv run sphinx-build -b html docs docs/_build/html
+  "sphinx>=8.2",
+  "pallets-sphinx-themes>=2.3",
+  "breathe>=4.36",
 ]
 
 [project.scripts]
@@ -43,15 +35,11 @@ egg-webui = "egg._webui_launcher:main"
 egg-desktop = "egg._desktop:main"
 
 [dependency-groups]
-# Web UI: `uv sync --group webui` once, then `uv run --no-sync egg-webui`
-# (mirrors the [project.optional-dependencies] webui extra above).
-webui = [
-  "python-fasthtml>=0.12",
-  "basedpyright>=1.29",
-]
-# Native desktop app: `uv sync --group desktop`, then `uv run --no-sync
-# egg-desktop` (mirrors the [project.optional-dependencies] desktop extra).
-desktop = [
+# Web UI and native desktop app (egg-webui / egg-desktop): `uv sync --group ui`.
+# The FastHTML server, basedpyright for the editor's language server
+# (completions, diagnostics, hover; the editor degrades gracefully without it),
+# and pywebview plus a Qt GUI backend for the native window.
+ui = [
   "python-fasthtml>=0.12",
   "basedpyright>=1.29",
   "pywebview[qt]>=5.4",
@@ -59,12 +47,6 @@ desktop = [
 # CAD import adapter (egg.io.cad): `uv sync --group cad`
 cad = [
   "build123d>=0.7",
-]
-# Docs build: `uv run --group docs sphinx-build -b html docs docs/_build/html`
-docs = [
-  "sphinx>=8.2",
-  "pallets-sphinx-themes>=2.3",
-  "breathe>=4.36",
 ]
 
 [tool.scikit-build]

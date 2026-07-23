@@ -465,72 +465,44 @@ name = "egg"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "breathe" },
     { name = "matplotlib" },
     { name = "numpy" },
+    { name = "pallets-sphinx-themes" },
     { name = "pytest" },
     { name = "pyvista" },
     { name = "scipy" },
-]
-
-[package.optional-dependencies]
-desktop = [
-    { name = "basedpyright" },
-    { name = "python-fasthtml" },
-    { name = "pywebview", extra = ["qt"] },
-]
-webui = [
-    { name = "basedpyright" },
-    { name = "python-fasthtml" },
+    { name = "sphinx" },
 ]
 
 [package.dev-dependencies]
 cad = [
     { name = "build123d" },
 ]
-desktop = [
+ui = [
     { name = "basedpyright" },
     { name = "python-fasthtml" },
     { name = "pywebview", extra = ["qt"] },
 ]
-docs = [
-    { name = "breathe" },
-    { name = "pallets-sphinx-themes" },
-    { name = "sphinx" },
-]
-webui = [
-    { name = "basedpyright" },
-    { name = "python-fasthtml" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "basedpyright", marker = "extra == 'webui'", specifier = ">=1.29" },
-    { name = "egg", extras = ["webui"], marker = "extra == 'desktop'" },
+    { name = "breathe", specifier = ">=4.36" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "numpy", specifier = ">=2.4.6" },
+    { name = "pallets-sphinx-themes", specifier = ">=2.3" },
     { name = "pytest", specifier = ">=9.0.3" },
-    { name = "python-fasthtml", marker = "extra == 'webui'", specifier = ">=0.12" },
     { name = "pyvista", specifier = ">=0.48.4" },
-    { name = "pywebview", extras = ["qt"], marker = "extra == 'desktop'", specifier = ">=5.4" },
     { name = "scipy", specifier = ">=1.17.1" },
+    { name = "sphinx", specifier = ">=8.2" },
 ]
-provides-extras = ["webui", "desktop"]
 
 [package.metadata.requires-dev]
 cad = [{ name = "build123d", specifier = ">=0.7" }]
-desktop = [
+ui = [
     { name = "basedpyright", specifier = ">=1.29" },
     { name = "python-fasthtml", specifier = ">=0.12" },
     { name = "pywebview", extras = ["qt"], specifier = ">=5.4" },
-]
-docs = [
-    { name = "breathe", specifier = ">=4.36" },
-    { name = "pallets-sphinx-themes", specifier = ">=2.3" },
-    { name = "sphinx", specifier = ">=8.2" },
-]
-webui = [
-    { name = "basedpyright", specifier = ">=1.29" },
-    { name = "python-fasthtml", specifier = ">=0.12" },
 ]
 
 [[package]]

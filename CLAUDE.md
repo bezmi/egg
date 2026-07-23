@@ -36,7 +36,7 @@ Pitfalls that waste time if you don't know them:
 - **Never assert exact energies** — reduction order makes console energies fluctuate in the 4th–5th digit between runs. Tests use monotonicity, relative bounds, and `real_tol` slack.
 - A `generic` AdaptiveCpp build exposes the OpenMP host *and* the GPU; `--device {cpu,gpu,auto}` picks at runtime. `ACPP_VISIBILITY_MASK=omp` forces CPU-only, `OMP_NUM_THREADS` controls host parallelism.
 - Format with `clang-format -i` (repo `.clang-format`) and `ruff format`. Commits follow Conventional Commits (`feat:`, `fix:`, `docs:`, ...), single-line messages; iterative fixes get squashed/amended into the feature commit rather than stacked.
-- Docs: `uv run --group docs sphinx-build -W -b html docs docs/_build/html` (needs the `doxygen` binary; Doxygen runs automatically from `conf.py`).
+- Docs: `uv run sphinx-build -W -b html docs docs/_build/html` (Sphinx is a core dep; needs the `doxygen` binary; Doxygen runs automatically from `conf.py`).
 - `FAS_plan.md` at the repo root is a deliberately untracked planning scratchpad — leave it untracked and do **not** add it to `.gitignore`.
 
 ## Architecture

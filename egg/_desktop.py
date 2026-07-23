@@ -244,7 +244,7 @@ def main() -> None:
     except ImportError:
         raise SystemExit(
             "egg-desktop needs pywebview and a GUI backend: "
-            "`uv sync --group desktop` (or `uv pip install 'pywebview[qt]'`)"
+            "`uv sync --group ui` (or `uv pip install 'pywebview[qt]'`)"
         ) from None
 
     # Auth: settle the per-launch token in this process's environment before

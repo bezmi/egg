@@ -7,7 +7,7 @@
 # For commercial licensing, contact s.imran@tuta.io
 
 # Sphinx configuration for the egg documentation.
-# Build: uv run --group docs sphinx-build -b html docs docs/_build/html
+# Build: uv run sphinx-build -b html docs docs/_build/html
 
 import subprocess
 from pathlib import Path
