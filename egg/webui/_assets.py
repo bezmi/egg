@@ -42,5 +42,5 @@ def vendor_ready() -> bool:
         return False
     files = [v for v in man.values() if isinstance(v, str)]
     files += [c for c in man.get("_css", []) if isinstance(c, str)]
-    files.append("split.min.js")
+    files += [f for f in man.get("_framework", []) if isinstance(f, str)]
     return all((VENDOR_DIR / f).is_file() for f in files)

@@ -86,7 +86,17 @@ CSS_FILES = [
     "cursor.css",
 ]
 
-SPLIT_URL = f"{NPM_CDN}/split.js@1.6.5/dist/split.min.js"
+# FastHTML injects these framework scripts from a CDN in its default headers. We
+# vendor them too, so the served page never reaches the network at runtime (a
+# security requirement) and a strict CSP (script-src 'self') can be enforced.
+# Pinned to the versions FastHTML 0.14.4 references. Served by fixed name from
+# /vendor and linked in the head (see egg/webui/app.py).
+FRAMEWORK = {
+    "htmx.min.js": f"{NPM_CDN}/htmx.org@2.0.7/dist/htmx.min.js",
+    "fasthtml.js": "https://cdn.jsdelivr.net/gh/answerdotai/fasthtml-js@1.0.12/fasthtml.js",
+    "surreal.js": "https://cdn.jsdelivr.net/gh/answerdotai/surreal@main/surreal.js",
+    "scope.js": "https://cdn.jsdelivr.net/gh/gnat/css-scope-inline@main/script.js",
+}
 
 # Any module specifier in an `import`/`export ... from "..."` (or `import("...")`).
 _SPEC_RE = re.compile(r'(?:from|import|export)\s*\(?\s*"([^"]+)"')
@@ -160,11 +170,13 @@ def vendor(dest: Path | None = None, verbose: bool = True) -> dict[str, str]:
         if verbose:
             print(f"  css -> {name}")
 
-    (dest / "split.min.js").write_bytes(_fetch(SPLIT_URL))
-    if verbose:
-        print("  split.js -> split.min.js")
+    for name, url in FRAMEWORK.items():
+        (dest / name).write_bytes(_fetch(url))
+        if verbose:
+            print(f"  framework -> {name}")
 
     manifest["_css"] = CSS_FILES  # informational; CSS is served by fixed name
+    manifest["_framework"] = list(FRAMEWORK)  # served by fixed name, linked in head
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=1))
     if verbose:
         print(f"vendored into {dest}")

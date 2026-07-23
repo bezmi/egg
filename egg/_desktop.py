@@ -25,6 +25,8 @@ controls this module exposes to JavaScript through ``js_api`` as
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import socket
 import subprocess
 import sys
@@ -149,6 +151,30 @@ def _theme_qt_tooltips() -> None:
         pass
 
 
+def _terminate_group(proc: subprocess.Popen) -> None:
+    """Stop the server child *and its descendants* (uvicorn, the render worker,
+    any LSP subprocess). The child runs in its own process group, so signal the
+    whole group; a plain ``proc.terminate()`` would leave the grandchildren
+    holding the port. SIGTERM first, then SIGKILL if it does not exit."""
+    if proc.poll() is not None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="egg-desktop", description="run the egg web UI in a native window"
@@ -196,9 +222,21 @@ def main() -> None:
             "`uv sync --group desktop` (or `uv pip install 'pywebview[qt]'`)"
         ) from None
 
+    # Auth: settle the per-launch token in this process's environment before
+    # spawning the server child, so the child inherits and reuses it (parent and
+    # child agree on one token) and the webview can carry it on the first load.
+    # The developer-only experimental config flag turns it off.
+    from egg.webui.config import auth_disabled
+    from egg.webui.security import prepare_auth
+
+    token = prepare_auth(a.host, a.port, disabled=auth_disabled())
+    # Tell the server it serves the native app, so its CSP allows the pywebview
+    # bridge (new Function). The child inherits this environment.
+    os.environ["EGG_DESKTOP"] = "1"
+
     # Reuse the egg-webui launcher verbatim, as a child process: it owns
     # asset vendoring, the docs refresh, --watch and opening a script. We
-    # only add the native window on top.
+    # only add the native window on top. It inherits our environment (token).
     server_args = ["--host", a.host, "--port", str(a.port)]
     if a.script:
         server_args.append(a.script)
@@ -209,14 +247,26 @@ def main() -> None:
     if a.no_docs:
         server_args.append("--no-docs")
 
-    proc = subprocess.Popen([sys.executable, "-m", "egg._webui_launcher", *server_args])
+    # Own process group (start_new_session) so we can reliably tear down the
+    # whole server tree (uvicorn + render worker + LSP) on exit; see
+    # _terminate_group. Otherwise a failed or closed window leaves grandchildren
+    # holding the port, and the next launch cannot bind.
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "egg._webui_launcher", *server_args],
+        start_new_session=True,
+    )
     try:
         _wait_until_serving(a.host, a.port, proc)
 
+        # The first load carries the token in the query; the server then sets a
+        # cookie the webview replays on every later request.
+        url = f"http://{a.host}:{a.port}/?desktop=1"
+        if token:
+            url += f"&token={token}"
         controls = WindowControls()
         controls.window = webview.create_window(
             title="egg",
-            url=f"http://{a.host}:{a.port}/?desktop=1",
+            url=url,
             js_api=controls,
             width=1280,
             height=800,
@@ -229,17 +279,23 @@ def main() -> None:
             easy_drag=False,
             background_color="#181818",
         )
+        # Reap the server tree the moment the window closes, in case the GUI
+        # loop exits abnormally (a pywebview/Qt crash) and the finally below is
+        # skipped. Idempotent with the finally and the child's own reaper.
+        try:
+            controls.window.events.closed += lambda: _terminate_group(proc)
+        except Exception:
+            pass
         # Blocks on the GUI event loop until the window is closed. The startup
         # hook recolors Qt's native tooltip (a garish yellow by default on some
-        # Linux setups) to match the dark app chrome.
+        # Linux setups). Remote content is already blocked by the page CSP
+        # (default-src 'self'), and a token-less external origin cannot reach the
+        # server, so no webview-level navigation lock is installed (an earlier Qt
+        # URL interceptor ran on the wrong thread and destabilised the window).
         webview.start(_theme_qt_tooltips)
     finally:
-        # The window is gone (or we failed to open it): stop the server.
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        # The window is gone (or we failed to open it): stop the whole tree.
+        _terminate_group(proc)
 
 
 if __name__ == "__main__":

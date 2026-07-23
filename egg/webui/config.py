@@ -54,6 +54,12 @@ DEFAULTS: dict[str, Any] = {
         #   "off"   - never auto-run; use the run button
         "autorun": "delay",
     },
+    "ui": {
+        # height the documentation popup opens at, as a percent of the window
+        # (it can still be dragged taller/shorter for the current view). Fixed so
+        # a long docs page does not open a taller pane than a short one.
+        "doc_pane_pct": 25,
+    },
     "keybinds": {
         "run": "Ctrl+Enter",  # also stops when a run is streaming
         "comment_toggle": "Ctrl+/",
@@ -72,7 +78,13 @@ DEFAULTS: dict[str, Any] = {
         # how many previous run logs to keep (older ones are pruned)
         "keep": 10,
     },
-    "experimental": {},
+    "experimental": {
+        # Developer-only: skip the per-launch auth token, so any local client
+        # can reach the server without it. This removes the main protection on
+        # what is otherwise privileged local IPC (it runs code and reads/writes
+        # files). Never set this outside a trusted development machine.
+        "disable_auth": False,
+    },
 }
 
 
@@ -124,11 +136,18 @@ def logs_dir(cfg: dict | None = None) -> Path:
     return Path(d).expanduser() if d else config_dir() / "logs"
 
 
+def auth_disabled(cfg: dict | None = None) -> bool:
+    """Whether the developer-only experimental flag turns the auth token off."""
+    cfg = cfg if cfg is not None else load_config()
+    return bool(cfg.get("experimental", {}).get("disable_auth", False))
+
+
 def client_config(cfg: dict | None = None) -> dict:
-    """The subset the browser needs (delays, behaviour, keybinds)."""
+    """The subset the browser needs (delays, behaviour, keybinds, ui)."""
     cfg = cfg if cfg is not None else load_config()
     return {
         "delays": cfg.get("delays", {}),
         "behavior": cfg.get("behavior", {}),
         "keybinds": cfg.get("keybinds", {}),
+        "ui": cfg.get("ui", {}),
     }

@@ -137,7 +137,9 @@ try {
     let sock;
     try {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      sock = new WebSocket(`${proto}://${location.host}/lsp`);
+      // same-origin cookie authenticates the handshake; the token is a fallback
+      const tok = window.eggToken ? `?token=${encodeURIComponent(window.eggToken)}` : '';
+      sock = new WebSocket(`${proto}://${location.host}/lsp${tok}`);
     } catch (e) {
       return;
     }
@@ -564,16 +566,29 @@ try {
       const [a, b] = editor.getSelection();
       return editor.value.slice(Math.min(a, b), Math.max(a, b));
     };
-    const doCopy = () => { const t = selText(); if (t) navigator.clipboard.writeText(t); };
+    // Route writes through eggCopyText: in the native app (pywebview),
+    // navigator.clipboard triggers a Qt permission request that crashes some
+    // pywebview builds, so it uses an execCommand fallback there.
+    const clipWrite = (t) =>
+      (window.eggCopyText ? window.eggCopyText(t) : navigator.clipboard.writeText(t));
+    const doCopy = () => { const t = selText(); if (t) clipWrite(t); };
     const doCut = () => {
       const [a, b] = editor.getSelection();
       const lo = Math.min(a, b), hi = Math.max(a, b);
       if (hi === lo) return;
-      navigator.clipboard.writeText(editor.value.slice(lo, hi));
+      clipWrite(editor.value.slice(lo, hi));
       utils.insertText(editor, '', lo, hi);
       editor.textarea.focus();
     };
     const doPaste = async () => {
+      // Reading the clipboard via navigator.clipboard crashes pywebview (same Qt
+      // bug), so in the native app fall back to the synchronous paste (Ctrl+V
+      // also works natively). In a browser use the async clipboard API.
+      if (window.pywebview) {
+        editor.textarea.focus();
+        try { document.execCommand('paste'); } catch (e) { /* Ctrl+V still works */ }
+        return;
+      }
       let t = '';
       try { t = await navigator.clipboard.readText(); } catch (e) { return; }
       if (!t) return;
@@ -595,12 +610,42 @@ try {
       const range = loc.range || loc.targetSelectionRange || loc.targetRange;
       if (!uri || !range) return;
       if (uri !== docUri) {
-        if (window.eggAlert) window.eggAlert('Definition is in another file (not open).');
+        // The definition is in another file. Jump to the import that brings the
+        // symbol in (so the user can follow it), and flash a yellow warning with
+        // the real location instead of a dialog.
+        const sym = wordAt(editor.value, ctxPos);
+        const path = decodeURIComponent(uri.replace(/^file:\/\//, ''));
+        const line = (range.start.line | 0) + 1;
+        const ch = (range.start.character | 0) + 1;
+        const importLine = findImportLine(editor.value, sym);
+        if (importLine >= 0) {
+          const off = lcToOffset(editor.value, importLine, 0);
+          utils.setSelection(editor, off, off);
+          editor.textarea.focus();
+        }
+        const who = sym ? `'${sym}' ` : 'the definition ';
+        if (window.eggFlashWarn)
+          window.eggFlashWarn(`${who}is defined outside this file: ${path}:${line}:${ch}`);
         return;
       }
       const off = lcToOffset(editor.value, range.start.line, range.start.character);
       utils.setSelection(editor, off, off);
       editor.textarea.focus();
+    };
+    // The line index (0-based) of the import that brings ``sym`` into the file:
+    // prefer an import that names the symbol, else the first import line, else
+    // -1. Lets "go to definition" on an external symbol land on the import that
+    // reaches it.
+    const findImportLine = (src, sym) => {
+      const lines = src.split('\n');
+      const isImport = (l) => /^\s*(from\s+\S+\s+import\s+|import\s+)/.test(l);
+      if (sym) {
+        const named = new RegExp('\\b' + sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b');
+        for (let i = 0; i < lines.length; i++)
+          if (isImport(lines[i]) && named.test(lines[i])) return i;
+      }
+      for (let i = 0; i < lines.length; i++) if (isImport(lines[i])) return i;
+      return -1;
     };
     // Render inline markdown (`code`, **bold**, *italic*) into `parent` as DOM
     // Built node by node (never innerHTML) so the LSP text cannot inject markup.
@@ -678,50 +723,41 @@ try {
         container.appendChild(p);
       }
     };
-    // Documentation pane: a full-width bar floated over the bottom of the page
-    // (position:fixed, so it never reflows the layout), dismissed with esc or ×.
-    let docPane = null;
-    const closeDocPane = () => { if (docPane) { docPane.remove(); docPane = null; } };
+    // Documentation popup: the shared bottom pane (window.eggPane in app.js),
+    // dismissed with esc or ×. The pane chrome is shared with the warning; here
+    // we only build the doc body.
+    const closeDocPane = () => { if (window.eggPaneClose) window.eggPaneClose(); };
+    // the configured opening height for the docs popup (percent of the window)
+    const docPanePct = () => {
+      const v = window.eggConfig && window.eggConfig.ui
+        && window.eggConfig.ui.doc_pane_pct;
+      return typeof v === 'number' ? v : 25;
+    };
     const showDocPane = (text) => {
-      closeDocPane();
-      docPane = document.createElement('div');
-      docPane.className = 'egg-doc-pane';
-      const head = document.createElement('div');
-      head.className = 'egg-doc-head';
-      const title = document.createElement('span');
-      title.textContent = 'documentation';
-      const x = document.createElement('button');
-      x.textContent = '×';
-      x.title = 'dismiss (esc)';
-      x.addEventListener('click', closeDocPane);
-      head.append(title, x);
-      const body = document.createElement('div');
-      body.className = 'egg-doc-body';
-      mdRender(body, text);
-      docPane.append(head, body);
-      document.body.appendChild(docPane);
+      if (!window.eggPane) return;
+      window.eggPane({
+        title: 'documentation',
+        severity: 'doc',
+        resizable: true,
+        heightPct: docPanePct(),
+        render: (body) => mdRender(body, text),
+      });
     };
     // Embed a Sphinx-built documentation fragment (locally built, trusted HTML).
     // Links point at doc pages not loaded here, so they are neutralised.
     const showDocPaneHtml = (html, fqn) => {
-      closeDocPane();
-      docPane = document.createElement('div');
-      docPane.className = 'egg-doc-pane';
-      const head = document.createElement('div');
-      head.className = 'egg-doc-head';
-      const title = document.createElement('span');
-      title.textContent = fqn ? 'documentation: ' + fqn : 'documentation';
-      const x = document.createElement('button');
-      x.textContent = '×';
-      x.title = 'dismiss (esc)';
-      x.addEventListener('click', closeDocPane);
-      head.append(title, x);
-      const body = document.createElement('div');
-      body.className = 'egg-doc-body egg-doc-sphinx';
-      body.innerHTML = html;
-      body.querySelectorAll('a').forEach((a) => a.removeAttribute('href'));
-      docPane.append(head, body);
-      document.body.appendChild(docPane);
+      if (!window.eggPane) return;
+      window.eggPane({
+        title: fqn ? 'documentation: ' + fqn : 'documentation',
+        severity: 'doc',
+        resizable: true,
+        heightPct: docPanePct(),
+        bodyClass: 'egg-doc-sphinx',
+        render: (body) => {
+          body.innerHTML = html;
+          body.querySelectorAll('a').forEach((a) => a.removeAttribute('href'));
+        },
+      });
     };
     // The identifier under a document offset (for the Sphinx doc lookup).
     const wordAt = (value, pos) => {

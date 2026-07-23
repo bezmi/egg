@@ -231,7 +231,7 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 .fs-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .fs-box { background: var(--ctp-base); border-radius: 8px; width: min(460px, 92vw);
   max-height: min(540px, 80dvh); display: flex; flex-direction: column;
-  padding: 10px; gap: 8px; font-size: 13px; }
+  padding: 16px; gap: 8px; font-size: 13px; }
 .fs-head { display: flex; justify-content: space-between; align-items: center;
   font-weight: 600; }
 .fs-path { font-family: ui-monospace, monospace; font-size: 11px;
@@ -309,14 +309,17 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 .editor > textarea, .editor .prism-code-editor {
   font-size: var(--egg-edfont, 13px) !important; }
 .panes.split-active .editor, .panes.split-active .viewer { flex: none; }
-/* Split.js gutter (created at runtime): the whole strip is the grab target
-   (::after just widens the hit area for the pointer) and it tints on hover.
-   No visible grip handle (it read as a redundant scrollbar). */
+/* the split gutter (created at runtime by initSplit): the whole strip is the
+   grab target (::after just widens the hit area for the pointer) and it tints on
+   hover. No visible grip handle (it read as a redundant scrollbar). */
 .gutter { flex: none; cursor: col-resize; touch-action: none; position: relative;
           background: var(--ctp-surface1); transition: background 0.15s; z-index: 5; }
 .gutter:hover { background: var(--ctp-overlay0); }
+/* Widen the grab area on the VIEWER side only. The editor sits to the left and
+   its scrollbar hugs the gutter, so do not extend left over it (that stole the
+   scrollbar's clicks). */
 .gutter::after { content: ''; position: absolute; top: 0; bottom: 0;
-                 left: -10px; right: -10px; }
+                 left: 0; right: -8px; }
 /* stacked (vertical) mode: the gutter is a horizontal strip */
 .gutter.gutter-vertical { cursor: row-resize; }
 .gutter.gutter-vertical::after { left: 0; right: 0; top: -10px; bottom: -10px; }
@@ -329,15 +332,28 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 html.egg-watching .pce-diag-tip,
 html.egg-watching .pce-sig-tip { display: none !important; }
 .panes.watching .viewer { flex: 1 !important; width: auto !important; }
+/* While dragging the split gutter, hide the dense SVG layers (grid lines, nodes,
+   curves, net) so the viewer re-rasterizes cheaply on each frame. Block fills
+   and outlines stay for context; full detail returns on release. */
+html.egg-resizing .grid-lines,
+html.egg-resizing .layer-curves,
+html.egg-resizing .layer-points,
+html.egg-resizing .layer-ctrl,
+html.egg-resizing .layer-net,
+html.egg-resizing .layer-tangled { display: none; }
 /* landing page: full-window splash + entry points shown when nothing is open */
 #landing { position: fixed; inset: 0; z-index: 30; display: none;
   align-items: center; justify-content: center; background: var(--ctp-base); }
+/* native app: the minimal titlebar sits at the top of the overlay (out of the
+   centered card's flow) so the window controls stay clickable */
+.landing-titlebar { position: absolute; top: 0; left: 0; right: 0; z-index: 1; }
 .landing-card { display: flex; flex-direction: column; align-items: center;
   gap: 4px; padding: 32px; max-width: 90vw; }
 .landing-logo svg, .landing-logo { width: 84px; height: 84px; color: var(--ctp-yellow); }
 .landing-title { font-size: 46px; font-weight: 700; letter-spacing: 0.02em;
   color: var(--ctp-text); line-height: 1.1; }
-.landing-sub { font-size: 14px; color: var(--ctp-subtext0); margin-bottom: 22px; }
+.landing-sub { font-size: 14px; color: var(--ctp-subtext0);
+  margin-top: 12px; margin-bottom: 22px; }
 .landing-opts { display: flex; flex-direction: column; gap: 6px; width: 300px;
   max-width: 90vw; }
 .landing-opt { text-align: left; background: var(--ctp-mantle);
@@ -359,24 +375,46 @@ html.egg-watching .pce-sig-tip { display: none !important; }
 .pce-ctx-sep { height: 1px; margin: 3px 6px; background: var(--ctp-surface1); }
 html.egg-watching .pce-ctx { display: none !important; }
 /* LSP documentation pane: floats over the bottom, never reflows the layout */
-.egg-doc-pane { position: fixed; left: 0; right: 0; bottom: 0; z-index: 38;
-  max-height: 42vh; display: flex; flex-direction: column;
-  background: var(--ctp-mantle); border-top: 1px solid var(--ctp-surface1);
+/* Unified dismissable bottom pane (documentation, go-to-definition warning): a
+   bar fixed across the whole bottom of the app, with a title, optional copy
+   button, and a × (also dismissed with esc). Severity tints the top border and
+   warning text. The doc pane adds a top grip to resize it up/down. */
+.egg-pane { position: fixed; left: 0; right: 0; bottom: 0; z-index: 38;
+  max-height: 85vh; display: flex; flex-direction: column;
+  background: var(--ctp-mantle); border-top: 2px solid var(--ctp-surface2);
   box-shadow: 0 -6px 24px rgba(0,0,0,0.35); }
-.egg-doc-head { display: flex; align-items: center; justify-content: space-between;
+.egg-pane-warn { border-top-color: var(--ctp-yellow); }
+.egg-pane-error { border-top-color: var(--ctp-red); }
+.egg-pane-error .egg-pane-title { color: var(--ctp-red); }
+.egg-pane-error .egg-pane-body { color: var(--ctp-red);
+  background: color-mix(in srgb, var(--ctp-red) 8%, var(--ctp-mantle)); }
+.egg-pane-pre { margin: 0; font: 12px/1.5 ui-monospace, monospace;
+  white-space: pre-wrap; }
+/* a docs/warning pane covers the error overlay while it is open */
+body.egg-pane-open .egg-pane-error { display: none; }
+/* drag handle on the top edge to resize the pane up/down (doc pane), coloured
+   and hover-tinted like the split gutter. */
+.egg-pane-resize { flex: 0 0 auto; height: 10px; cursor: ns-resize;
+  touch-action: none; background: var(--ctp-surface1); }
+.egg-pane-resize:hover { background: var(--ctp-surface2); }
+.egg-pane-head { display: flex; align-items: center; gap: 8px;
   padding: 5px 12px; border-bottom: 1px solid var(--ctp-surface0);
-  font-size: 12px; color: var(--ctp-subtext0); text-transform: uppercase;
-  letter-spacing: 0.05em; }
-.egg-doc-head button { background: none; border: 0; color: var(--ctp-text);
-  font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px; }
-.egg-doc-body { overflow: auto; padding: 10px 16px 14px;
-  font-size: 13px; line-height: 1.55; color: var(--ctp-text); }
+  font-size: 12px; color: var(--ctp-subtext0); }
+.egg-pane-title { flex: 1; text-transform: uppercase; letter-spacing: 0.05em; }
+.egg-pane-warn .egg-pane-title { color: var(--ctp-yellow); }
+.egg-pane-close { flex: 0 0 auto; background: none; border: 0;
+  color: var(--ctp-text); font-size: 18px; line-height: 1; cursor: pointer;
+  padding: 0 4px; }
+.egg-pane-body { flex: 1; min-height: 0; overflow: auto; padding: 10px 16px 14px;
+  font-size: 13px; line-height: 1.55; color: var(--ctp-text);
+  word-break: break-word; }
+.egg-pane-warn .egg-pane-body { color: var(--ctp-yellow); font-size: 12px; }
+.egg-pane-body hr { border: 0; border-top: 1px solid var(--ctp-surface0); margin: 10px 0; }
+.egg-pane-body code { font: 12px/1.4 ui-monospace, monospace;
+  background: var(--ctp-surface0); padding: 1px 4px; border-radius: 4px; }
 .egg-doc-h { font-weight: 600; font-size: 13px; margin: 10px 0 4px;
   color: var(--ctp-subtext1); }
 .egg-doc-p { margin: 6px 0; white-space: pre-wrap; }
-.egg-doc-body hr { border: 0; border-top: 1px solid var(--ctp-surface0); margin: 10px 0; }
-.egg-doc-body code { font: 12px/1.4 ui-monospace, monospace;
-  background: var(--ctp-surface0); padding: 1px 4px; border-radius: 4px; }
 .egg-doc-code { overflow-x: auto; margin: 8px 0; padding: 8px 10px;
   background: var(--ctp-crust); border: 1px solid var(--ctp-surface0);
   border-radius: 6px; font: 12px/1.5 ui-monospace, monospace;
@@ -509,6 +547,19 @@ html.restoring .canvas svg { visibility: hidden; }
 #view.no-block-fill .grid-outline.b4, #view.no-block-fill .grid-outline.b5
   { stroke: var(--egg-grid-line); }
 #view.no-block-outline .grid-outline { display: none; }
+/* "grid" hides only the interior grid lines, independent of the block
+   boundaries (.grid-outline) and fills, so each can be toggled on its own. */
+#view.no-grid-lines .grid-lines { display: none; }
+/* text selection app-wide: match the editor's selection tint (--pce-selection)
+   instead of the browser's default system blue */
+::selection { background: var(--ctp-surface2); }
+::-moz-selection { background: var(--ctp-surface2); }
+/* one-click copy button on the error box and the warning flash */
+.copybtn { flex: 0 0 auto; padding: 1px 8px; font-size: 11px; line-height: 1.5;
+  border-radius: 4px; cursor: pointer; background: var(--ctp-surface0);
+  color: var(--ctp-text); border: 1px solid var(--ctp-surface1); }
+.copybtn:hover { background: var(--ctp-surface1); }
+.copytext { user-select: text; }
 .layer-tangled { fill: var(--egg-tangled); fill-opacity: 0.35; }
 .topo-block { fill: var(--egg-topo-line); fill-opacity: 0.02;
               stroke: var(--egg-topo-line); stroke-width: 1.6; }
@@ -680,9 +731,6 @@ button.primary:not(:disabled) { background: var(--egg-spark-energy);
   .bar .btns button, .fs-box button:not(.fs-entry), .bar .btns select {
     padding: 8px 14px; font-size: 13px; }
 }
-pre.err { margin: 0; padding: 8px 10px; max-height: 12em; overflow: auto;
-          background: color-mix(in srgb, var(--ctp-red) 10%, var(--ctp-base)); color: var(--ctp-red); border-top: 2px solid var(--ctp-red);
-          font-size: 12px; white-space: pre-wrap; }
 details.out { border-top: 1px solid var(--ctp-surface1); font-size: 12px; }
 details.out pre { margin: 0; padding: 6px 10px; max-height: 8em; overflow: auto; }
 /* live run log: script egg.webui_print output, streamed during a run */

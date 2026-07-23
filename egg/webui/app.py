@@ -64,6 +64,7 @@ from fasthtml.common import (
     Input,
     Label,
     Link,
+    Meta,
     NotStr,
     Option,
     Pre,
@@ -174,8 +175,14 @@ EDITOR_JS = _static("editor.js")
 # app.js / editor.js read it with defaults, so a missing key changes nothing.
 # Config changes take effect on the next server start.
 from .config import client_config as _client_config
+from .security import SecurityMiddleware, canonical_path, configured_token
 
 CONFIG_JS = f"window.eggConfig = {json.dumps(_client_config())};"
+# The launch auth token, exposed to the page so JS can append it when it opens a
+# local URL in a separate browser (documentation in the system browser has no
+# cookie yet). Only an already-authenticated client can load this page, so this
+# does not widen exposure. Empty string when auth is off.
+TOKEN_JS = f"window.eggToken = {json.dumps(configured_token() or '')};"
 
 # All browser assets are served locally from /vendor (no CDN fallback, by
 # design). They are produced offline by tools/vendor_webui.py — at wheel-build
@@ -184,8 +191,6 @@ CONFIG_JS = f"window.eggConfig = {json.dumps(_client_config())};"
 # reaching out to the network.
 if not vendor_ready():
     raise SystemExit(MISSING_MSG)
-
-_SPLIT_SRC = "/vendor/split.min.js"
 
 # prism-code-editor stylesheets (served locally from /vendor): the required
 # layout plus the enabled extensions. The catppuccin token/chrome theme lives
@@ -198,16 +203,27 @@ _PCE_CSS = (
     "cursor.css",
 )
 
+# default_hdrs=False: FastHTML's defaults pull htmx / fasthtml.js / surreal /
+# css-scope-inline from a CDN. We serve vendored copies from /vendor instead, so
+# the page never reaches the network at runtime and the CSP can stay 'self'.
+# htmx loads before the inline app.js that uses it. The ws htmx extension is not
+# used (the frame socket is a manual WebSocket), so it is not included.
 app, rt = fast_app(
-    pico=False,
-    exts="ws",
+    default_hdrs=False,
     hdrs=(
+        Meta(charset="utf-8"),
+        Meta(name="viewport",
+             content="width=device-width, initial-scale=1, viewport-fit=cover"),
+        Script(src="/vendor/htmx.min.js"),
+        Script(src="/vendor/fasthtml.js"),
+        Script(src="/vendor/surreal.js"),
+        Script(src="/vendor/scope.js"),
         Link(rel="icon", type="image/svg+xml", href=FAVICON, id="favicon"),
         *(Link(rel="stylesheet", href=f"/vendor/{c}") for c in _PCE_CSS),
         Style(CSS),
         Style(CATPPUCCIN),
-        Script(src=_SPLIT_SRC),
         Script(NotStr(CONFIG_JS)),  # window.eggConfig, before app.js reads it
+        Script(NotStr(TOKEN_JS)),   # window.eggToken, for local links opened elsewhere
         Script(JS),
         Script(EDITOR_JS, type="module"),
     ),
@@ -237,6 +253,11 @@ if DOCS_DIR and DOCS_DIR.is_dir():
     app.router.routes.insert(
         0, Mount("/docs", app=StaticFiles(directory=DOCS_DIR, html=True), name="docs")
     )
+
+# Treat the client/server link as privileged local IPC: enforce the launch auth
+# token, the Host/Origin allowlists, and the CSP on every request (HTTP and
+# WebSocket). Inert when no token is configured (a bare import or the tests).
+app.add_middleware(SecurityMiddleware)
 
 # --- per-session state (server pushes frames to the client) ---
 # A solver run's state is keyed by a session id: one per open UI (a browser tab,
@@ -659,6 +680,22 @@ def _edit_disabled_note(r: SceneResult):
     )
 
 
+def _err_box(text: str):
+    """The runtime-error overlay: a red egg-pane fixed across the whole bottom of
+    the app (the same system as the docs / warning panes), with a one-click copy
+    button. The text stays a selectable <pre>. A docs/warning pane covers it
+    while open (body.egg-pane-open in app.css)."""
+    return Div(
+        Div(
+            Span("error", cls="egg-pane-title"),
+            Button("copy", cls="copybtn", type="button", title="copy the error text"),
+            cls="egg-pane-head",
+        ),
+        Pre(text, cls="egg-pane-body copytext egg-pane-pre"),
+        cls="egg-pane egg-pane-error copybox",
+    )
+
+
 def view_fragment(r: SceneResult, code: str, mode: str = "grid", sess: dict | None = None):
     """Build the #view contents from a worker-rendered scene."""
     run = sess["run"] if sess else None
@@ -696,7 +733,7 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid", sess: dict | No
                     f"error at line {lines[-1]}", cls="errline bad", data_line=lines[-1]
                 )
             )
-        extras.append(Pre(r.error, cls="err"))
+        extras.append(_err_box(r.error))
     # Editing (or reloading) mid-run must not flash the canvas back to a
     # static TFI render: keep the streaming mesh; the fresh exec still
     # supplies the chips, errors, and stdout above/below it.
@@ -782,7 +819,7 @@ def _fail_frame(sid, sess, msg: str, detail: str | None = None) -> None:
                  resumable=_is_resumable(sess))
     )
     if detail:
-        parts += to_xml(Div(Pre(detail, cls="err"), id="viewextra", hx_swap_oob="true"))
+        parts += to_xml(Div(_err_box(detail), id="viewextra", hx_swap_oob="true"))
     _broadcast(sid, parts)
 
 
@@ -1106,16 +1143,16 @@ def _write_out(out: str, data: bytes | str):
     the picker's path is a real filesystem path). Returns a JSONResponse."""
     if not out:
         return JSONResponse({"error": "no destination chosen"}, status_code=400)
-    p = Path(out).expanduser()
     try:
+        p = canonical_path(out)
         p.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(data, str):
             p.write_text(data)
         else:
             p.write_bytes(data)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return JSONResponse({"error": f"write failed: {exc}"}, status_code=400)
-    return JSONResponse({"path": str(p.resolve())})
+    return JSONResponse({"path": str(p)})
 
 
 @rt("/export/su2", methods=["post"])
@@ -1194,10 +1231,13 @@ async def open_eggy_route(archive: str, dest: str, name: str):
     def work():
         from egg.io import eggy
 
-        arc = str(Path(archive).expanduser())
+        arc = str(canonical_path(archive))
         if not eggy.is_eggy(arc):
             raise ValueError("not a .eggy archive (a zip holding a script)")
-        target = Path(dest).expanduser() / name
+        leaf = Path(name).name
+        if not leaf or leaf in (".", ".."):
+            raise ValueError("invalid destination name")
+        target = canonical_path(dest) / leaf
         target.mkdir(parents=True, exist_ok=True)
         eggy.unpack(arc, str(target))
         script = eggy.entry_script(str(target))
@@ -1282,9 +1322,14 @@ def new_project_route(dest: str, name: str):
     default example when present, otherwise a minimal runnable topology."""
 
     def work():
-        base = Path(dest).expanduser() / name
+        # name is one directory component; strip any path separators so it can
+        # not escape dest with a slash or "..".
+        leaf = Path(name).name
+        if not leaf or leaf in (".", ".."):
+            raise ValueError("invalid project name")
+        base = canonical_path(dest) / leaf
         base.mkdir(parents=True, exist_ok=True)
-        script = base / f"{name}.py"
+        script = base / f"{leaf}.py"
         if script.exists():
             raise ValueError(f"{script} already exists")
         script.write_text(_NEW_PROJECT_STARTER)
@@ -1416,15 +1461,15 @@ def save_eggy_route(code: str, path: str = "", out: str = ""):
     def work():
         from egg.io import deps
 
-        p = Path(path).expanduser()
+        p = canonical_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(code)
-        outp = Path(out).expanduser()
+        outp = canonical_path(out)
         outp.parent.mkdir(parents=True, exist_ok=True)
         # pack the case folder AND bundle any egg.file_import() deps of the
         # script (copied under deps/, their paths rewritten in the archive).
         deps.pack_case(str(outp), str(p.parent), str(p))
-        return str(outp.resolve())
+        return str(outp)
 
     try:
         outp = work()
@@ -1441,7 +1486,10 @@ def save_eggy_route(code: str, path: str = "", out: str = ""):
 def api_files(dir: str = "", ext: str = ".py"):
     """List one directory: subdirs + files matching ``ext`` (``*`` for all;
     hidden/__pycache__ skipped)."""
-    d = (Path(dir).expanduser() if dir else (_REPO_ROOT or Path.home())).resolve()
+    try:
+        d = canonical_path(dir) if dir else (_REPO_ROOT or Path.home()).resolve()
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     if not d.is_dir():
         return JSONResponse({"error": f"not a directory: {d}"}, status_code=400)
     try:
@@ -1462,8 +1510,8 @@ def api_files(dir: str = "", ext: str = ".py"):
 
 @rt("/api/file")
 async def api_file_read(path: str, check: str = "1"):
-    p = Path(path).expanduser()
     try:
+        p = canonical_path(path)
         code = p.read_text()
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1496,20 +1544,20 @@ def api_syntax(code: str):
 def api_exists(path: str):
     """Whether a path exists (and is a dir) — the picker uses this to prompt
     before overwriting a file."""
-    p = Path(path).expanduser()
     try:
+        p = canonical_path(path)
         return JSONResponse({"exists": p.exists(), "is_dir": p.is_dir()})
-    except OSError:
+    except Exception:
         return JSONResponse({"exists": False, "is_dir": False})
 
 
 @rt("/api/file/save", methods=["post"])
 def api_file_save(path: str, code: str):
-    p = Path(path).expanduser()
     try:
+        p = canonical_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(code)
-        return JSONResponse({"path": str(p.resolve())})
+        return JSONResponse({"path": str(p)})
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -1992,6 +2040,18 @@ def _window_controls():
     )
 
 
+def _landing_titlebar():
+    """A minimal window titlebar for the landing overlay in the native app: just
+    the drag handle and the min/maximize/close controls (no menus). The landing
+    overlay covers the real titlebar, so without this the window controls would
+    be unreachable while the landing page is up."""
+    return Header(
+        Div(cls="desktop-titlebar__drag"),
+        _window_controls(),
+        cls="desktop-titlebar landing-titlebar",
+    )
+
+
 def _titlebar_or_header(desktop: object, *menu_items):
     """The top toolbar: the same logo + file/view/help dropdowns either way,
     followed by the filename chip and the pan/zoom hint.
@@ -2096,6 +2156,18 @@ async def get(view: str = "grid", desktop: int = 0):
                 "view",
                 Button("fit", id="fit"),
                 Div(cls="menu-sep"),
+                # "grid" hides only the interior grid lines (a scene-toggle on
+                # #view), so block boundaries and fills stay independently
+                # toggleable below even with the grid off.
+                Label(
+                    Input(
+                        type="checkbox",
+                        checked=True,
+                        cls="scene-toggle",
+                        data_toggle="grid-lines",
+                    ),
+                    "grid",
+                ),
                 *[
                     Label(
                         Input(
@@ -2106,7 +2178,7 @@ async def get(view: str = "grid", desktop: int = 0):
                         ),
                         layer,
                     )
-                    for layer in ("grid", "tangled", "curves", "points")
+                    for layer in ("tangled", "curves", "points")
                 ],
                 Label(
                     Input(type="checkbox", cls="layer-toggle", data_layer="ctrl"),
@@ -2246,6 +2318,9 @@ async def get(view: str = "grid", desktop: int = 0):
         # example is loaded). A splash plus the entry points; each option drives
         # an existing flow and hides the landing once a project is opened.
         Div(
+            # native app: a minimal titlebar so the window controls stay reachable
+            # while the landing overlay is up (it covers the real titlebar)
+            *([_landing_titlebar()] if desktop else []),
             Div(
                 Div(NotStr(EGG_LOGO), cls="landing-logo"),
                 Div("egg", cls="landing-title"),

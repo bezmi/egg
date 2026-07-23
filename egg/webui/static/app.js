@@ -30,6 +30,126 @@ window.addEventListener('unhandledrejection', (e) => {
   eggLogClient('error', (r && (r.stack || r.message)) || String(r), 'promise');
 });
 
+// The launch auth token (window.eggToken, injected before this script). Needed
+// only for a WebSocket handshake and for a same-origin URL opened in a SEPARATE
+// browser (the desktop opens docs in the system browser, which has no auth
+// cookie yet). Same-origin HTTP requests carry the cookie automatically. Empty
+// string when auth is disabled, so these are no-ops then.
+function eggTokenParam(sep) {
+  return window.eggToken ? `${sep}token=${encodeURIComponent(window.eggToken)}` : '';
+}
+function eggWithToken(url) {
+  return url + eggTokenParam(url.includes('?') ? '&' : '?');
+}
+
+// Copy button shared by the error box, the warning, and the doc pane: copy the
+// text of the sibling .copytext (or pre) in the same .copybox, then flash the
+// button label. eggCopyText handles a non-secure context / the native app.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.copybtn');
+  if (!btn) return;
+  const box = btn.closest('.copybox') || btn.parentElement;
+  const src = box && (box.querySelector('.copytext') || box.querySelector('pre'));
+  const text = src ? src.textContent : '';
+  if (!text) return;
+  eggCopyText(text);
+  const prev = btn.textContent;
+  btn.textContent = 'copied';
+  setTimeout(() => { if (btn.textContent === 'copied') btn.textContent = prev; }, 900);
+});
+
+// Unified dismissable bottom pane, fixed across the whole bottom of the app.
+// One at a time; the × or Escape closes it. Both the go-to-definition warning
+// and the documentation popup use it, so their chrome (title bar, close, esc)
+// lives in one place. opts:
+//   title     - the header label
+//   severity  - 'warn' | 'doc' (tints the top border and, for warn, the text)
+//   render    - fn(bodyEl) that fills the body (docs)
+//   copyText  - a string shown as the body with a copy button (warning)
+//   resizable - add a top grip to drag the pane taller/shorter (this view only)
+//   heightPct - open at this percent of the window height (fixed, not content)
+let eggPaneEl = null;
+function eggPaneClose() {
+  if (eggPaneEl) { eggPaneEl.remove(); eggPaneEl = null; }
+  // the server-rendered error overlay was hidden underneath: show it again
+  document.body.classList.remove('egg-pane-open');
+}
+window.eggPaneClose = eggPaneClose;
+// Drag the top grip to resize the pane. It is anchored at the bottom, so the
+// height is the gap from the pointer to the bottom of the window, clamped. The
+// move/up listeners live on the document so the drag keeps tracking even when
+// the pointer leaves the thin grip.
+function eggPaneAddResize(pane, grip) {
+  grip.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    const onMove = (ev) => {
+      const h = Math.max(80, Math.min(window.innerHeight * 0.9,
+                                      window.innerHeight - ev.clientY));
+      pane.style.height = h + 'px';
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+  });
+}
+window.eggPane = (opts = {}) => {
+  eggPaneClose();
+  const pane = document.createElement('div');
+  pane.className = 'egg-pane copybox' + (opts.severity ? ' egg-pane-' + opts.severity : '');
+  if (opts.resizable) {
+    const grip = document.createElement('div');
+    grip.className = 'egg-pane-resize';
+    grip.title = 'drag to resize';
+    eggPaneAddResize(pane, grip);
+    pane.appendChild(grip);
+  }
+  // Open at a fixed height (a configured % of the window), so the pane is the
+  // same size no matter how much content it holds. It can still be dragged
+  // taller/shorter for the current view; that is not remembered.
+  if (opts.heightPct) {
+    const h = Math.max(80, Math.min(window.innerHeight * 0.9,
+                                    window.innerHeight * opts.heightPct / 100));
+    pane.style.height = h + 'px';
+  }
+  const head = document.createElement('div');
+  head.className = 'egg-pane-head';
+  const title = document.createElement('span');
+  title.className = 'egg-pane-title';
+  title.textContent = opts.title || '';
+  head.appendChild(title);
+  if (opts.copyText != null) {
+    const copy = document.createElement('button');
+    copy.className = 'copybtn'; copy.type = 'button'; copy.textContent = 'copy';
+    head.appendChild(copy);
+  }
+  const x = document.createElement('button');
+  x.className = 'egg-pane-close'; x.type = 'button'; x.textContent = '×';
+  x.title = 'dismiss (esc)';
+  x.addEventListener('click', eggPaneClose);
+  head.appendChild(x);
+  const body = document.createElement('div');
+  body.className = 'egg-pane-body' + (opts.bodyClass ? ' ' + opts.bodyClass : '');
+  if (typeof opts.render === 'function') opts.render(body);
+  else if (opts.copyText != null) { body.textContent = opts.copyText; body.classList.add('copytext'); }
+  pane.append(head, body);
+  document.body.appendChild(pane);  // fixed, full app width
+  document.body.classList.add('egg-pane-open');  // cover the error overlay
+  eggPaneEl = pane;
+  return pane;
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && eggPaneEl) eggPaneClose();
+});
+// The go-to-definition warning: a yellow, copyable, dismissable bottom pane.
+window.eggFlashWarn = (msg) => {
+  window.eggPane({title: 'warning', severity: 'warn', copyText: msg});
+};
+
 // User config (window.eggConfig, injected before this script; see egg/webui/
 // config.py). Every read falls back to a built-in default, so a missing key or
 // an absent config changes nothing.
@@ -98,12 +218,17 @@ function eggApplyFrame(html) {
       if (window.htmx) htmx.process(el);
     }
   });
+  // A streamed frame swaps in a fresh #canvas; manual replaceWith does not fire
+  // htmx:oobAfterSwap, so reapply the view-menu toggles ourselves. Disabled
+  // layers stay hidden during the run, and toggling mid-run takes effect on the
+  // next frame.
+  applyView();
 }
 function eggConnectFrames() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   let ws;
   try {
-    ws = new WebSocket(`${proto}://${location.host}/ws?sid=${encodeURIComponent(eggSessionId())}`);
+    ws = new WebSocket(`${proto}://${location.host}/ws?sid=${encodeURIComponent(eggSessionId())}${eggTokenParam('&')}`);
   } catch (e) { setTimeout(eggConnectFrames, 2000); return; }
   eggFrameWs = ws;
   ws.onmessage = (e) => eggApplyFrame(e.data);
@@ -742,30 +867,92 @@ document.addEventListener('click', (e) => {
   t.scrollTop = Math.max(0, (line - 4) * 19);
 });
 
-// Resizable editor/viewer split via Split.js (sizes persisted). Narrow
-// windows stack the panes vertically and the split re-initializes in the
-// other direction. When split.js is unavailable the static CSS layout
-// (side-by-side, or stacked under the media query) stays in place.
+// The editor/viewer split. These are "window" panes (like emacs windows): a
+// gutter between them redistributes the space, so growing one shrinks the other.
+// This is the counterpart to the "overlay" panes above (eggPane: docs / warning
+// / error), which float over the content and never resize anything. Sizes are
+// persisted; narrow windows stack the panes vertically and re-init in the other
+// direction. Reimplemented here so we no longer depend on the Split.js library.
 let splitInst = null;
 const stackedMQ = window.matchMedia('(max-width: 900px)');
 function initSplit() {
-  if (!window.Split) return;
   const panes = document.querySelector('.panes');
+  if (!panes) return;
+  const editor = panes.querySelector('.editor');
+  const viewer = panes.querySelector('.viewer');
+  if (!editor || !viewer) return;
   if (splitInst) { splitInst.destroy(); splitInst = null; }
-  const stacked = stackedMQ.matches;
-  panes.classList.toggle('stacked', stacked);
+  const vertical = stackedMQ.matches;      // narrow window: stacked (top/bottom)
+  panes.classList.toggle('stacked', vertical);
+  const dim = vertical ? 'height' : 'width';
+  const G = window.matchMedia('(pointer: coarse)').matches ? 20 : 8;  // gutter size
   let sizes = [42, 58];
   try {
     sizes = JSON.parse(localStorage.getItem('egg-webui-split-sizes')) || sizes;
   } catch (err) { /* stale value */ }
-  // finger-sized gutter on touch devices, slim one for mouse
-  const coarse = window.matchMedia('(pointer: coarse)').matches;
-  splitInst = Split(['.editor', '.viewer'], {
-    sizes, minSize: 120, gutterSize: coarse ? 20 : 8, snapOffset: 0,
-    direction: stacked ? 'vertical' : 'horizontal',
-    onDragEnd: (s) => localStorage.setItem('egg-webui-split-sizes', JSON.stringify(s)),
-  });
+
+  const gutter = document.createElement('div');
+  gutter.className = 'gutter' + (vertical ? ' gutter-vertical' : '');
+  gutter.style[dim] = G + 'px';
+  editor.after(gutter);                    // order: editor | gutter | viewer
+  // give each pane its share, minus half the gutter so the total is 100%
+  const apply = () => {
+    editor.style[dim] = `calc(${sizes[0]}% - ${G / 2}px)`;
+    viewer.style[dim] = `calc(${sizes[1]}% - ${G / 2}px)`;
+  };
+  apply();
   panes.classList.add('split-active');
+
+  const onDown = (e) => {
+    e.preventDefault();
+    const rect = panes.getBoundingClientRect();
+    const total = vertical ? rect.height : rect.width;
+    const minPct = total > 0 ? (120 / total) * 100 : 15;  // 120px floor per pane
+    // Drop the dense SVG layers (grid lines, nodes, ...) while dragging: the
+    // viewer re-rasterizes every path each frame as it resizes, which is the
+    // real cost. Block fills + outlines stay for context; full detail returns on
+    // release (html.egg-resizing in app.css).
+    document.documentElement.classList.add('egg-resizing');
+    // Coalesce to one resize per animation frame. A fast drag fires many
+    // pointermove events per frame; applying each one relays out the big SVG
+    // viewer and the editor repeatedly (the hitching). rAF collapses them to the
+    // latest position, so the panes reflow at most once per screen refresh.
+    let pendingPct = null, raf = 0;
+    const flush = () => {
+      raf = 0;
+      if (pendingPct == null) return;
+      const pct = Math.max(minPct, Math.min(100 - minPct, pendingPct));
+      sizes = [pct, 100 - pct];
+      apply();
+    };
+    const onMove = (ev) => {
+      const pos = vertical ? ev.clientY - rect.top : ev.clientX - rect.left;
+      pendingPct = total > 0 ? (pos / total) * 100 : sizes[0];
+      if (!raf) raf = requestAnimationFrame(flush);
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      flush();  // settle on the final position
+      document.documentElement.classList.remove('egg-resizing');  // full detail back
+      try {
+        localStorage.setItem('egg-webui-split-sizes', JSON.stringify(sizes));
+      } catch (err) { /* ignore */ }
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+  };
+  gutter.addEventListener('pointerdown', onDown);
+
+  splitInst = {
+    destroy() {
+      gutter.remove();
+      for (const el of [editor, viewer]) { el.style.width = ''; el.style.height = ''; }
+    },
+  };
 }
 window.addEventListener('DOMContentLoaded', () => {
   initSplit();
@@ -900,8 +1087,8 @@ document.addEventListener('click', (e) => {
   else if (e.target.closest('#landing-docs')) {
     const url = e.target.closest('#landing-docs').dataset.url || '/docs/';
     if (window.pywebview?.api?.open_url)
-      window.pywebview.api.open_url(location.origin + url);
-    else window.open(url, '_blank', 'noopener');
+      window.pywebview.api.open_url(eggWithToken(location.origin + url));
+    else window.open(eggWithToken(url), '_blank', 'noopener');
   }
 });
 
@@ -1489,11 +1676,11 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('#sug-close') || e.target.id === 'sugmodal')
     document.getElementById('sugmodal').style.display = 'none';
   if (e.target.closest('#sug-copy'))
-    navigator.clipboard.writeText(document.getElementById('sug-text').textContent);
+    eggCopyText(document.getElementById('sug-text').textContent);
   if (e.target.closest('#save-close') || e.target.id === 'savemodal')
     document.getElementById('savemodal').style.display = 'none';
   if (e.target.closest('#save-copy'))
-    navigator.clipboard.writeText(document.getElementById('save-text').textContent);
+    eggCopyText(document.getElementById('save-text').textContent);
   if (e.target.closest('#save-write')) {  // write to file / apply, maybe remember
     const rem = document.getElementById('save-remember');
     if (rem && rem.checked) eggWriteThrough = true;
@@ -2829,15 +3016,19 @@ function eggShowValidity(diags) {
   }
   chip.title = diags.map((d) => d.msg).join('\n');
 }
-// Copy text to the clipboard, with a fallback for a non-secure context
-// (plain http / Tailscale) where navigator.clipboard is missing.
+// Copy text to the clipboard. Use the execCommand fallback in two cases: a
+// non-secure context (plain http / Tailscale) where navigator.clipboard is
+// missing, and the native app (pywebview), where navigator.clipboard triggers a
+// Qt clipboard-permission request that crashes some pywebview builds. In a real
+// browser prefer the async clipboard API.
 function eggCopyText(text) {
-  if (navigator.clipboard && window.isSecureContext) {
+  if (!window.pywebview && navigator.clipboard && window.isSecureContext) {
     return navigator.clipboard.writeText(text).catch(() => eggCopyFallback(text));
   }
   eggCopyFallback(text);
   return Promise.resolve();
 }
+window.eggCopyText = eggCopyText;  // the editor module (editor.js) reuses it
 function eggCopyFallback(text) {
   const ta = document.createElement('textarea');
   ta.value = text;

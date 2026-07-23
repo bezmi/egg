@@ -22,9 +22,53 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _reap_with_parent() -> None:
+    """When egg-desktop launched us detached (our own session), make sure we and
+    our worker subprocesses die if the desktop app dies, even abruptly (a crash
+    that skips its own cleanup). Asks the kernel to signal us on parent death and,
+    on that signal, takes down our whole process group (uvicorn + the render and
+    solver workers, which inherit our group). No-op unless egg-desktop spawned us
+    and we lead our own group, so a plain ``egg-webui`` in a shell is unaffected.
+    """
+    if not os.environ.get("EGG_DESKTOP"):
+        return
+    try:
+        if os.getpid() != os.getpgrp():  # not our own group leader: leave it be
+            return
+    except OSError:
+        return
+
+    def _reap(signum=None, frame=None):
+        try:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        except Exception:
+            pass
+        try:
+            os.killpg(os.getpgrp(), signal.SIGTERM)  # take the workers down too
+        except Exception:
+            pass
+        os._exit(0)
+
+    try:
+        import ctypes
+
+        PR_SET_PDEATHSIG = 1
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+        # If the parent already died before we got here, PDEATHSIG won't fire.
+        if os.getppid() == 1:
+            _reap()
+    except Exception:
+        pass
+    try:
+        signal.signal(signal.SIGTERM, _reap)
+    except Exception:
+        pass
 
 
 def _find_repo_root(start: Path) -> Path | None:
@@ -87,6 +131,10 @@ def _build_docs(repo: Path) -> None:
 
 
 def main() -> None:
+    # If egg-desktop spawned us, bind our lifetime to it so a desktop crash can
+    # never leave the server (and its workers) holding the port.
+    _reap_with_parent()
+
     egg_dir = Path(__file__).resolve().parent
     repo = _find_repo_root(egg_dir)
 
@@ -163,6 +211,24 @@ def main() -> None:
         os.environ["EGG_WEBUI_SCRIPT"] = str(Path(a.script).resolve())
     if a.watch:
         os.environ["EGG_WEBUI_WATCH"] = "1"
+
+    # Auth: the server is privileged local IPC (it runs code and reads/writes
+    # files), so require a per-launch token by default. The link below carries
+    # it; a request without it is refused. The developer-only experimental
+    # config flag can turn this off (open server, trusted machines only).
+    from egg.webui.config import auth_disabled
+    from egg.webui.security import prepare_auth
+
+    token = prepare_auth(a.host, a.port, disabled=auth_disabled())
+    url = f"http://{a.host}:{a.port}/"
+    if token:
+        print(f"egg-webui: open  {url}?token={token}", flush=True)
+        print("egg-webui: that link carries the required token; keep it private.",
+              flush=True)
+    else:
+        print(f"egg-webui: auth token disabled (experimental) — open {url}",
+              flush=True)
+
     uvicorn.run(
         "egg.webui.app:app",
         host=a.host,
