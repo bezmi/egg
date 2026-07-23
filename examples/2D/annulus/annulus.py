@@ -72,14 +72,26 @@ def _smoother(a):
     s = a["smoother"]
     if s == "fas":
         return [
-            FasSmoother(sweeps=a["tmop_sweeps"], chunk=a["chunk"], omega=a["omega"])
+            FasSmoother(
+                sweeps=a["tmop_sweeps"], chunk=a["chunk"], omega=a["omega"],
+                name="shape smoothing (FAS)",
+            )
         ]
     if s == "control_point":
         return [
-            Presmooth(JacobiSmoother(sweeps=100, chunk=100, omega=a["omega"])),
-            ControlPointSmoother(chunk=a["chunk"], omega=a["omega"]),
+            Presmooth(
+                JacobiSmoother(sweeps=100, chunk=100, omega=a["omega"]),
+                name="pre-smooth for net fit",
+            ),
+            ControlPointSmoother(chunk=a["chunk"], omega=a["omega"],
+                                 name="control-net smoothing"),
         ]
-    return [JacobiSmoother(sweeps=a["tmop_sweeps"], chunk=a["chunk"], omega=a["omega"])]
+    return [
+        JacobiSmoother(
+            sweeps=a["tmop_sweeps"], chunk=a["chunk"], omega=a["omega"],
+            name="shape smoothing",
+        )
+    ]
 
 
 def setup(a, *, direct=True):
@@ -88,7 +100,8 @@ def setup(a, *, direct=True):
     topo, ents = build_annulus()
     grid = topo.initialize_grid()
     stages = [
-        Untangle(sweeps_per_delta=a["sweeps_per_delta"], direct=direct),
+        Untangle(sweeps_per_delta=a["sweeps_per_delta"], direct=direct,
+                 name="untangle folds"),
         *_smoother(a),
     ]
     return topo, ents, grid, stages

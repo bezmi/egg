@@ -774,6 +774,16 @@ class Stage:
     produces: frozenset = frozenset()
     # True for the stages that do the TMOP quality smoothing.
     is_smoother: bool = False
+    # A human label for this step, shown in the web UI run status bar. Each
+    # stage sets a sensible ``default_name``; passing ``name=`` to the
+    # constructor overrides it (naming is optional). ``display_name`` resolves
+    # the two.
+    default_name: str = "stage"
+    name: str | None = None
+
+    @property
+    def display_name(self) -> str:
+        return self.name or self.default_name
 
     def validate(self, pipeline: "list[Stage]", index: int) -> None:
         """Reject this stage given the others and their order.
@@ -828,6 +838,7 @@ class Untangle(Stage):
 
     requires = frozenset({"grid"})
     produces = frozenset({"grid"})
+    default_name = "untangle"
 
     def validate(self, pipeline, index):
         # Untangling clears folds so the smoother has a valid start; running it
@@ -849,7 +860,9 @@ class Untangle(Stage):
         max_outer: int = 60,
         direct: bool = True,
         report_every: int = 0,
+        name: str | None = None,
     ) -> None:
+        self.name = name
         self.margin = margin
         self.sweeps_per_delta = sweeps_per_delta
         self.delta0_factor = delta0_factor
@@ -968,10 +981,12 @@ class _NodalSmoother(Stage):
     produces = frozenset({"grid", "smoothed"})
     is_smoother = True
     nodal_kind = "jacobi"
+    default_name = "smooth"
 
     def __init__(
         self,
         *,
+        name: str | None = None,
         sweeps: int = 40,
         chunk: int = 10,
         omega: float = 0.8,
@@ -988,6 +1003,7 @@ class _NodalSmoother(Stage):
         # Store inputs as given; validation runs together at pipeline start (see
         # Stage.check / _run_stages), so building a stage never raises. This keeps
         # a live-reloaded script quiet while a value is being typed.
+        self.name = name
         self.sweeps = sweeps
         self.chunk = chunk
         self.omega = omega
@@ -1099,6 +1115,7 @@ class JacobiSmoother(_NodalSmoother):
     """TMOP shape smoothing by damped block-Jacobi node updates."""
 
     nodal_kind = "jacobi"
+    default_name = "smooth (jacobi)"
 
 
 class FasSmoother(_NodalSmoother):
@@ -1109,6 +1126,7 @@ class FasSmoother(_NodalSmoother):
     """
 
     nodal_kind = "fas"
+    default_name = "smooth (fas)"
 
 
 class Presmooth(Stage):
@@ -1125,13 +1143,15 @@ class Presmooth(Stage):
 
     requires = frozenset({"grid"})
     produces = frozenset({"grid"})
+    default_name = "presmooth"
 
-    def __init__(self, smoother):
+    def __init__(self, smoother, *, name: str | None = None):
         if not isinstance(smoother, _NodalSmoother):
             raise TypeError(
                 "Presmooth takes a JacobiSmoother or FasSmoother, got "
                 f"{type(smoother).__name__}"
             )
+        self.name = name
         self.smoother = smoother
 
     def validate(self, pipeline, index):
@@ -1181,10 +1201,12 @@ class ControlPointSmoother(Stage):
     requires = frozenset({"grid"})
     produces = frozenset({"grid", "smoothed", "net"})
     is_smoother = True
+    default_name = "control-point smooth"
 
     def __init__(
         self,
         *,
+        name: str | None = None,
         omega: float = 0.8,
         report_every: int = 0,
         chunk: int = 10,
@@ -1204,6 +1226,7 @@ class ControlPointSmoother(Stage):
         directional: Directional | Mapping[str, object] | bool | None = None,
     ) -> None:
         # Store inputs as given; validated together at pipeline start (check).
+        self.name = name
         self.omega = omega
         self.report_every = report_every
         self.chunk = chunk
@@ -1445,13 +1468,15 @@ class Pin(Stage):
 
     requires = frozenset({"smoothed"})
     produces = frozenset({"smoothed"})
+    default_name = "pin"
 
-    def __init__(self, smoother=None):
+    def __init__(self, smoother=None, *, name: str | None = None):
         if smoother is not None and not isinstance(smoother, _NodalSmoother):
             raise TypeError(
                 "Pin takes a JacobiSmoother or FasSmoother for the re-smooth "
                 f"(or None for a stamp-only pin), got {type(smoother).__name__}"
             )
+        self.name = name
         self.smoother = smoother
 
     def check(self) -> list[str]:
@@ -1534,6 +1559,10 @@ class Respace(Stage):
 
     requires = frozenset({"smoothed"})
     produces = frozenset({"smoothed"})
+    default_name = "respace"
+
+    def __init__(self, *, name: str | None = None):
+        self.name = name
 
     def run(self, s: MeshState):
         from .smoothing.respace import enforce_boundary_layer_spacing
@@ -1558,8 +1587,10 @@ class Refit(Stage):
 
     requires = frozenset({"smoothed"})
     produces = frozenset({"net"})
+    default_name = "refit"
 
-    def __init__(self, *, ratio=4):
+    def __init__(self, *, ratio=4, name: str | None = None):
+        self.name = name
         self.ratio = ratio
 
     def run(self, s: MeshState):
@@ -1635,8 +1666,11 @@ class Resample(Stage):
     """
 
     produces = frozenset({"grid", "smoothed", "net"})
+    default_name = "resample"
 
-    def __init__(self, path=None, *, cluster=False, spacing=None, specs=None):
+    def __init__(self, path=None, *, cluster=False, spacing=None, specs=None,
+                 name: str | None = None):
+        self.name = name
         self.path = path
         self.cluster = cluster
         self.spacing = spacing
@@ -1752,8 +1786,10 @@ class Save(Stage):
 
     requires = frozenset({"net"})
     produces = frozenset({"net"})
+    default_name = "save"
 
-    def __init__(self, path, *, exact=False):
+    def __init__(self, path, *, exact=False, name: str | None = None):
+        self.name = name
         self.path = path
         self.exact = exact
 
@@ -1837,9 +1873,12 @@ def _run_stages(state: MeshState, stages):
     stages = list(stages)
     # The mandatory validation stage runs first and aborts on any bad input.
     yield from ConfigValidationStage(stages).run(state)
-    yield ("init", {"min_det": state.md_now()})
+    yield ("init", {"min_det": state.md_now(), "stage": "init"})
     for stage in stages:
-        yield from stage.run(state)
+        # Tag every event with the running stage's label so the UI can show
+        # which named step is executing. Stages keep their own run() unchanged.
+        for phase, info in stage.run(state):
+            yield (phase, {**info, "stage": stage.display_name})
     # Final summary AFTER the closing boundary snap, scored on the SAME context
     # and metric the smoother optimised (a BL/anisotropic target reports a
     # different objective than the isotropic stencil on the same mesh).
@@ -1848,6 +1887,7 @@ def _run_stages(state: MeshState, stages):
         {
             "min_det": state.md_now(),
             "energy": state.energy_now(state.score_ctx, state.score_metric),
+            "stage": "final",
         },
     )
 

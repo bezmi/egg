@@ -60,7 +60,27 @@ try {
     if (!m && !ctx.explicit) return;
     return {from: ctx.pos - (m ? m[0].length : 0), options: items};
   };
-  ac.registerCompletions(['python'], {sources: [listSource]});
+  // Slightly delay the completion popup: while the identifier under the cursor
+  // is still changing, sources return nothing; a short pause later we reopen the
+  // window (the same undefined -> startQuery flow the LSP source already uses),
+  // so it no longer pops on every keystroke. Ctrl+Space still opens at once.
+  const _cfgDelay = (name, def) => {
+    const v = window.eggConfig && window.eggConfig.delays && window.eggConfig.delays[name];
+    return typeof v === 'number' ? v : def;
+  };
+  const AC_DELAY = _cfgDelay('autocomplete_ms', 250);
+  let acOpenTimer, acAllowPos = -1;
+  const gated = (src) => (ctx) => {
+    if (ctx.explicit || ctx.pos === acAllowPos) return src(ctx);
+    clearTimeout(acOpenTimer);
+    acOpenTimer = setTimeout(() => {
+      acAllowPos = ctx.pos;
+      const q = editor.extensions.autoComplete;
+      if (q) q.startQuery(false);
+    }, AC_DELAY);
+    return undefined;
+  };
+  ac.registerCompletions(['python'], {sources: [gated(listSource)]});
 
   // Mirror edits into the server-visible <textarea name=code> and fire the
   // 'input' event that drives the 500ms HTMX re-render + localStorage.
@@ -413,10 +433,11 @@ try {
       }
       return null;
     };
-    let hoverTimer;
+    let hoverTimer, lastPointer = null;
     editor.container.addEventListener('mousemove', (e) => {
       clearTimeout(hoverTimer);
       const x = e.clientX, y = e.clientY;
+      lastPointer = {x, y};
       hoverTimer = setTimeout(() => {
         const lc = locate(x, y);
         const msgs = lc
@@ -426,9 +447,20 @@ try {
         tip.style.left = Math.min(x + 12, innerWidth - 530) + 'px';
         tip.style.top = (y + 16) + 'px';
         tip.style.display = 'block';
-      }, 120);
+      }, _cfgDelay('tooltip_hover_ms', 120));
     });
-    editor.container.addEventListener('mouseleave', hideTip);
+    editor.container.addEventListener('mouseleave', () => { lastPointer = null; hideTip(); });
+    // Scrolling moves the squiggles under a stationary cursor. Re-test the last
+    // pointer against the diagnostics and drop the tip the moment it is no
+    // longer over one (without waiting for the next mousemove).
+    if (editor.scrollContainer) {
+      editor.scrollContainer.addEventListener('scroll', () => {
+        if (tip.style.display !== 'none' && lastPointer) {
+          const lc = locate(lastPointer.x, lastPointer.y);
+          if (!lc || !diagnostics.some((d) => inRange(d.range, lc))) hideTip();
+        }
+      }, {passive: true});
+    }
 
     // signatureHelp: a parameter-hint popup shown while the cursor sits inside a
     // call's parens. This is how constructor/dataclass fields surface — pyright
@@ -519,6 +551,203 @@ try {
       if (e.key === 'Escape') hideSig();
     });
 
+    // ---- right-click menu: clipboard (cut/copy/paste), LSP (go to definition,
+    // show documentation) and comment toggle. A floating div; LSP entries stay
+    // disabled until the server is ready and target the CURRENT document only.
+    const lcToOffset = (value, line, character) => {
+      let off = 0, ln = 0;
+      for (let i = 0; i < value.length && ln < line; i++)
+        if (value.charCodeAt(i) === 10) { ln++; off = i + 1; }
+      return off + character;
+    };
+    const selText = () => {
+      const [a, b] = editor.getSelection();
+      return editor.value.slice(Math.min(a, b), Math.max(a, b));
+    };
+    const doCopy = () => { const t = selText(); if (t) navigator.clipboard.writeText(t); };
+    const doCut = () => {
+      const [a, b] = editor.getSelection();
+      const lo = Math.min(a, b), hi = Math.max(a, b);
+      if (hi === lo) return;
+      navigator.clipboard.writeText(editor.value.slice(lo, hi));
+      utils.insertText(editor, '', lo, hi);
+      editor.textarea.focus();
+    };
+    const doPaste = async () => {
+      let t = '';
+      try { t = await navigator.clipboard.readText(); } catch (e) { return; }
+      if (!t) return;
+      const [a, b] = editor.getSelection();
+      utils.insertText(editor, t, Math.min(a, b), Math.max(a, b));
+      editor.textarea.focus();
+    };
+    // Where the right-click landed, as a document offset (falls back to caret).
+    let ctxPos = null;
+    const gotoDefinition = async () => {
+      if (!ready || ctxPos == null) return;
+      syncDoc();
+      const r = await rpc('textDocument/definition', {
+        textDocument: {uri: docUri}, position: offsetToLC(editor.value, ctxPos)});
+      let loc = r && r.result;
+      if (Array.isArray(loc)) loc = loc[0];
+      if (!loc) return;
+      const uri = loc.uri || loc.targetUri;
+      const range = loc.range || loc.targetSelectionRange || loc.targetRange;
+      if (!uri || !range) return;
+      if (uri !== docUri) {
+        if (window.eggAlert) window.eggAlert('Definition is in another file (not open).');
+        return;
+      }
+      const off = lcToOffset(editor.value, range.start.line, range.start.character);
+      utils.setSelection(editor, off, off);
+      editor.textarea.focus();
+    };
+    // Render inline markdown (`code`, **bold**, *italic*) into `parent` as DOM
+    // nodes — built node-by-node (never innerHTML) so the LSP text can't inject.
+    const mdInline = (parent, text) => {
+      const re = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+      let last = 0, m;
+      while ((m = re.exec(text))) {
+        if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+        let el;
+        if (m[1] != null) { el = document.createElement('code'); el.textContent = m[1]; }
+        else if (m[2] != null) { el = document.createElement('strong'); el.textContent = m[2]; }
+        else { el = document.createElement('em'); el.textContent = m[3]; }
+        parent.appendChild(el);
+        last = re.lastIndex;
+      }
+      if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+    };
+    // Render the hover markdown into `container`: fenced code blocks become
+    // <pre>, headings/rules/paragraphs get their own blocks, inline spans styled.
+    const mdRender = (container, md) => {
+      const lines = md.replace(/\r/g, '').split('\n');
+      let i = 0;
+      while (i < lines.length) {
+        const fence = lines[i].match(/^\s*```(\w*)\s*$/);
+        if (fence) {
+          const buf = [];
+          for (i++; i < lines.length && !/^\s*```\s*$/.test(lines[i]); i++) buf.push(lines[i]);
+          i++;  // closing fence
+          const pre = document.createElement('pre');
+          pre.className = 'egg-doc-code';
+          pre.textContent = buf.join('\n');
+          container.appendChild(pre);
+          continue;
+        }
+        if (lines[i].trim() === '') { i++; continue; }
+        if (/^\s*(---|\*\*\*|___)\s*$/.test(lines[i])) {
+          container.appendChild(document.createElement('hr'));
+          i++;
+          continue;
+        }
+        const h = lines[i].match(/^\s*(#{1,6})\s+(.*)/);
+        if (h) {
+          const el = document.createElement('div');
+          el.className = 'egg-doc-h';
+          mdInline(el, h[2]);
+          container.appendChild(el);
+          i++;
+          continue;
+        }
+        // gather a paragraph up to a blank line or a fence
+        const para = [];
+        for (; i < lines.length && lines[i].trim() !== '' && !/^\s*```/.test(lines[i]); i++)
+          para.push(lines[i]);
+        const p = document.createElement('p');
+        p.className = 'egg-doc-p';
+        mdInline(p, para.join('\n'));
+        container.appendChild(p);
+      }
+    };
+    // Documentation pane: a full-width bar floated over the bottom of the page
+    // (position:fixed, so it never reflows the layout), dismissed with esc or ×.
+    let docPane = null;
+    const closeDocPane = () => { if (docPane) { docPane.remove(); docPane = null; } };
+    const showDocPane = (text) => {
+      closeDocPane();
+      docPane = document.createElement('div');
+      docPane.className = 'egg-doc-pane';
+      const head = document.createElement('div');
+      head.className = 'egg-doc-head';
+      const title = document.createElement('span');
+      title.textContent = 'documentation';
+      const x = document.createElement('button');
+      x.textContent = '×';
+      x.title = 'dismiss (esc)';
+      x.addEventListener('click', closeDocPane);
+      head.append(title, x);
+      const body = document.createElement('div');
+      body.className = 'egg-doc-body';
+      mdRender(body, text);
+      docPane.append(head, body);
+      document.body.appendChild(docPane);
+    };
+    const hoverText = (contents) => {
+      if (contents == null) return '';
+      if (typeof contents === 'string') return contents;
+      if (Array.isArray(contents)) return contents.map(hoverText).join('\n\n');
+      if (contents.value != null) return contents.value;
+      return '';
+    };
+    const showDocumentation = async () => {
+      if (!ready || ctxPos == null) return;
+      syncDoc();
+      const r = await rpc('textDocument/hover', {
+        textDocument: {uri: docUri}, position: offsetToLC(editor.value, ctxPos)});
+      const res = r && r.result;
+      const text = res ? hoverText(res.contents).trim() : '';
+      showDocPane(text || 'No documentation for the symbol at point.');
+    };
+    const ctxMenu = document.createElement('div');
+    ctxMenu.className = 'pce-ctx';
+    ctxMenu.style.display = 'none';
+    document.body.appendChild(ctxMenu);
+    const hideCtx = () => { ctxMenu.style.display = 'none'; };
+    const ctxItems = () => [
+      {label: 'Cut', run: doCut, on: selText().length > 0},
+      {label: 'Copy', run: doCopy, on: selText().length > 0},
+      {label: 'Paste', run: doPaste, on: true},
+      {sep: true},
+      {label: 'Go to definition', run: gotoDefinition, on: ready},
+      {label: 'Show documentation', run: showDocumentation, on: ready},
+      {sep: true},
+      {label: 'Toggle comment', run: () => { cmds.toggleComment(editor); editor.textarea.focus(); }, on: true},
+    ];
+    const openCtx = (x, y) => {
+      ctxMenu.textContent = '';
+      for (const it of ctxItems()) {
+        if (it.sep) {
+          const s = document.createElement('div');
+          s.className = 'pce-ctx-sep';
+          ctxMenu.appendChild(s);
+          continue;
+        }
+        const b = document.createElement('button');
+        b.className = 'pce-ctx-item';
+        b.textContent = it.label;
+        if (!it.on) b.disabled = true;
+        else b.addEventListener('click', () => { hideCtx(); it.run(); });
+        ctxMenu.appendChild(b);
+      }
+      ctxMenu.style.display = 'block';
+      ctxMenu.style.left = Math.min(x, innerWidth - ctxMenu.offsetWidth - 6) + 'px';
+      ctxMenu.style.top = Math.min(y, innerHeight - ctxMenu.offsetHeight - 6) + 'px';
+    };
+    editor.container.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const lc = locate(e.clientX, e.clientY);
+      ctxPos = lc ? lcToOffset(editor.value, lc.line, lc.character) : editor.getSelection()[1];
+      openCtx(e.clientX, e.clientY);
+    });
+    document.addEventListener('mousedown', (e) => {
+      if (ctxMenu.style.display !== 'none' && !ctxMenu.contains(e.target)) hideCtx();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { hideCtx(); closeDocPane(); }
+    });
+    window.addEventListener('blur', hideCtx);
+
     sock.onmessage = (ev) => {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
@@ -578,8 +807,9 @@ try {
       notify('initialized', {});
       openDoc();
       ready = true;
-      // LSP source first, static introspected list as fallback.
-      ac.registerCompletions(['python'], {sources: [source, listSource]});
+      // LSP source first, static introspected list as fallback (both gated so
+      // the popup waits for a brief typing pause).
+      ac.registerCompletions(['python'], {sources: [gated(source), gated(listSource)]});
       let changeTimer;
       editor.on('update', () => {
         renderDiagnostics();  // keep existing squiggles aligned as text reflows

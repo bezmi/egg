@@ -298,7 +298,8 @@ def setup(a, *, direct=True):
         else None
     )
     stages = [
-        Untangle(sweeps_per_delta=a["sweeps_per_delta"], direct=direct),
+        Untangle(sweeps_per_delta=a["sweeps_per_delta"], direct=direct,
+                 name="untangle folds"),
         *_smoother(a, metric=metric, cluster=pin, c2=c2, ortho=ortho),
     ]
     if pin:
@@ -306,11 +307,12 @@ def setup(a, *, direct=True):
             Pin(
                 JacobiSmoother(
                     sweeps=a["pin_sweeps"], chunk=a["chunk"], omega=a["omega"]
-                )
+                ),
+                name="pin boundary layers",
             )
         )
     elif a["bl_first_height"] > 0.0:
-        stages.append(Respace())
+        stages.append(Respace(name="respace walls"))
     return topo, ents, grid, stages
 
 

@@ -304,7 +304,12 @@ def main(argv=None):
     # Refit + Save leave a control net beside the script so the exported .eggy
     # carries one (a regrid can resample from it); control mode keeps its solved net.
     net_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "net.npz")
-    stages = [Untangle(), *smoothing, Refit(), Save(net_path)]
+    stages = [
+        Untangle(name="untangle folds"),
+        *smoothing,
+        Refit(name="refit net to grid"),
+        Save(net_path, name="save net"),
+    ]
     energies, mindets = [], []
     for phase, info in generate_steps(grid, stages=stages, device=a.device):
         if "energy" in info:

@@ -126,6 +126,15 @@ def main() -> None:
     if a.watch and not a.script:
         p.error("--watch needs a script to watch (pass its path)")
 
+    # Tee stdout+stderr to a timestamped logfile (help > view logs opens the
+    # directory). Best-effort; a logging failure never blocks the server.
+    try:
+        from egg.webui.logsetup import start_file_logging
+
+        start_file_logging("webui")
+    except Exception:
+        pass
+
     # --dev is a source-checkout affordance: it invokes the out-of-tree
     # vendoring tool (which does not ship in the wheel). Reject it in a
     # packaged install rather than silently ignoring it. It does NOT imply

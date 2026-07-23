@@ -216,7 +216,7 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
   background: rgba(20,26,34,0.45); align-items: center; justify-content: center; }
 #cfmodal { z-index: 70; }  /* confirm sits above the picker */
 #cfmodal .cf-box { width: min(400px, 92vw); }
-#cf-text { font-size: 13px; line-height: 1.4; }
+#cf-text { font-size: 13px; line-height: 1.4; white-space: pre-wrap; }
 #resmodal .fs-box { width: min(320px, 92vw); }
 .res-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .res-row input { width: 96px; padding: 6px 8px; border: 1px solid var(--ctp-surface1);
@@ -309,32 +309,62 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 .editor > textarea, .editor .prism-code-editor {
   font-size: var(--egg-edfont, 13px) !important; }
 .panes.split-active .editor, .panes.split-active .viewer { flex: none; }
-/* Split.js gutter (created at runtime); ::after widens the touch target,
-   ::before is the visible grip handle. */
+/* Split.js gutter (created at runtime): the whole strip is the grab target
+   (::after just widens the hit area for the pointer) and it tints on hover.
+   No visible grip handle — it read as a redundant scrollbar. */
 .gutter { flex: none; cursor: col-resize; touch-action: none; position: relative;
           background: var(--ctp-surface1); transition: background 0.15s; z-index: 5; }
 .gutter:hover { background: var(--ctp-overlay0); }
 .gutter::after { content: ''; position: absolute; top: 0; bottom: 0;
                  left: -10px; right: -10px; }
-.gutter::before { content: ''; position: absolute; top: 50%; left: 50%;
-                  transform: translate(-50%, -50%); width: 4px; height: 48px;
-                  border-radius: 2px; background: var(--ctp-overlay1);
-                  box-shadow: -3px 0 0 -1px var(--ctp-overlay1), 3px 0 0 -1px var(--ctp-overlay1); }
-.gutter:hover::before { background: var(--ctp-surface0);
-                        box-shadow: -3px 0 0 -1px var(--ctp-base), 3px 0 0 -1px var(--ctp-base); }
 /* stacked (vertical) mode: the gutter is a horizontal strip */
 .gutter.gutter-vertical { cursor: row-resize; }
 .gutter.gutter-vertical::after { left: 0; right: 0; top: -10px; bottom: -10px; }
-.gutter.gutter-vertical::before { width: 48px; height: 4px;
-  box-shadow: 0 -3px 0 -1px var(--ctp-overlay1), 0 3px 0 -1px var(--ctp-overlay1); }
-.gutter.gutter-vertical:hover::before {
-  box-shadow: 0 -3px 0 -1px var(--ctp-base), 0 3px 0 -1px var(--ctp-base); }
 /* narrow windows stack the panes vertically (editor above viewer) */
 .panes.stacked { flex-direction: column; }
 .panes.stacked .editor { width: auto; }
 /* watch mode: the file on disk is the source of truth — no editor pane */
 .panes.watching .editor, .panes.watching .gutter { display: none !important; }
+/* editor tooltips are appended to <body>; hide them entirely while watching */
+html.egg-watching .pce-diag-tip,
+html.egg-watching .pce-sig-tip { display: none !important; }
 .panes.watching .viewer { flex: 1 !important; width: auto !important; }
+/* right-click editor menu: a vertical list of actions with group separators */
+.pce-ctx { position: fixed; z-index: 40; min-width: 200px; padding: 4px;
+  background: var(--ctp-mantle); border: 1px solid var(--ctp-surface1);
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+  display: flex; flex-direction: column; align-items: stretch; gap: 1px;
+  font-size: 13px; }
+.pce-ctx-item { display: block; width: 100%; text-align: left; background: none;
+  border: 0; color: var(--ctp-text); padding: 5px 10px; border-radius: 5px;
+  cursor: pointer; font-size: 13px; }
+.pce-ctx-item:hover:not(:disabled) { background: var(--ctp-surface0); }
+.pce-ctx-item:disabled { color: var(--ctp-surface2); cursor: default; }
+.pce-ctx-sep { height: 1px; margin: 3px 6px; background: var(--ctp-surface1); }
+html.egg-watching .pce-ctx { display: none !important; }
+/* LSP documentation pane: floats over the bottom, never reflows the layout */
+.egg-doc-pane { position: fixed; left: 0; right: 0; bottom: 0; z-index: 38;
+  max-height: 42vh; display: flex; flex-direction: column;
+  background: var(--ctp-mantle); border-top: 1px solid var(--ctp-surface1);
+  box-shadow: 0 -6px 24px rgba(0,0,0,0.35); }
+.egg-doc-head { display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 12px; border-bottom: 1px solid var(--ctp-surface0);
+  font-size: 12px; color: var(--ctp-subtext0); text-transform: uppercase;
+  letter-spacing: 0.05em; }
+.egg-doc-head button { background: none; border: 0; color: var(--ctp-text);
+  font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.egg-doc-body { overflow: auto; padding: 10px 16px 14px;
+  font-size: 13px; line-height: 1.55; color: var(--ctp-text); }
+.egg-doc-h { font-weight: 600; font-size: 13px; margin: 10px 0 4px;
+  color: var(--ctp-subtext1); }
+.egg-doc-p { margin: 6px 0; white-space: pre-wrap; }
+.egg-doc-body hr { border: 0; border-top: 1px solid var(--ctp-surface0); margin: 10px 0; }
+.egg-doc-body code { font: 12px/1.4 ui-monospace, monospace;
+  background: var(--ctp-surface0); padding: 1px 4px; border-radius: 4px; }
+.egg-doc-code { overflow-x: auto; margin: 8px 0; padding: 8px 10px;
+  background: var(--ctp-crust); border: 1px solid var(--ctp-surface0);
+  border-radius: 6px; font: 12px/1.5 ui-monospace, monospace;
+  color: var(--ctp-text); white-space: pre; }
 @media (max-width: 900px) {
   /* static no-JS fallback for the stacked layout */
   .panes { flex-direction: column; }

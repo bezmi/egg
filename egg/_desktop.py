@@ -122,6 +122,33 @@ def _wait_until_serving(
     )
 
 
+def _theme_qt_tooltips() -> None:
+    """Recolor Qt's native tooltip to a neutral dark instead of the default
+    pale yellow. QtWebEngine renders HTML ``title=`` tooltips with the Qt
+    application palette / QToolTip style, so a stylesheet + palette override
+    covers them. Best-effort and guarded: a failure just leaves the default.
+    Runs from pywebview's startup hook once the GUI (and its QApplication) is up.
+    """
+    try:
+        from qtpy.QtGui import QColor, QPalette
+        from qtpy.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is None:
+            return
+        pal = app.palette()
+        pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#181825"))
+        pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#cdd6f4"))
+        app.setPalette(pal)
+        app.setStyleSheet(
+            (app.styleSheet() or "")
+            + "\nQToolTip { background: #181825; color: #cdd6f4; "
+            "border: 1px solid #45475a; }"
+        )
+    except Exception:
+        pass
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="egg-desktop", description="run the egg web UI in a native window"
@@ -149,6 +176,17 @@ def main() -> None:
         help="skip the docs refresh at startup",
     )
     a = p.parse_args()
+
+    # Tee stdout+stderr to a timestamped logfile. The child server inherits
+    # these fds, so its output lands in the same log; EGG_NO_LOGFILE stops it
+    # from opening a second logfile of its own.
+    try:
+        from egg.webui.logsetup import start_file_logging
+
+        start_file_logging("desktop")
+        os.environ["EGG_NO_LOGFILE"] = "1"
+    except Exception:
+        pass
 
     try:
         import webview
@@ -191,8 +229,10 @@ def main() -> None:
             easy_drag=False,
             background_color="#181818",
         )
-        # Blocks on the GUI event loop until the window is closed.
-        webview.start()
+        # Blocks on the GUI event loop until the window is closed. The startup
+        # hook recolors Qt's native tooltip (a garish yellow by default on some
+        # Linux setups) to match the dark app chrome.
+        webview.start(_theme_qt_tooltips)
     finally:
         # The window is gone (or we failed to open it): stop the server.
         proc.terminate()

@@ -167,6 +167,14 @@ JS = _static("app.js")
 # the introspected /api/completions list as a fallback source.
 EDITOR_JS = _static("editor.js")
 
+# The user's deep config (delays, keybinds, auto-run policy) exposed to the
+# browser as window.eggConfig, read at import so it is set before app.js runs.
+# app.js / editor.js read it with defaults, so a missing key changes nothing.
+# Config changes take effect on the next server start.
+from .config import client_config as _client_config
+
+CONFIG_JS = f"window.eggConfig = {json.dumps(_client_config())};"
+
 # All browser assets are served locally from /vendor (no CDN fallback, by
 # design). They are produced offline by tools/vendor_webui.py — at wheel-build
 # time, or via `egg-webui --dev` in a checkout. If they are absent there is no
@@ -197,6 +205,7 @@ app, rt = fast_app(
         Style(CSS),
         Style(CATPPUCCIN),
         Script(src=_SPLIT_SRC),
+        Script(NotStr(CONFIG_JS)),  # window.eggConfig, before app.js reads it
         Script(JS),
         Script(EDITOR_JS, type="module"),
     ),
@@ -247,6 +256,26 @@ _run: dict = {
 # convergence series}. The SU2 export uses it so "what you see is what you
 # export" after a run; "hist" draws faded under the next run's chart.
 _last: dict = {"code": None, "harvest": None, "hist": None, "net": None}
+
+# Resume cache: the node coordinates streamed by the latest *stopped*
+# run, plus the code that produced them. While present, the run button shows
+# "resume": a fresh run re-execs the (possibly edited) script and seeds the grid
+# to this cache before running its stages, so a stopped solve picks up from where
+# it left off instead of restarting. Cleared by a full completion or the reset
+# button. Survives across runs (unlike ``_run``, which resets every run).
+_resume: dict = {"X": None, "code": None}
+
+
+def _is_resumable() -> bool:
+    return _resume["X"] is not None
+
+
+def _set_resume(X, code: str) -> None:
+    _resume.update(X=X, code=code)
+
+
+def _clear_resume() -> None:
+    _resume.update(X=None, code=None)
 
 # Editor renders exec the script in this persistent worker process, not in
 # the server: the event loop only awaits, a script stuck in a loop is
@@ -359,17 +388,27 @@ _REFRESH_SVG = (
 
 
 def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid"):
+    resumable = _is_resumable()
     runner = (
         [
             Button(
-                "run",
+                "resume" if resumable else "run",
+                id="run-btn",
                 cls="primary",
                 hx_post="/run",
                 hx_include="[name='code'],[name='path']",
                 hx_target="#viewbar",
                 hx_swap="outerHTML",
+                # A resume passes resume=1 so the worker seeds the grid from the
+                # cache; JS warns first if the file changed (see htmx:confirm).
+                hx_vals='{"resume": "1"}' if resumable else None,
+                data_resume="1" if resumable else None,
                 disabled=running or None,
-                title="run (Ctrl+Enter)",
+                title=(
+                    "resume from the stopped result (Ctrl+Enter)"
+                    if resumable
+                    else "run (Ctrl+Enter)"
+                ),
             ),
             Button(
                 "stop",
@@ -707,6 +746,8 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
         last_emit = 0.0
         last_q = 0.0  # quality stats debounce off the frame hot path
         last_phase = None
+        last_stage = None
+        latest_X = None  # newest streamed node coords, for the resume cache
         chips: list = []
         assert proc.stdout is not None  # spawned with stdout=PIPE
         while not done:
@@ -768,6 +809,7 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                     done = True
                 case "step":
                     phase, info, X = msg[1], msg[2], msg[3]
+                    latest_X = X  # newest result, seeds a resume
                     # Mirror of pipeline._sync on the server-side grid.
                     h.grid.global_nodes = X
                     for bi, blk in enumerate(h.grid.blocks):
@@ -777,24 +819,40 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                     if (m := info.get("min_det")) is not None:
                         hist["min det"].append(m)
                     stopped = _run["stop"]
-                    chips = [Span(phase, cls="phase")]
+                    # The named stage is the headline chip; the raw phase is
+                    # the fallback for events with no stage label.
+                    stage_label = info.get("stage") or phase
+                    chips = [Span(stage_label, cls="phase")]
                     chips += [
                         Span(_fmt_chip(k, v))
                         for k, v in info.items()
                         # scalar chips only (diagnostics vectors like the
                         # control phase's frame_jumps stay off the bar)
-                        if k != "min_det" and not isinstance(v, (list, tuple))
+                        if k not in ("min_det", "stage")
+                        and not isinstance(v, (list, tuple))
                     ]
                     if (c := _mindet_chip(info.get("min_det"))) is not None:
                         chips.append(c)
                     if stopped:
                         chips.append(Span("stopped", cls="warn"))
                     final = stopped or phase == "final"
+                    # Decide the resume cache before rendering the terminal bar
+                    # so the run button in that frame reflects it: a stop caches
+                    # the latest result (button -> "resume"); a full completion
+                    # clears it (button -> "run").
+                    if final:
+                        if stopped and latest_X is not None:
+                            _set_resume(latest_X, code)
+                        elif not stopped:
+                            _clear_resume()
                     now = time.perf_counter()
-                    # Phase transitions always emit, so fast runs show each stage.
+                    # Emit on any phase OR named-stage transition, so fast runs
+                    # show each step (two stages can share a phase, e.g. two
+                    # smoothers both emitting "tmop").
                     if (
                         final
                         or phase != last_phase
+                        or stage_label != last_stage
                         or now - last_emit >= FRAME_INTERVAL
                     ):
                         with_q = final or now - last_q >= QUALITY_INTERVAL
@@ -811,14 +869,21 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                         if with_q:
                             last_q = now
                     last_phase = phase
+                    last_stage = stage_label
         if not done:
             # Channel closed without a terminal message: crash or hard kill.
             rc = proc.wait()
             if _run["stop"]:
+                # A hard kill (double-click stop) can end mid-chunk with no
+                # terminal frame; still cache the last result for resume.
+                if latest_X is not None:
+                    _set_resume(latest_X, code)
                 _fail_frame("stopped")
             else:
+                _clear_resume()
                 _fail_frame(f"pipeline failed (worker exited {rc})")
     except Exception:
+        _clear_resume()
         _fail_frame("pipeline failed", detail=tb.format_exc())
     finally:
         for pipe in (proc.stdout, proc.stdin):
@@ -833,11 +898,14 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
             proc.kill()
         if _run["tmp"]:
             Path(_run["tmp"]).unlink(missing_ok=True)
+        if _run.get("resume_tmp"):
+            Path(_run["resume_tmp"]).unlink(missing_ok=True)
         _run.update(
             proc=None,
             reader=None,
             stop=False,
             tmp=None,
+            resume_tmp=None,
             svg=None,
             quality=None,
             log=[],
@@ -845,21 +913,36 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
 
 
 @rt("/run", methods=["post"])
-def run_route(code: str, path: str = ""):
+def run_route(code: str, path: str = "", resume: int = 0):
     if _running():
         return view_bar(Span("already running", cls="warn"), running=True)
     fd, tmp = tempfile.mkstemp(suffix=".py", prefix="egg-webui-run-")
     with os.fdopen(fd, "w") as f:
         f.write(code)
+    # Resume: hand the worker the cached node coordinates (a .npy) so it seeds
+    # the grid before running the freshly re-exec'd stages. A plain run drops any
+    # stale cache so the next stop starts a fresh resume point.
+    resume_tmp = None
+    argv = [sys.executable, "-m", WORKER_MODULE, tmp, path]
+    if resume and _is_resumable():
+        import numpy as np
+
+        rfd, resume_tmp = tempfile.mkstemp(suffix=".npy", prefix="egg-webui-resume-")
+        os.close(rfd)
+        np.save(resume_tmp, _resume["X"])
+        argv.append(resume_tmp)
+    else:
+        _clear_resume()
     proc = subprocess.Popen(
-        [sys.executable, "-m", WORKER_MODULE, tmp, path],
+        argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,  # the frame channel; stderr stays on the console
     )
     t = threading.Thread(target=_run_reader, args=(code, path, proc), daemon=True)
-    _run.update(proc=proc, reader=t, stop=False, tmp=tmp, log=[])
+    _run.update(proc=proc, reader=t, stop=False, tmp=tmp, resume_tmp=resume_tmp, log=[])
     t.start()
-    return view_bar(Span("starting…", cls="phase"), running=True)
+    label = "resuming…" if resume_tmp else "starting…"
+    return view_bar(Span(label, cls="phase"), running=True)
 
 
 @rt("/stop", methods=["post"])
@@ -1043,6 +1126,33 @@ async def open_eggy_route(archive: str, dest: str, name: str):
     return JSONResponse({"path": script, "code": code})
 
 
+def _open_in_file_manager(p: Path) -> None:
+    """Open a directory in the OS file manager. Runs on the machine hosting the
+    server (localhost in a browser, the user's session in the desktop app)."""
+    p.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(p)])
+    elif os.name == "nt":
+        os.startfile(str(p))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(p)])
+
+
+@rt("/open/dir", methods=["post"])
+def open_dir_route(which: str = "config"):
+    """Open the egg config directory (``which=config``) or the logs directory
+    (``which=logs``) in the OS file manager. The path is resolved server-side
+    (never taken from the client) so this can't open an arbitrary directory."""
+    from .config import config_dir, logs_dir
+
+    target = logs_dir() if which == "logs" else config_dir()
+    try:
+        _open_in_file_manager(Path(target))
+    except Exception as exc:
+        return JSONResponse({"error": f"could not open: {exc}"}, status_code=400)
+    return JSONResponse({"ok": True, "path": str(target)})
+
+
 @rt("/save/eggy", methods=["post"])
 def save_eggy_route(code: str, path: str = "", out: str = ""):
     """Pack the current case (script + its folder) into the ``.eggy`` at ``out``.
@@ -1121,6 +1231,21 @@ async def api_file_read(path: str, check: str = "1"):
         if suggest:
             resp["suggest"] = suggest
     return JSONResponse(resp)
+
+
+@rt("/api/syntax", methods=["post"])
+def api_syntax(code: str):
+    """Whether ``code`` is syntactically valid Python (compile only, no exec).
+
+    The editor's auto-run gates on this so a half-typed line never re-execs into
+    an error — but only real syntax errors block it; type-checker complaints
+    (which don't stop the code running) do not reach here.
+    """
+    try:
+        compile(code, "<editor>", "exec")
+        return JSONResponse({"ok": True})
+    except SyntaxError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)})
 
 
 @rt("/api/exists")
@@ -1562,6 +1687,7 @@ async def reset(code: str, view: str = "grid", path: str = ""):
     if not _running():
         _last.update(code=None, harvest=None, hist=None)
         _run["svg"] = _run["quality"] = None
+        _clear_resume()  # reset also discards the resume cache
     return view_fragment(await _render_scene(code, mode, path), code, mode=mode)
 
 
@@ -1653,6 +1779,12 @@ async def get(view: str = "grid", desktop: int = 0):
                     title="follow the opened file on disk (edit in your own "
                     "editor); hides the editor pane",
                 ),
+                Label(
+                    Input(type="checkbox", id="autosave-toggle"),
+                    "auto-save",
+                    title="write edits to the open file automatically, about a "
+                    "second after you stop typing",
+                ),
                 Div(cls="menu-sep"),
                 Div(
                     Button("export", cls="menu-sub-btn"),
@@ -1685,6 +1817,13 @@ async def get(view: str = "grid", desktop: int = 0):
                     id="file-save-eggy",
                     title="pack this case (script + its folder, including the "
                     "saved net) into a .eggy archive to share or regrid",
+                ),
+                Div(cls="menu-sep"),
+                Button(
+                    "open config directory",
+                    id="file-config-dir",
+                    title="open ~/.config/egg (config.toml, favourites, recent) "
+                    "in the system file manager",
                 ),
             ),
             _menu(
@@ -1770,6 +1909,12 @@ async def get(view: str = "grid", desktop: int = 0):
                     id="help-report",
                     data_url="https://github.com/bezmi/egg/issues",
                 ),
+                Button(
+                    "view logs",
+                    id="help-logs",
+                    title="open the log directory (default ~/.config/egg/logs) "
+                    "in the system file manager",
+                ),
             ),
         ),
         Div(
@@ -1787,11 +1932,12 @@ async def get(view: str = "grid", desktop: int = 0):
                     data_watch="1"
                     if os.environ.get("EGG_WEBUI_WATCH") and _script_arg()
                     else "0",
-                    hx_post="/render",
-                    hx_include="[name='view'],[name='path']",
-                    hx_target="#view",
-                    hx_trigger="input changed delay:500ms",
-                    hx_sync="this:replace",
+                    # No input-driven render: the preview re-executes when an
+                    # editable item is used (params/topology/loading a file) or,
+                    # for typed edits, a couple of seconds after typing stops and
+                    # only when the LSP reports no errors — so a half-typed line
+                    # never re-execs into a runtime error. Renders are driven
+                    # explicitly via eggForceRender() in app.js.
                 ),
                 Input(type="hidden", name="path", id="scriptpath", value=path),
                 cls="editor",
@@ -1936,7 +2082,7 @@ async def get(view: str = "grid", desktop: int = 0):
         Div(
             Div(
                 Div(
-                    Span("save edits"),
+                    Span("apply edits"),
                     Button("close", id="save-close"),
                     cls="fs-head",
                 ),

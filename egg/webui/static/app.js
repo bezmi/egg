@@ -7,6 +7,34 @@
 // For commercial licensing, contact s.imran@tuta.io
 
 
+// User config (window.eggConfig, injected before this script; see egg/webui/
+// config.py). Every read falls back to a built-in default, so a missing key or
+// an absent config changes nothing.
+const EGG_CFG = window.eggConfig || {};
+const eggDelay = (name, def) => {
+  const v = EGG_CFG.delays && EGG_CFG.delays[name];
+  return typeof v === 'number' ? v : def;
+};
+const eggBind = (name, def) => (EGG_CFG.keybinds && EGG_CFG.keybinds[name]) || def;
+const eggAutorunMode = () =>
+  (EGG_CFG.behavior && EGG_CFG.behavior.autorun) || 'delay';
+// Match a KeyboardEvent against a "Mod+Key" binding string ("Ctrl+Enter",
+// "Ctrl+/", or a bare key like "s"). Ctrl and Meta are treated interchangeably
+// so one binding works on both Linux/Windows and macOS.
+function eggMatchBind(e, bind) {
+  if (!bind) return false;
+  const parts = bind.split('+').map((p) => p.trim());
+  const key = parts.pop();
+  const need = new Set(parts.map((p) => p.toLowerCase()));
+  const wantMod = need.has('ctrl') || need.has('cmd') || need.has('meta');
+  const wantShift = need.has('shift');
+  const wantAlt = need.has('alt');
+  if (wantMod !== (e.ctrlKey || e.metaKey)) return false;
+  if (wantShift !== e.shiftKey) return false;
+  if (wantAlt !== e.altKey) return false;
+  return e.key.toLowerCase() === key.toLowerCase();
+}
+
 // Reload without a flash: if there is a saved script to restore, hide the
 // server-rendered default grid before first paint. The DOMContentLoaded restore
 // below then discards that default mesh (swapping in a "rendering…" placeholder)
@@ -452,17 +480,26 @@ function eggSyncFileGuards() {
 // trigger and localStorage persistence. The cursor survives the replace — a
 // param edit must not fling the editor to the top (eggEditorApi.setValue does
 // a minimal-diff edit).
+// Set while eggSetCode is running so the auto-run input handler can tell a
+// programmatic replace (which re-runs immediately at its call site) from raw
+// typing (which re-runs on the delayed, syntax-gated path).
+let eggSettingCode = false;
 window.eggSetCode = (code) => {
-  if (window.eggEditorApi) {
-    window.eggEditorApi.setValue(code);
-  } else {
-    const t = document.querySelector('.editor textarea');
-    const cur = Math.min(t.selectionStart || 0, code.length);
-    const top = t.scrollTop;
-    t.value = code;
-    t.setSelectionRange(cur, cur);
-    t.scrollTop = top;
-    t.dispatchEvent(new Event('input', {bubbles: true}));
+  eggSettingCode = true;
+  try {
+    if (window.eggEditorApi) {
+      window.eggEditorApi.setValue(code);
+    } else {
+      const t = document.querySelector('.editor textarea');
+      const cur = Math.min(t.selectionStart || 0, code.length);
+      const top = t.scrollTop;
+      t.value = code;
+      t.setSelectionRange(cur, cur);
+      t.scrollTop = top;
+      t.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+  } finally {
+    setTimeout(() => { eggSettingCode = false; }, 0);
   }
 };
 
@@ -487,7 +524,9 @@ document.addEventListener('change', async (e) => {
     const r = await fetch('/api/param', {method: 'POST', body});
     if (!r.ok) { inp.classList.add('param-bad'); return; }
     inp.classList.remove('param-bad');
-    window.eggSetCode(await r.text());
+    const newCode = await r.text();
+    window.eggSetCode(newCode);
+    eggForceRender(newCode);  // an editable item: re-run immediately
   } catch { inp.classList.add('param-bad'); }
 });
 // Collapsed/open state survives the per-edit re-renders.
@@ -517,6 +556,50 @@ function eggForceRender(code) {
   });
   return true;
 }
+// Auto-run the UNSAVED buffer. Editable items (params, topology, a loaded file)
+// re-run immediately at their call sites via eggForceRender(); raw typing
+// re-runs a couple of seconds after it stops, and only when the code is
+// syntactically valid (a real compile check server-side) — so a half-typed
+// line never re-execs into an error. Type-checker complaints do NOT block it.
+let autoRunTimer, autoRunPending = false;
+const AUTO_RUN_DELAY = eggDelay('autorun_ms', 2000);
+async function tryAutoRun() {
+  if (eggIsWatching()) { autoRunPending = false; return; }
+  const t = document.querySelector('.editor textarea');
+  if (!t) return;
+  const code = t.value;
+  try {
+    const j = await (await fetch('/api/syntax',
+      {method: 'POST', body: new URLSearchParams({code})})).json();
+    if (!j.ok) return;  // syntax error: hold (next typing pause retries)
+  } catch (err) { /* check failed: fall through and let the render try */ }
+  autoRunPending = false;
+  eggForceRender(code);
+}
+// file > auto-save: write the open file to disk ~1s after typing stops.
+let autoSaveTimer;
+const autoSaveOn = () =>
+  !!document.getElementById('autosave-toggle')?.checked;
+document.addEventListener('input', (e) => {
+  if (!e.target.matches('.editor textarea') || eggSettingCode) return;
+  // Auto-run on a typing pause only in "delay" mode; "save" runs on save, "off"
+  // never auto-runs (see behavior.autorun in the config).
+  if (eggAutorunMode() === 'delay') {
+    autoRunPending = true;
+    clearTimeout(autoRunTimer);
+    autoRunTimer = setTimeout(tryAutoRun, AUTO_RUN_DELAY);
+  }
+  if (autoSaveOn() && curFile && !eggIsWatching()) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
+      if (curFile && autoSaveOn() && !eggIsWatching()) doSave(curFile);
+    }, 1000);
+  }
+});
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'autosave-toggle')
+    localStorage.setItem('egg-webui-autosave', e.target.checked ? '1' : '');
+});
 window.addEventListener('DOMContentLoaded', () => {
   const t = document.querySelector('.editor textarea');
   if (!t) return;
@@ -534,15 +617,10 @@ window.addEventListener('DOMContentLoaded', () => {
     const cv = document.querySelector('#canvas');
     if (cv) cv.innerHTML = '<div class="canvas-wait">rendering…</div>';
     reveal();  // the placeholder is not the wrong grid; nothing left to hide
-    if (want !== t.value) {
-      window.eggSetCode(want);   // fires input → the textarea's render trigger
-    } else {
-      // Firefox already restored the field to `want`; its input render would be
-      // suppressed by the changed-gate, so drive the render explicitly. Still
-      // route through eggSetCode to sync the editor + persist localStorage.
-      window.eggSetCode(want);
-      eggForceRender(want);
-    }
+    // Route through eggSetCode to sync the editor + persist localStorage, then
+    // drive the render explicitly (there is no input-triggered render anymore).
+    window.eggSetCode(want);
+    eggForceRender(want);
   } else {
     reveal();  // canvas already matches what we want — show it now
   }
@@ -643,7 +721,18 @@ document.addEventListener('click', async (e) => {
   }
   if (e.target.closest('#file-save-eggy')) saveEggyPick();
   if (e.target.closest('#file-open-eggy')) openEggyPick();
+  // open a config/logs directory in the OS file manager (server-side path)
+  if (e.target.closest('#file-config-dir')) eggOpenDir('config');
+  if (e.target.closest('#help-logs')) eggOpenDir('logs');
 });
+async function eggOpenDir(which) {
+  try {
+    const r = await fetch('/open/dir', {method: 'POST',
+      body: new URLSearchParams({which})});
+    const j = await r.json();
+    if (!r.ok || j.error) eggAlert((j && j.error) || 'could not open the directory');
+  } catch (err) { eggAlert('could not open the directory: ' + err); }
+}
 
 // --- open/save: normal file workflow against the server's filesystem
 // (local single-user tool). State: the open file's path + its last
@@ -687,6 +776,26 @@ function setFile(path, savedCode) {
   if (path) setScriptPath(path);
   updateChip();
 }
+// Load code into the editor and make it the open file. The editor's setValue
+// (a diff insert via execCommand) silently no-ops while the editor pane is
+// display:none, so in watch mode we briefly un-hide the pane around the set so
+// the buffer actually changes (synchronous: no paint, no flicker), then
+// re-point the watch at the new file. Everything (buffer, run, exit-watch) now
+// reflects the file that's actually open.
+function loadIntoEditor(code, path, savedCode) {
+  const panes = document.querySelector('.panes');
+  const wasWatching = !!watchTimer;
+  if (wasWatching) panes.classList.remove('watching');
+  window.eggSetCode(code);
+  if (wasWatching) panes.classList.add('watching');
+  setFile(path, savedCode);
+  if (wasWatching) {
+    watchLast = null; watchSuggested = false;
+    watchTick();          // re-run + re-follow the newly opened file
+  } else {
+    eggForceRender(code); // loading a file re-runs it
+  }
+}
 // the script's on-disk location: sent with renders/runs so sibling
 // imports (from driver import ...) resolve; independent of curFile so
 // pasted edits keep resolving against the last opened script's dir
@@ -722,7 +831,7 @@ async function fsList(dir) {
   const r = await fetch('/api/files?dir=' + encodeURIComponent(dir || '')
     + '&ext=' + encodeURIComponent(ext));
   const j = await r.json();
-  if (j.error) { alert(j.error); return false; }
+  if (j.error) { eggAlert(j.error); return false; }
   fsDir = j.dir;
   document.getElementById('fs-path').value = j.dir;
   document.getElementById('fs-search').value = '';
@@ -892,7 +1001,7 @@ async function fsRunSearch(q, confirmed) {
   if (seq !== fsSearchSeq) return;   // a newer search superseded this one
   fsSearchId = null;
   fsNote('fs-searching', false);
-  if (j.error) { alert(j.error); return; }
+  if (j.error) { eggAlert(j.error); return; }
   if (j.needs_confirm) {
     fsPendingQuery = q;
     document.getElementById('fs-confirm-text').textContent =
@@ -946,40 +1055,48 @@ async function fsShow(opts) {
   fsLoadPlaces();
   await fsList(fsOpts.startDir || fsDir || (curFile ? dirOf(curFile) : ''));
 }
+// Prompt before replacing a modified buffer with another file. Only a tracked
+// file with edits since its last save counts as unsaved (a fresh untracked
+// buffer does not, to avoid nagging on the starter script).
+async function eggUnsavedOk() {
+  if (lastSaved === null || currentCode() === lastSaved) return true;
+  return eggConfirm(
+    'The current file has unsaved changes. Discard them and open the other file?',
+    'discard');
+}
 async function fsPick(path) {
   if (fsMode === 'save') {  // clicking a file in save mode = take its name
     document.getElementById('fs-name').value = baseOf(path);
     return;
   }
   if (fsOpts.onPick) return fsOpts.onPick(path);   // custom open flow (e.g. .eggy)
+  if (!(await eggUnsavedOk())) return;   // keep the picker open to reconsider
   const r = await fetch('/api/file?path=' + encodeURIComponent(path));
   const j = await r.json();
-  if (j.error) { alert(j.error); return; }
+  if (j.error) { eggAlert(j.error); return; }
   fsRecordRecent(j.path);
   // library-style script (defines a builder, no __egg_webui__ block):
   // watching -> show the block to paste (never touch a watched file);
   // otherwise offer to append it to the file, on confirmation only
   if (j.suggest) {
     if (watchTimer) {
-      window.eggSetCode(j.code);
-      setFile(j.path, j.code);
+      loadIntoEditor(j.code, j.path, j.code);  // re-points the watch too
       fsHide();
       showSuggestion(j.suggest);
       return;
     }
-    if (confirm(
-        'this script draws nothing and registers no run in the web UI.\n\n'
-        + 'append an __egg_webui__ block (build + egg_webui.run) and save '
-        + 'the file?')) {
-      window.eggSetCode(j.code.trimEnd() + j.suggest);
-      setFile(j.path, null);
+    if (await eggConfirm(
+        'This script draws nothing and registers no run in the web UI. '
+        + 'Append an __egg_webui__ block (build + egg_webui.run) and save '
+        + 'the file?', 'append')) {
+      const appended = j.code.trimEnd() + j.suggest;
+      loadIntoEditor(appended, j.path, null);
       await doSave(j.path);
       fsHide();
       return;
     }
   }
-  window.eggSetCode(j.code);
-  setFile(j.path, j.code);
+  loadIntoEditor(j.code, j.path, j.code);
   fsHide();
 }
 function showSuggestion(text) {
@@ -992,15 +1109,27 @@ async function doSave(path) {
     method: 'POST', body: new URLSearchParams({path, code}),
   });
   const j = await r.json();
-  if (j.error) { alert('save failed: ' + j.error); return; }
+  if (j.error) { eggAlert('save failed: ' + j.error); return; }
   setFile(j.path, code);
   fsRecordRecent(j.path);
   updateChip(true);
   setTimeout(() => updateChip(), 1200);
+  // "save" auto-run policy: saving is the trigger to re-run the grid view.
+  if (eggAutorunMode() === 'save' && !eggIsWatching()) eggForceRender(code);
 }
 // Themed yes/no confirm as a promise — reused for every overwrite prompt.
 let cfResolve = null;
 function eggConfirm(message, okLabel) {
+  document.getElementById('cf-no').style.display = '';
+  document.getElementById('cf-text').textContent = message;
+  document.getElementById('cf-yes').textContent = okLabel || 'ok';
+  document.getElementById('cfmodal').style.display = 'flex';
+  return new Promise((res) => { cfResolve = res; });
+}
+// A themed replacement for window.alert(): the confirm modal with only the
+// ok button. Resolves when dismissed so callers can await it if they wish.
+function eggAlert(message, okLabel) {
+  document.getElementById('cf-no').style.display = 'none';
   document.getElementById('cf-text').textContent = message;
   document.getElementById('cf-yes').textContent = okLabel || 'ok';
   document.getElementById('cfmodal').style.display = 'flex';
@@ -1054,7 +1183,7 @@ async function doExport(kind, out) {
   let url, body;
   if (kind === 'svg') {
     const svg = serializeSceneSvg();
-    if (!svg) { alert('nothing to export yet (render a scene first)'); return false; }
+    if (!svg) { eggAlert('nothing to export yet (render a scene first)'); return false; }
     url = '/export/svg'; body = {svg, out};
   } else {
     url = kind === 'su2' ? '/export/su2' : '/export/net';
@@ -1062,7 +1191,7 @@ async function doExport(kind, out) {
   }
   const r = await fetch(url, {method: 'POST', body: new URLSearchParams(body)});
   let j = null; try { j = await r.json(); } catch (err) { /* non-JSON error */ }
-  if (!r.ok || !j || j.error) { alert((j && j.error) || 'export failed'); return false; }
+  if (!r.ok || !j || j.error) { eggAlert((j && j.error) || 'export failed'); return false; }
   fsRecordRecent(j.path || out);
   return true;
 }
@@ -1101,7 +1230,7 @@ document.addEventListener('DOMContentLoaded', eggRefreshExportAs);
 // --- .eggy case archives, through the picker + backend ---
 function saveEggyPick() {
   const path = document.getElementById('scriptpath').value;
-  if (!path) { alert('save the script to a file first, then save the .eggy'); return; }
+  if (!path) { eggAlert('save the script to a file first, then save the .eggy'); return; }
   fsShow({
     mode: 'save', title: 'save .eggy archive', ext: '.eggy',
     defaultName: fsSuggestName('.eggy'), namePlaceholder: 'name.eggy',
@@ -1114,7 +1243,7 @@ async function saveEggy(out) {
   const r = await fetch('/save/eggy', {method: 'POST',
     body: new URLSearchParams({code, path, out})});
   let j = null; try { j = await r.json(); } catch (err) { /* non-JSON */ }
-  if (!r.ok || !j || j.error) { alert((j && j.error) || 'save failed'); return; }
+  if (!r.ok || !j || j.error) { eggAlert((j && j.error) || 'save failed'); return; }
   fsRecordRecent(j.path || out);
 }
 // open: step 1 pick the archive, step 2 pick a folder + workspace name to
@@ -1133,6 +1262,7 @@ function openEggyDest(archive) {
   });
 }
 async function extractEggy(archive, target) {
+  if (!(await eggUnsavedOk())) return;
   const dest = dirOf(target), name = baseOf(target);
   const info = await fsExists(target);
   if (info.exists
@@ -1141,9 +1271,10 @@ async function extractEggy(archive, target) {
   const r = await fetch('/open/eggy', {method: 'POST',
     body: new URLSearchParams({archive, dest, name})});
   let j = null; try { j = await r.json(); } catch (err) { /* non-JSON */ }
-  if (!r.ok || !j || j.error) { alert((j && j.error) || 'open failed'); return; }
+  if (!r.ok || !j || j.error) { eggAlert((j && j.error) || 'open failed'); return; }
   window.eggSetCode(j.code);
   setFile(j.path, j.code);
+  eggForceRender(j.code);  // loading the unpacked script re-runs it
   fsRecordRecent(j.path);
 }
 document.addEventListener('click', (e) => {
@@ -1172,7 +1303,7 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('#save-write')) {  // write to file / apply, maybe remember
     const rem = document.getElementById('save-remember');
     if (rem && rem.checked) eggWriteThrough = true;
-    if (eggPendingCommit != null) eggApplyCommit(eggPendingCommit);
+    if (eggPendingCommit != null) eggApplyToFile(eggPendingCommit);
     eggPendingCommit = null;
     document.getElementById('savemodal').style.display = 'none';
   }
@@ -1230,10 +1361,10 @@ document.addEventListener('keydown', (e) => {
   if (e.target.id === 'fs-name' && e.key === 'Enter')
     document.getElementById('fs-do-save').click();
 });
-// Ctrl+Enter (Cmd+Enter): run — or stop, when a run is streaming. Capture
-// phase, so CodeMirror's Mod-Enter (insert blank line) never sees it.
+// The run keybind (default Ctrl+Enter): run — or stop, when a run is streaming.
+// Capture phase, so the editor's own Mod-Enter (insert blank line) never sees it.
 document.addEventListener('keydown', (e) => {
-  if (!(e.ctrlKey || e.metaKey) || e.key !== 'Enter' || e.repeat) return;
+  if (e.repeat || !eggMatchBind(e, eggBind('run', 'Ctrl+Enter'))) return;
   const btn = document.querySelector('#viewbar .btns button.primary:not(:disabled)')
            || document.querySelector('#viewbar .btns button.danger:not(:disabled)');
   if (!btn) return;
@@ -1241,6 +1372,24 @@ document.addEventListener('keydown', (e) => {
   e.stopPropagation();
   btn.click();
 }, true);
+// Resume warns when the file changed since the cached result. The run button
+// carries data-resume="1" in resume mode; eggRunBaseCode is the code submitted
+// by the run that produced the cache.
+let eggRunBaseCode = null;
+document.body.addEventListener('htmx:confirm', (evt) => {
+  const el = evt.detail.elt;
+  if (!el || el.id !== 'run-btn' || el.dataset.resume !== '1') return;
+  if (currentCode() === eggRunBaseCode) return;  // unchanged: resume silently
+  evt.preventDefault();
+  eggConfirm(
+    'The file has changed since the cached result. Resume starts from that '
+    + 'cached grid and runs the remaining stages with the new values. Continue?',
+    'resume').then((ok) => { if (ok) evt.detail.issueRequest(true); });
+});
+document.body.addEventListener('htmx:beforeRequest', (evt) => {
+  const el = evt.detail.elt;
+  if (el && el.id === 'run-btn') eggRunBaseCode = currentCode();
+});
 // --- watch mode: the user edits the file in their own editor; the UI
 // hides the editor pane, polls the opened file, and re-renders on change
 // (the run button keeps working against the synced buffer).
@@ -1256,10 +1405,12 @@ async function maybeSuggest() {
   } catch (err) { /* ignore */ }
 }
 async function watchTick() {
-  if (!curFile) return;
+  const f = curFile;
+  if (!f) return;
   try {
-    const r = await fetch('/api/file?path=' + encodeURIComponent(curFile) + '&check=0');
+    const r = await fetch('/api/file?path=' + encodeURIComponent(f) + '&check=0');
     const j = await r.json();
+    if (f !== curFile) return;  // the watched file changed mid-flight; discard
     if (j.error || j.code === watchLast) return;
     const changed = watchLast !== null;
     watchLast = j.code;
@@ -1268,26 +1419,34 @@ async function watchTick() {
       lastSaved = j.code;
       updateChip();
     }
+    eggForceRender(j.code);  // watch: re-run whenever the file changes on disk
     if (changed) { watchSuggested = false; maybeSuggest(); }
   } catch (err) { /* transient; next tick retries */ }
 }
-function setWatch(on) {
+async function setWatch(on) {
   const cb = document.getElementById('watch-toggle');
   const panes = document.querySelector('.panes');
   if (on && !curFile) {
-    alert('open a file first — watch mode follows the opened file');
+    eggAlert('Open a file first.');
     cb.checked = false;
     return;
   }
   if (on && lastSaved !== null && currentCode() !== lastSaved
-      && !confirm('discard unsaved editor changes and follow the file on disk?')) {
+      && !(await eggConfirm('Discard unsaved editor changes and follow the file on disk?', 'discard'))) {
     cb.checked = false;
     return;
   }
   cb.checked = on;
   panes.classList.toggle('watching', on);
+  // The editor's hover/signature/completion tooltips are appended to <body>, so
+  // hiding the editor pane doesn't hide them. Suppress them entirely while
+  // watching via a root class the CSS keys off (declarative, so one that tries
+  // to open later — e.g. from a programmatic setValue — stays hidden too).
+  document.documentElement.classList.toggle('egg-watching', on);
   localStorage.setItem('egg-webui-watch', on ? '1' : '');
   if (on) {
+    const ta = document.querySelector('.editor textarea');
+    if (ta) ta.blur();  // close any open completion popup
     if (splitInst) { splitInst.destroy(); splitInst = null; }
     panes.classList.remove('split-active');
     watchLast = null;
@@ -1326,6 +1485,8 @@ window.addEventListener('DOMContentLoaded', () => {
         .catch(() => {});
     }
   }
+  const asv = document.getElementById('autosave-toggle');
+  if (asv) asv.checked = localStorage.getItem('egg-webui-autosave') === '1';
   if (localStorage.getItem('egg-webui-watch') && curFile) setWatch(true);
 });
 
@@ -1511,11 +1672,11 @@ function eggEnsureControls() {
     ab.id = 'ed-auto';
     ab.textContent = eggAuto ? 'auto: on' : 'auto: off';
     ab.title = 'auto-commit each valid edit to the source (writes to the file)';
-    ab.addEventListener('click', () => {
+    ab.addEventListener('click', async () => {
       if (!eggAuto) {  // turning ON: auto-commit writes the file every edit
-        if (curFile && eggIsWatching() && !confirm(
-            'Auto-save will write the drawing to the WATCHED file on every valid '
-            + 'edit. Continue?')) return;  // declined -> stay off
+        if (curFile && eggIsWatching() && !(await eggConfirm(
+            'Auto-save will write the topology to the WATCHED file on every valid '
+            + 'edit. Continue?', 'continue'))) return;  // declined -> stay off
         eggAuto = true; eggWriteThrough = true; eggMaybeAuto();
       } else { eggAuto = false; }
       ab.textContent = eggAuto ? 'auto: on' : 'auto: off';
@@ -1526,8 +1687,9 @@ function eggEnsureControls() {
     const cb = document.createElement('button');
     cb.id = 'ed-commit';
     cb.className = 'primary';
-    cb.textContent = 'save edits';
-    cb.title = 'write the drawing into the editable({...}) source (only when valid)';
+    cb.textContent = 'apply edits';
+    cb.title = 'apply the drawing to the editable({...}) source and re-run '
+      + '(only when valid); save the file to disk yourself';
     cb.addEventListener('click', eggCommit);
     bar.insertBefore(cb, bar.firstChild);
     eggUpdateCommitBtn();
@@ -1585,13 +1747,34 @@ function eggUpdateCommitBtn() {
   const cb = document.getElementById('ed-commit');
   if (cb) cb.disabled = !(eggEd && eggEd.valid);
 }
-// land a committed source: update the editor buffer, and persist to the file
-// when one is open (the write-through / popup path has already consented)
-function eggApplyCommit(code) {
+// Land a committed source into the editor buffer and re-run it. The user
+// saves the file themselves (Ctrl+S / auto-save). In watch mode the editor
+// pane is display:none, where the prism setValue no-ops, so un-hide it just
+// for the synchronous set (no paint happens in between).
+function eggApplyToBuffer(code) {
   eggClearBuffer();
   eggEd.dirty = false;
+  const panes = document.querySelector('.panes');
+  const hidden = panes && panes.classList.contains('watching');
+  if (hidden) panes.classList.remove('watching');
   window.eggSetCode(code);
-  if (curFile) doSave(curFile);
+  if (hidden) panes.classList.add('watching');
+  eggForceRender(code);
+}
+// Apply the edits AND write them straight to the open file — the watch-mode
+// "write to file" button and the write-through opt-in. Writes the committed
+// code directly (not currentCode(), which is stale while the pane is hidden).
+async function eggApplyToFile(code) {
+  eggApplyToBuffer(code);
+  if (!curFile) return;
+  const r = await fetch('/api/file/save',
+    {method: 'POST', body: new URLSearchParams({path: curFile, code})});
+  const j = await r.json();
+  if (j.error) { eggAlert('save failed: ' + j.error); return; }
+  setFile(j.path, code);
+  fsRecordRecent(j.path);
+  updateChip(true);
+  setTimeout(() => updateChip(), 1200);
 }
 async function eggCommit() {
   if (!eggEd || !eggEd.valid) return;
@@ -1604,12 +1787,14 @@ async function eggCommit() {
   try {
     const res = await fetch('/api/topo/commit', {method: 'POST', body});
     j = await res.json();
-    if (!res.ok) { alert(j.error || 'commit failed'); return; }
-  } catch (e) { alert('commit failed: ' + e); return; }
-  // Not watching -> clicking save is explicit permission to write the file.
-  // Watching -> show the block to paste (never silently touch a watched file),
-  // unless the user opted into write-through this session.
-  if (!eggIsWatching() || eggWriteThrough) { eggApplyCommit(j.code); return; }
+    if (!res.ok) { eggAlert(j.error || 'commit failed'); return; }
+  } catch (e) { eggAlert('commit failed: ' + e); return; }
+  // Not watching -> apply to the buffer; the user saves the file themselves
+  // (Ctrl+S / auto-save). Watching + write-through opted in -> write straight
+  // to the watched file. Watching otherwise -> show the block to copy, or a
+  // button to write the watched file (never touch it silently).
+  if (!eggIsWatching()) { eggApplyToBuffer(j.code); return; }
+  if (eggWriteThrough) { eggApplyToFile(j.code); return; }
   eggPendingCommit = j.code;
   const m = document.getElementById('savemodal');
   document.getElementById('save-text').textContent = j.block || j.code;
@@ -1929,6 +2114,26 @@ document.addEventListener('click', (e) => {
   else if (e.target.closest('#tool-coincident')) eggMakeCoincident();
   else if (e.target.closest('#tool-res')) eggSetEdgeRes();
 });
+// Node-operation keybinds in the topology edit view (configurable, bare keys).
+// Ignored while typing; each fires only when its toolbar button is enabled, so
+// the same precondition (right selection) gates the key and the click alike.
+document.addEventListener('keydown', (e) => {
+  if (!eggEd || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.matches('input, textarea, select') || e.target.closest('.editor')) return;
+  const ops = [
+    ['node_split', 's', 'tool-split', eggSplitAtNode],
+    ['node_join', 'j', 'tool-join', eggJoinNodes],
+    ['node_coincident', 'c', 'tool-coincident', eggMakeCoincident],
+    ['node_set_res', 'r', 'tool-res', eggSetEdgeRes],
+  ];
+  for (const [name, def, id, fn] of ops) {
+    if (eggMatchBind(e, eggBind(name, def))) {
+      const btn = document.getElementById(id);
+      if (btn && !btn.disabled) { e.preventDefault(); fn(); }
+      return;
+    }
+  }
+});
 // nearest snap-able node within maxD viewBox units of a world point
 function eggPickNode(svg, wx, wy, maxD) {
   let best = null, bestD = maxD * maxD;
@@ -2213,7 +2418,7 @@ function eggRenameNode(id) {
   if (!eggIsBlockingNode(id)) return;
   const nn = (prompt('rename node "' + id + '" to:', id) || '').trim();
   if (!nn || nn === id) return;
-  if (eggIdTaken(nn)) { alert('name "' + nn + '" is already in use'); return; }
+  if (eggIdTaken(nn)) { eggAlert('name "' + nn + '" is already in use'); return; }
   eggEd.nodes.set(nn, eggEd.nodes.get(id));
   eggEd.nodes.delete(id);
   for (const e of eggEd.edges) { if (e.a === id) e.a = nn; if (e.b === id) e.b = nn; }
