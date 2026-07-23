@@ -251,8 +251,8 @@ app, rt = fast_app(
         Style(CSS),
         Style(CATPPUCCIN),
         Style(NotStr(FONT_CSS)),  # [fonts] family/size overrides; inert when unset
-        Script(NotStr(CONFIG_JS)),  # window.eggConfig, before app.js reads it
-        Script(NotStr(TOKEN_JS)),   # window.eggToken, for local links opened elsewhere
+        Script(CONFIG_JS),  # window.eggConfig, before app.js reads it (Script leaves JS unescaped)
+        Script(TOKEN_JS),  # window.eggToken, for local links opened elsewhere
         Script(JS),
         Script(EDITOR_JS, type="module"),
     ),
@@ -768,7 +768,7 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid", sess: dict | No
     # supplies the chips, errors, and stdout above/below it.
     run_svg = run["svg"] if (running and run) else None
     svg = run_svg or r.svg
-    quality = run["quality"] if (running and run_svg) else r.quality
+    quality = run["quality"] if (running and run and run_svg) else r.quality
     edit_note = _edit_disabled_note(r) if mode == "edit" else None
     parts = [
         view_bar(*chips, running=running, mode=mode, resumable=_is_resumable(sess)),

@@ -97,7 +97,7 @@ def file_import(path: str | Path) -> FileImport:
     Returns a :class:`FileImport`; read :attr:`FileImport.path` wherever the
     script needs the file (never hard-code the path). See the module docstring.
     """
-    dep = FileImport(path, _caller_dir())
+    dep = FileImport(str(path), _caller_dir())
     _REGISTRY.append(dep)
     return dep
 

@@ -66,7 +66,7 @@ def content_security_policy(desktop: bool = False) -> str:
     ``new Function()`` (see webview/js/api.js), which the policy would otherwise
     block, killing the window controls and drag. The desktop is a local,
     token-authed context, so this narrow relaxation stays there."""
-    directives = list(_CSP_BASE)
+    directives: list[str] = list(_CSP_BASE)
     if desktop:
         directives[1] = "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
     return "; ".join(directives)

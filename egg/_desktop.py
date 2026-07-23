@@ -31,6 +31,7 @@ import socket
 import subprocess
 import sys
 import time
+from typing import Any
 
 
 class WindowControls:
@@ -44,7 +45,7 @@ class WindowControls:
     """
 
     def __init__(self) -> None:
-        self.window = None
+        self.window: Any = None  # pywebview Window, filled in after create_window
         self._maximized = False
 
     def start_drag(self) -> None:
@@ -136,7 +137,7 @@ def _theme_qt_tooltips() -> None:
         from qtpy.QtWidgets import QApplication
 
         app = QApplication.instance()
-        if app is None:
+        if not isinstance(app, QApplication):  # narrows QCoreApplication -> QApplication
             return
         pal = app.palette()
         pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#181825"))
