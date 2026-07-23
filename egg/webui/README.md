@@ -9,12 +9,13 @@ script defines. Rendering re-runs ~0.5 s after you stop typing; the
 websocket.
 
 ```bash
-uv sync --group webui          # once
-uv run --no-sync egg-webui                          # http://127.0.0.1:5001
-uv run --no-sync egg-webui my_geometry.py           # open an existing script
-uv run --no-sync egg-webui my_geometry.py --watch   # start in watch mode
-uv run --no-sync egg-webui --host 0.0.0.0 --reload  # dev server: auto-restart
-                                                    # on edits to webui/ or egg/
+uv sync --group ui                                   # once
+uv run --no-sync egg-desktop                         # native window
+uv run --no-sync egg-desktop my_geometry.py          # open an existing script
+uv run --no-sync egg-desktop my_geometry.py --watch  # start in watch mode
+# same UI in a browser (remote/headless): egg-webui serves http://127.0.0.1:5001
+uv run --no-sync egg-webui --host 0.0.0.0 --reload   # dev server: auto-restart
+                                                     # on edits to webui/ or egg/
 # (reload drops websocket connections and any in-flight run; open a
 # script with the dev server via the positional arg or EGG_WEBUI_SCRIPT)
 # equivalent without the console script: uv run --no-sync uvicorn egg.webui.app:app

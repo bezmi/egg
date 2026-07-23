@@ -11,20 +11,23 @@ from one source (OMP, ROCm, CUDA).
 
 For now, see [`DEVELOPING.md`](DEVELOPING.md) to get started.
 
-## Web UI
+## Desktop app
 
-A browser front-end ("code as CAD"): a Python geometry script on the left,
-a live SVG render of its topology/grid on the right, with the real
+A native window front-end ("code as CAD"): a Python geometry script on the
+left, a live SVG render of its topology/grid on the right, with the real
 untangle + TMOP pipeline streaming into the view.
 
 ```bash
-uv sync --group webui          # once (add --group docs for the help menu)
-uv run --no-sync egg-webui     # → http://127.0.0.1:5001
+uv sync --group ui               # once
+uv run --no-sync egg-desktop     # native window
 ```
 
-`egg-webui my_geometry.py` opens a script; `--host 0.0.0.0` exposes it on
-the network; `--reload` restarts on source edits; `--no-docs` skips the
-Sphinx docs refresh (help → documentation serves them at `/docs/`).
+`egg-desktop my_geometry.py` opens a script; `--watch` follows it on disk;
+`--no-docs` skips the Sphinx docs refresh (help → documentation).
+
+The same UI also runs in a browser with `egg-webui` (serves
+`http://127.0.0.1:5001`); `--host 0.0.0.0` exposes it on the network for a
+remote or headless host, and `--reload` restarts on source edits.
 
 The basics:
 
@@ -51,7 +54,9 @@ Details, theming, and the full script contract: [`webui/README.md`](webui/README
 
 ### Documentation
 
-Start the webui after running `uv sync group pwebui --group docs`. Then, the full egg documentation is accessible through **help → documentation**.
+Start the app (`uv sync --group ui`). Then the full egg documentation is
+accessible through **help → documentation** (Sphinx is a core dependency, so
+the docs build without an extra group).
 
 ## CAD import (3D)
 
