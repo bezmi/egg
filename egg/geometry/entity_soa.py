@@ -532,6 +532,40 @@ def encode_entity_soa(entity, d: int = 2):
     raise NotImplementedError(f"Entity type {type(entity)} not encodable yet")
 
 
+def project_frame_batch(entity, Q):
+    """Batched projection of ``Q`` (n, d) onto an entity via the C++ core.
+
+    Encodes the entity once (memoized on the instance — entities never move
+    during a session) and calls ``cpp_core.geometry_project_batch``, the same
+    entity reconstruction the sweep kernels use. Returns ``(feet, basis)`` —
+    feet (n, d) and the orthonormal tangent basis (n, d, tdim) — from one
+    Newton per query. This is the single source of truth for projection:
+    Python keeps no per-entity mirror.
+    """
+    import numpy as _np
+
+    from egg._cpp import cpp_core
+
+    Q = _np.ascontiguousarray(Q, dtype=_np.float64)
+    wire = getattr(entity, "_soa_wire", None)
+    if wire is None:
+        tag, _, records, seg = encode_entity_soa(entity, d=int(Q.shape[1]))
+        seg_dicts = [
+            {
+                "data": _np.asarray(a, dtype=_np.float64),
+                "off": _np.array([0, len(a)], dtype=_np.int32),
+            }
+            for a in (seg or [])
+        ]
+        wire = (tag, records, seg_dicts)
+        try:
+            entity._soa_wire = wire
+        except AttributeError:
+            pass
+    tag, records, seg_dicts = wire
+    return cpp_core.geometry_project_batch(Q, tag, records, seg_dicts)
+
+
 def group_entities_by_type(
     dof_indices: list[int],
     entities: dict[int, object],

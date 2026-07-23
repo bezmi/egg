@@ -43,8 +43,9 @@ class TestCurves:
     def test_ellipse_arc_foot_is_stationary(self):
         arc = EllipseArc((0.0, 0.0), 2.0, 1.0, 0.3, 0.0, 2 * np.pi, closed=True)
         p = np.array([1.5, 1.5])
-        t = arc._clamp(arc.invert(p))
-        res = (arc.eval(t) - p) @ arc.deriv(t)
+        q = arc.project(p)
+        tangent = arc.tangent_space(q)[:, 0]
+        res = (q - p) @ tangent
         assert abs(res) < 1e-9
 
     def test_quad_bezier_on_curve_roundtrip(self):

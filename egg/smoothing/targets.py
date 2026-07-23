@@ -163,7 +163,13 @@ class BoundaryLayerTarget:
         # re-projecting ~80 distinct anchors 5000+ times. Keyed by position,
         # so anchors that slid along the wall between context builds miss
         # naturally; the entity itself never moves during smoothing.
+        # ``_warm_frames`` batch-fills the cache from a block's whole wall
+        # face in one ``project_many`` — the remaining per-anchor cost of a
+        # scalar projection each is what made many-segment composite walls
+        # (a spline through a dense point file) stall the first context
+        # build for minutes.
         self._frame_cache: dict[bytes, tuple] = {}
+        self._warmed_blocks: set[int] = set()
         # Layer index where the geometric growth reaches the isotropic
         # interior spacing — the extent of the anisotropic band. Boundary
         # shear fades above it (see __call__).
@@ -208,6 +214,46 @@ class BoundaryLayerTarget:
             idx[a] = min(max(idx[a], 0), block.logical_shape[a] - 1)
         return np.asarray(block.nodes[tuple(idx)], dtype=float)
 
+    def _warm_frames(self, block) -> None:
+        """Batch-fill the frame cache for every node of ``block``.
+
+        ``_wall_anchor`` anchors a cell at its own layer's node (not the
+        wall-face node of its column), so every block node is a potential
+        anchor. One C++ ``project_frame_batch`` call over all of them (feet
+        and tangents from the same Newton) replaces a scalar projection per
+        anchor (2D only; the normal is the tangent rotated 90 deg CCW,
+        matching ``entity.normal``). Entities without a SoA encoder fall
+        back to the Python batch methods; anchors the batch misses still
+        resolve through the scalar path.
+        """
+        if id(block) in self._warmed_blocks:
+            return
+        self._warmed_blocks.add(id(block))
+        d = block.nodes.ndim - 1
+        if d != 2 or not (
+            hasattr(self.entity, "project_many")
+            and hasattr(self.entity, "tangent_space_many")
+        ):
+            return
+        anchors = np.asarray(block.nodes, dtype=float).reshape(-1, d)
+        from egg.geometry.base import GeometryEntity
+
+        if type(self.entity).project_many is GeometryEntity.project_many:
+            from egg.geometry.entity_soa import project_frame_batch
+
+            feet, basis = project_frame_batch(self.entity, anchors)
+            t_hats = basis[:, :, 0]
+        else:
+            # An entity with its own projector (e.g. the OCCT-backed CAD
+            # surface) keeps owning it.
+            feet = np.asarray(self.entity.project_many(anchors), dtype=float)
+            t_hats = np.asarray(self.entity.tangent_space_many(feet), dtype=float)[
+                :, :, 0
+            ]
+        n_hats = np.stack([-t_hats[:, 1], t_hats[:, 0]], axis=1)
+        for a, q, n_hat, t_hat in zip(anchors, feet, n_hats, t_hats):
+            self._frame_cache.setdefault(a.tobytes(), (q, n_hat, t_hat))
+
     def _wall_frame(self, anchor: np.ndarray) -> tuple:
         """Memoized (foot point, normal, tangent) of the wall at ``anchor``."""
         key = anchor.tobytes()
@@ -225,6 +271,7 @@ class BoundaryLayerTarget:
         s_n = self.normal_spacing(k)
         s_t = self.tangential_spacing
 
+        self._warm_frames(block)
         anchor = self._wall_anchor(block, cell_base)
         q, n_hat, t_hat = self._wall_frame(anchor)
 

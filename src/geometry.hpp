@@ -202,6 +202,16 @@ template <Parametrization P> struct TrimmedEntity {
     [[nodiscard]] Frame<P::edim, tdim> project_frame(const Pt& p) const
     {
         auto q = param.invert(p);
+        // Periodic parametrizations return one branch representative; pick
+        // the representative nearest the trim interval, so a foot at the
+        // period seam clamps to the near interval end, not across the whole
+        // range (e.g. an arc over [3/2 pi, 2 pi] queried at angle ~0).
+        if constexpr (requires { P::period; }) {
+            if (!trim.closed) {
+                const real mid = 0.5_r * (trim.t0 + trim.t1);
+                q[0] = mid + sycl::remainder(q[0] - mid, P::period);
+            }
+        }
         const bool inside = trim.contains(q);
         if (!inside) { q = trim.clamp(q); }
         return {.pos = param.eval(q),
@@ -467,6 +477,10 @@ inline real
 /// by angle; closed-form inverse.
 struct CircleArcParam {
     static constexpr int edim = 2, idim = 1;
+    /// Angular period: the inverse returns one branch representative; the
+    /// trimmed entity re-represents it nearest the trim interval before
+    /// clamping (see TrimmedEntity::project_frame).
+    static constexpr real period = static_cast<real>(2.0 * std::numbers::pi);
     PtN<2> c;  ///< Centre.
     real r;    ///< Radius.
     /// Inverse: the polar angle of @p q about the centre.
@@ -483,6 +497,8 @@ struct CircleArcParam {
 /// A rotated, axis-scaled elliptical arc; nearest foot via Newton.
 struct EllipseArcParam {
     static constexpr int edim = 2, idim = 1;
+    /// Angular period (cf. CircleArcParam::period).
+    static constexpr real period = static_cast<real>(2.0 * std::numbers::pi);
     PtN<2> c;   ///< Centre.
     real a, b;  ///< Semi-axis lengths along the rotated x/y axes.
     real phi;   ///< Rotation of the major axis from +x.

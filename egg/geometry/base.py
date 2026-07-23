@@ -139,31 +139,50 @@ class GeometryEntity(ABC):
         """Dimension of the entity (0=point, 1=curve, 2=surface)."""
         ...
 
-    @abstractmethod
     def project(self, p: np.ndarray) -> np.ndarray:
         """Closest point on the entity to p. Shape (d,)."""
-        ...
+        return self.project_many(np.asarray(p, dtype=float)[None])[0]
 
     def project_many(self, pts: np.ndarray) -> np.ndarray:
         """Closest point on the entity to each row of ``pts``. Shape (n, d).
 
-        Default: a per-point :meth:`project` loop — always correct, and
-        fast enough for closed-form projections. The seeded-Newton curve
-        family overrides it with a vectorized path (same seeds and
-        iterations run lane-wise), which is what makes batch callers like
-        the boundary-layer respace pass cheap on composite curves.
+        Projection is owned by the C++ core (the same SoA entity
+        reconstruction the sweep kernels use); Python keeps no per-entity
+        mirror. One batched call regardless of entity complexity.
         """
-        pts = np.asarray(pts, dtype=float)
-        return np.stack([np.asarray(self.project(p), dtype=float) for p in pts])
+        from .entity_soa import project_frame_batch
 
-    @abstractmethod
+        return project_frame_batch(self, np.asarray(pts, dtype=float))[0]
+
     def tangent_space(self, q: np.ndarray) -> np.ndarray:
         """Orthonormal basis of the tangent space at q. Shape (d, dim)."""
-        ...
+        return self.tangent_space_many(np.asarray(q, dtype=float)[None])[0]
+
+    def tangent_space_many(self, Q: np.ndarray) -> np.ndarray:
+        """Tangent basis at the foot of each row of ``Q``. Shape (n, d, dim)."""
+        from .entity_soa import project_frame_batch
+
+        return project_frame_batch(self, np.asarray(Q, dtype=float))[1]
 
     def normal(self, q: np.ndarray) -> np.ndarray:
-        """Normal vector at q, shape (d,). Defined for codimension 1."""
-        raise NotImplementedError
+        """Normal vector at q, shape (d,). Defined for codimension 1.
+
+        Derived from the tangent basis: the 90-deg-CCW rotation for a 2D
+        curve, the (unit) cross product of the basis columns for a 3D
+        surface.
+        """
+        B = np.asarray(self.tangent_space(np.asarray(q, dtype=float)), dtype=float)
+        d, k = B.shape
+        if d == 2 and k == 1:
+            t = B[:, 0]
+            return np.array([-t[1], t[0]])
+        if d == 3 and k == 2:
+            n = np.cross(B[:, 0], B[:, 1])
+            nrm = np.linalg.norm(n)
+            if nrm < 1e-15:
+                raise ValueError("degenerate tangent basis: normal undefined here")
+            return n / nrm
+        raise NotImplementedError("normal requires codimension 1")
 
     def eval_frac(self, t: float) -> np.ndarray:
         """Evaluate at fractional parameter t in [0, 1] mapped onto [t0, t1].

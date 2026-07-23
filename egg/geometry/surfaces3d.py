@@ -317,16 +317,6 @@ class BSplineSurface(GeometryEntity):
     def dim(self) -> int:
         return 2
 
-    def project(self, p: np.ndarray) -> np.ndarray:
-        u, v = self.invert(p)
-        return self.eval(u, v)
-
-    def tangent_space(self, q: np.ndarray) -> np.ndarray:
-        u, v = self.invert(q)
-        su, sv = self.frame(u, v)
-        return _orthonormalize2(su, sv)
-
-    def normal(self, q: np.ndarray) -> np.ndarray:
-        u, v = self.invert(q)
-        su, sv = self.frame(u, v)
-        return _normalize(np.cross(su, sv))
+    # Projection, tangents, and normals come from the C++ core through the
+    # GeometryEntity base methods; ``invert`` stays as the Python
+    # parametrization inverse (the CAD carrier surface builds on it).

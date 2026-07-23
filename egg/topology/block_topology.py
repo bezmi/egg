@@ -758,17 +758,25 @@ class BlockTopology:
                         g = int(fgidx[fi])
                         if np.any(np.isnan(global_nodes[g])):
                             global_nodes[g] = fb.nodes[fi]
+                # Project the whole face as one batch — a scalar project() per
+                # node makes many-segment composite curves (splines through
+                # dense point files) dominate initialization.
+                gidxs = []
                 for free_idx in product(*[range(shape[a]) for a in free_axes]):
                     logical = [0] * self.d
                     logical[axis] = fixed
                     for j, a in enumerate(free_axes):
                         logical[a] = free_idx[j]
-                    logical_t = tuple(logical)
-                    gidx = int(dof_map[logical_t])
-                    pos = global_nodes[gidx]
-                    if not np.any(np.isnan(pos)):
-                        projected = entity.project(pos)
-                        global_nodes[gidx] = projected
+                    gidxs.append(int(dof_map[tuple(logical)]))
+                gidxs = np.asarray(gidxs, dtype=int)
+                pos = global_nodes[gidxs]
+                set_rows = ~np.isnan(pos).any(axis=1)
+                if set_rows.any():
+                    if hasattr(entity, "project_many"):
+                        feet = np.asarray(entity.project_many(pos[set_rows]))
+                    else:
+                        feet = np.stack([entity.project(p) for p in pos[set_rows]])
+                    global_nodes[gidxs[set_rows]] = feet
 
         # Step 4: Copy global nodes into block node arrays and fill interiors
         for bi, name in enumerate(block_names):

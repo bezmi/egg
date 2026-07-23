@@ -11,10 +11,11 @@
 These mirror the C++ parametrizations in ``src/geometry.hpp`` (``CircleArcParam``,
 ``EllipseArcParam``, ``QuadBezierParam``, ``CubicBezierParam``,
 ``BSplineCurveParam``, ``CompositePath``): each curve is a parametrization
-``C(t)`` restricted to an interval trim ``[t0, t1]``. Projection inverts the
-parametrization (closed form where possible, seeded Newton on the nearest-foot
-condition ``(C(t) - q) . C'(t) = 0`` otherwise), clamps the parameter onto the
-trim, and evaluates; the tangent space is the normalized ``C'(t)``.
+``C(t)`` restricted to an interval trim ``[t0, t1]``, carried in Python only
+for construction and parametric evaluation (node placement, sampling).
+Projection and tangents come from the C++ core itself via the
+:class:`~egg.geometry.base.GeometryEntity` base methods — the
+parametrizations are implemented exactly once, in ``src/geometry.hpp``.
 """
 
 from __future__ import annotations
@@ -35,65 +36,12 @@ __all__ = [
 ]
 
 
-def _wrap(x: float, a: float, b: float) -> float:
-    """Wrap x into [a, b) (mirrors C++ ``wrap``)."""
-    L = b - a
-    if L <= 0.0:
-        return x
-    t = np.fmod(x - a, L)
-    if t < 0.0:
-        t += L
-    return a + t
-
-
-def _newton_foot(
-    curve, q: np.ndarray, t_lo: float, t_hi: float, n_seed: int = 16, iters: int = 8
-) -> float:
-    """Seeded-Newton nearest-foot parameter (mirrors C++ ``project_param``)."""
-    ts = t_lo + (t_hi - t_lo) * np.arange(n_seed + 1) / n_seed
-    pts = np.stack([curve.eval(t) for t in ts])
-    t = float(ts[np.argmin(((pts - q) ** 2).sum(axis=1))])
-    for _ in range(iters):
-        d = curve.eval(t) - q
-        d1 = curve.deriv(t)
-        f = float(d @ d1)
-        fp = float(d1 @ d1 + d @ curve.deriv2(t))
-        if abs(fp) < 1e-30:
-            break
-        t -= f / fp
-    return t
-
-
-def _newton_foot_many(
-    curve, Q: np.ndarray, t_lo: float, t_hi: float, n_seed: int = 16, iters: int = 8
-) -> np.ndarray:
-    """:func:`_newton_foot` over the rows of ``Q`` at once — same seeds and
-    iteration count run lane-wise (a lane whose ``fp`` degenerates freezes,
-    like the scalar early break)."""
-    ts = t_lo + (t_hi - t_lo) * np.arange(n_seed + 1) / n_seed
-    pts = curve.eval_many(ts)  # (n_seed + 1, 2)
-    d2 = ((pts[None, :, :] - Q[:, None, :]) ** 2).sum(axis=2)
-    t = ts[np.argmin(d2, axis=1)]
-    live = np.ones(t.shape, dtype=bool)
-    for _ in range(iters):
-        d = curve.eval_many(t) - Q
-        d1 = curve.deriv_many(t)
-        f = (d * d1).sum(axis=1)
-        fp = (d1 * d1).sum(axis=1) + (d * curve.deriv2_many(t)).sum(axis=1)
-        live &= np.abs(fp) >= 1e-30
-        if not live.any():
-            break
-        step = np.zeros_like(t)
-        np.divide(f, fp, out=step, where=live)
-        t = t - step
-    return t
-
-
 class _TrimmedCurve(GeometryEntity):
-    """Shared invert → clamp → eval pipeline for interval-trimmed curves.
+    """Shared parametric-evaluation base for interval-trimmed curves.
 
-    Subclasses supply ``eval``/``deriv`` (and ``invert``; the default is the
-    seeded-Newton foot, requiring ``deriv2``) plus ``t0``/``t1``/``closed``.
+    Subclasses supply ``eval``/``deriv``/``deriv2`` plus ``t0``/``t1``/
+    ``closed``; the vector counterparts below default to scalar loops and
+    are overridden where the expressions broadcast.
     """
 
     t0: float
@@ -103,29 +51,6 @@ class _TrimmedCurve(GeometryEntity):
     @property
     def dim(self) -> int:
         return 1
-
-    def invert(self, q: np.ndarray) -> float:
-        """Unclamped nearest-foot parameter of q (seeded Newton)."""
-        lo, hi = sorted((self.t0, self.t1))
-        return _newton_foot(self, np.asarray(q, dtype=float), lo, hi)
-
-    def _clamp(self, t: float) -> float:
-        # t1 < t0 encodes a direction-reversed traversal (see the frontend
-        # Arc); the point set is the same, so clamp to the sorted interval.
-        lo, hi = sorted((self.t0, self.t1))
-        if self.closed:
-            return _wrap(t, lo, hi)
-        return float(np.clip(t, lo, hi))
-
-    def project(self, p: np.ndarray) -> np.ndarray:
-        """Closest point on the trimmed curve to p (invert -> clamp -> eval)."""
-        return self.eval(self._clamp(self.invert(np.asarray(p, dtype=float))))
-
-    # Vector counterparts of eval/deriv/deriv2/invert/project over an array
-    # of parameters (or query rows). The defaults fall back to scalar loops
-    # so every subclass is covered; subclasses whose expressions broadcast
-    # override them, which turns projection of N points into O(1) array ops
-    # instead of N seeded-Newton runs.
 
     def eval_many(self, ts: np.ndarray) -> np.ndarray:
         """Points at each parameter in ``ts``. Shape (n, 2)."""
@@ -138,48 +63,6 @@ class _TrimmedCurve(GeometryEntity):
     def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
         """d2/dt2 of :meth:`eval` at each parameter in ``ts``. Shape (n, 2)."""
         return np.stack([self.deriv2(float(t)) for t in ts])
-
-    def invert_many(self, Q: np.ndarray) -> np.ndarray:
-        """Unclamped nearest-foot parameter of each row of ``Q``."""
-        lo, hi = sorted((self.t0, self.t1))
-        return _newton_foot_many(self, np.asarray(Q, dtype=float), lo, hi)
-
-    def _clamp_many(self, ts: np.ndarray) -> np.ndarray:
-        lo, hi = sorted((self.t0, self.t1))
-        if self.closed:
-            L = hi - lo
-            if L <= 0.0:
-                return ts
-            t = np.fmod(ts - lo, L)
-            return lo + np.where(t < 0.0, t + L, t)
-        return np.clip(ts, lo, hi)
-
-    def project_many(self, pts: np.ndarray) -> np.ndarray:
-        """Closest point on the trimmed curve to each row of ``pts``."""
-        pts = np.asarray(pts, dtype=float)
-        return self.eval_many(self._clamp_many(self.invert_many(pts)))
-
-    def tangent_space_many(self, Q: np.ndarray) -> np.ndarray:
-        """Normalized C'(t) at the clamped inverse of each row. Shape (n, 2, 1)."""
-        ts = self._clamp_many(self.invert_many(np.asarray(Q, dtype=float)))
-        d = self.deriv_many(ts)
-        norms = np.linalg.norm(d, axis=1, keepdims=True)
-        d = np.where(norms < 1e-15, np.array([1.0, 0.0]), d / np.maximum(norms, 1e-300))
-        return d[:, :, None]
-
-    def tangent_space(self, q: np.ndarray) -> np.ndarray:
-        """Normalized C'(t) at the clamped inverse of q. Shape (2, 1)."""
-        t = self._clamp(self.invert(np.asarray(q, dtype=float)))
-        d = self.deriv(t)
-        norm = np.linalg.norm(d)
-        if norm < 1e-15:
-            return np.array([[1.0], [0.0]])
-        return (d / norm).reshape(2, 1)
-
-    def normal(self, q: np.ndarray) -> np.ndarray:
-        """Tangent rotated 90 deg CCW. Shape (2,)."""
-        t = self.tangent_space(q)[:, 0]
-        return np.array([-t[1], t[0]])
 
 
 class CircleArc(_TrimmedCurve):
@@ -197,11 +80,6 @@ class CircleArc(_TrimmedCurve):
         self.radius = float(radius)
         self.t0, self.t1, self.closed = float(t0), float(t1), bool(closed)
 
-    def invert(self, q) -> float:
-        """Angle of q about the centre, in (-pi, pi] (closed-form atan2)."""
-        d = np.asarray(q, dtype=float) - self.center
-        return float(np.arctan2(d[1], d[0]))
-
     def eval(self, t: float) -> np.ndarray:
         """Point at angle t (radians)."""
         return self.center + self.radius * np.array([np.cos(t), np.sin(t)])
@@ -209,10 +87,6 @@ class CircleArc(_TrimmedCurve):
     def deriv(self, t: float) -> np.ndarray:
         """d/dt of :meth:`eval`."""
         return self.radius * np.array([-np.sin(t), np.cos(t)])
-
-    def invert_many(self, Q: np.ndarray) -> np.ndarray:
-        d = np.asarray(Q, dtype=float) - self.center
-        return np.arctan2(d[:, 1], d[:, 0])
 
     def eval_many(self, ts: np.ndarray) -> np.ndarray:
         ts = np.asarray(ts, dtype=float)
@@ -255,13 +129,6 @@ class EllipseArc(_TrimmedCurve):
     def deriv2(self, t: float) -> np.ndarray:
         """d2/dt2 of :meth:`eval`."""
         return self._rot(-self.a * np.cos(t), -self.b * np.sin(t))
-
-    def invert(self, q) -> float:
-        """Nearest-foot parameter over the full period (seeded Newton)."""
-        return _newton_foot(self, np.asarray(q, dtype=float), 0.0, 2.0 * np.pi)
-
-    def invert_many(self, Q: np.ndarray) -> np.ndarray:
-        return _newton_foot_many(self, np.asarray(Q, dtype=float), 0.0, 2.0 * np.pi)
 
     def _rot_many(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         cp, sp = np.cos(self.phi), np.sin(self.phi)
@@ -518,56 +385,6 @@ class CompositePath(GeometryEntity):
         seg, tl, scale = self._locate(t)
         return seg.deriv(tl) * scale
 
-    def _nearest(self, p: np.ndarray):
-        p = np.asarray(p, dtype=float)
-        best, best_d = None, np.inf
-        for seg in self.segments:
-            pr = seg.project(p)
-            dd = float(((pr - p) ** 2).sum())
-            if dd < best_d:
-                best, best_d = seg, dd
-        return best
-
-    def project(self, p: np.ndarray) -> np.ndarray:
-        """Closest point over all segments."""
-        return self._nearest(p).project(p)
-
-    @staticmethod
-    def _seg_project_many(seg, pts: np.ndarray) -> np.ndarray:
-        if hasattr(seg, "project_many"):
-            return np.asarray(seg.project_many(pts))
-        return np.stack([seg.project(p) for p in pts])
-
-    @staticmethod
-    def _seg_tangent_space_many(seg, pts: np.ndarray) -> np.ndarray:
-        if hasattr(seg, "tangent_space_many"):
-            return np.asarray(seg.tangent_space_many(pts))
-        return np.stack([np.asarray(seg.tangent_space(p)) for p in pts])
-
-    def project_many(self, pts: np.ndarray) -> np.ndarray:
-        """Closest point over all segments for each row of ``pts``: every
-        segment projects the whole batch (vectorized where the segment
-        supports it, scalar fallback otherwise), then the nearest foot wins
-        per row — the same contest :meth:`_nearest` runs per point."""
-        pts = np.asarray(pts, dtype=float)
-        feet = np.stack([self._seg_project_many(seg, pts) for seg in self.segments])
-        d2 = ((feet - pts[None, :, :]) ** 2).sum(axis=2)
-        return feet[np.argmin(d2, axis=0), np.arange(pts.shape[0])]
-
-    def tangent_space(self, q: np.ndarray) -> np.ndarray:
-        """Tangent space of the segment nearest to q."""
-        return self._nearest(q).tangent_space(q)
-
-    def tangent_space_many(self, Q: np.ndarray) -> np.ndarray:
-        """Tangent space of the nearest segment for each row of ``Q``
-        (same per-row segment contest as :meth:`project_many`)."""
-        Q = np.asarray(Q, dtype=float)
-        feet = np.stack([self._seg_project_many(seg, Q) for seg in self.segments])
-        d2 = ((feet - Q[None, :, :]) ** 2).sum(axis=2)
-        which = np.argmin(d2, axis=0)
-        tans = np.stack([self._seg_tangent_space_many(seg, Q) for seg in self.segments])
-        return tans[which, np.arange(Q.shape[0])]
-
-    def normal(self, q: np.ndarray) -> np.ndarray:
-        """Normal of the segment nearest to q."""
-        return self._nearest(q).normal(q)
+    # Projection, tangents, and normals come from the C++ core through the
+    # GeometryEntity base methods (one batched nearest-segment contest per
+    # call, regardless of segment count).

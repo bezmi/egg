@@ -8,10 +8,10 @@
 
 """2D analytic geometry primitives: Circle, LineSegment, Ellipse.
 
-Each entity implements both protocols of
-:class:`~egg.geometry.base.GeometryEntity`; the parametric form is
-standalone Python, so grid edges can place nodes along it without touching
-the C++ core.
+Each entity carries the parametric form in standalone Python (so grid
+edges can place nodes along it without the compiled core); projection and
+tangents come from the C++ core via the
+:class:`~egg.geometry.base.GeometryEntity` base methods.
 """
 
 import numpy as np
@@ -47,26 +47,9 @@ class Circle(GeometryEntity):
         """d/dt of :meth:`eval`."""
         return self.radius * np.array([-np.sin(t), np.cos(t)])
 
-    def project(self, p: np.ndarray) -> np.ndarray:
-        """Closest point on the circle to p."""
-        diff = np.asarray(p, dtype=float) - self.center
-        dist = np.linalg.norm(diff)
-        if dist < 1e-15:
-            return self.center + np.array([self.radius, 0.0])
-        return self.center + self.radius * diff / dist
-
-    def tangent_space(self, q: np.ndarray) -> np.ndarray:
-        """Unit tangent vector at q (90 deg CCW from outward radial). Shape (2, 1)."""
-        radial = np.asarray(q, dtype=float) - self.center
-        r_norm = np.linalg.norm(radial)
-        if r_norm < 1e-15:
-            return np.array([[1.0], [0.0]])
-        n = radial / r_norm
-        t = np.array([-n[1], n[0]])
-        return t.reshape(2, 1)
-
     def normal(self, q: np.ndarray) -> np.ndarray:
-        """Outward radial unit normal. Shape (2,)."""
+        """Outward radial unit normal (a convention override: the base
+        tangent-CCW rotation points inward on a CCW closed curve). Shape (2,)."""
         radial = np.asarray(q, dtype=float) - self.center
         r_norm = np.linalg.norm(radial)
         if r_norm < 1e-15:
@@ -100,30 +83,6 @@ class LineSegment(GeometryEntity):
         """d/dt of :meth:`eval` (constant)."""
         return self.end - self.start
 
-    def project(self, p: np.ndarray) -> np.ndarray:
-        """Closest point on the segment to p."""
-        p = np.asarray(p, dtype=float)
-        ab = self.end - self.start
-        ab_sq = np.dot(ab, ab)
-        if ab_sq < 1e-30:
-            return self.start.copy()
-        t = np.dot(p - self.start, ab) / ab_sq
-        t = np.clip(t, 0.0, 1.0)
-        return self.start + t * ab
-
-    def tangent_space(self, q: np.ndarray) -> np.ndarray:
-        """Unit direction vector ``(end - start) / |end - start|``. Shape (2, 1)."""
-        ab = self.end - self.start
-        norm = np.linalg.norm(ab)
-        if norm < 1e-15:
-            return np.array([[1.0], [0.0]])
-        return (ab / norm).reshape(2, 1)
-
-    def normal(self, q: np.ndarray) -> np.ndarray:
-        """Unit normal (tangent rotated 90 deg CCW). Shape (2,)."""
-        t = self.tangent_space(q)[:, 0]
-        return np.array([-t[1], t[0]])
-
 
 class Ellipse(GeometryEntity):
     """An ellipse in 2D — a 1D curve.
@@ -154,31 +113,10 @@ class Ellipse(GeometryEntity):
         """d/dt of :meth:`eval`."""
         return np.array([-self.rx * np.sin(t), self.ry * np.cos(t)])
 
-    def project(self, p: np.ndarray) -> np.ndarray:
-        """Closest point on the ellipse (radial-scaling approximation)."""
-        p = np.asarray(p, dtype=float)
-        diff = p - self.center
-        scaled = np.array([diff[0] / self.rx, diff[1] / self.ry])
-        dist = np.linalg.norm(scaled)
-        if dist < 1e-15:
-            scaled = np.array([1.0, 0.0])
-        else:
-            scaled = scaled / dist
-        return self.center + scaled * np.array([self.rx, self.ry])
-
-    def tangent_space(self, q: np.ndarray) -> np.ndarray:
-        """Unit tangent via parametric angle. Shape (2, 1)."""
-        q = np.asarray(q, dtype=float)
-        diff = q - self.center
-        angle = np.arctan2(diff[1] / self.ry, diff[0] / self.rx)
-        t = np.array([-self.rx * np.sin(angle), self.ry * np.cos(angle)])
-        norm = np.linalg.norm(t)
-        if norm < 1e-15:
-            return np.array([[1.0], [0.0]])
-        return (t / norm).reshape(2, 1)
-
     def normal(self, q: np.ndarray) -> np.ndarray:
-        """Outward normal (gradient of implicit form). Shape (2,)."""
+        """Outward unit normal, the implicit-form gradient (a convention
+        override: the base tangent-CCW rotation points inward on a CCW
+        closed curve). Shape (2,)."""
         q = np.asarray(q, dtype=float)
         diff = q - self.center
         n = np.array([diff[0] / (self.rx * self.rx), diff[1] / (self.ry * self.ry)])
