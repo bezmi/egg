@@ -20,8 +20,8 @@ Using ``file_import`` *is* the request to bundle: on pack the referenced file
 is copied into the archive under ``deps/`` and the literal path in the packed
 script is rewritten to that archive-relative location. :attr:`FileImport.path`
 resolves to the bundled copy beside the script when present (so an extracted
-archive works), else the original path (so it works live, before archiving) —
-correct either way, whether or not the source literal was rewritten.
+archive works), else the original path (so it works live, before archiving).
+It is correct either way, whether or not the source literal was rewritten.
 
 Discovery for the rewrite is static (AST): only string-literal paths are
 rewritten; a computed ``file_import(var)`` still resolves correctly at runtime

@@ -603,7 +603,7 @@ try {
       editor.textarea.focus();
     };
     // Render inline markdown (`code`, **bold**, *italic*) into `parent` as DOM
-    // nodes — built node-by-node (never innerHTML) so the LSP text can't inject.
+    // Built node by node (never innerHTML) so the LSP text cannot inject markup.
     const mdInline = (parent, text) => {
       const re = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
       let last = 0, m;
@@ -618,42 +618,60 @@ try {
       }
       if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
     };
-    // Render the hover markdown into `container`: fenced code blocks become
-    // <pre>, headings/rules/paragraphs get their own blocks, inline spans styled.
+    // Google-style docstring section headers ("Args:", "Returns:", ...).
+    const SECTION_RE = /^\s*(Args|Arguments|Parameters|Params|Returns?|Yields?|Raises?|Examples?|Notes?|Note|Attributes|Warnings?|See Also|References)\s*:?\s*$/;
+    const isUnderline = (s) => s != null && /^\s*(-{3,}|={3,})\s*$/.test(s);
+    // Render the hover markdown into `container`: the first fenced block is the
+    // signature (styled like the Sphinx sig box), docstring section headers
+    // (Google "Args:" or NumPy underlined) become headings, the rest paragraphs.
     const mdRender = (container, md) => {
       const lines = md.replace(/\r/g, '').split('\n');
-      let i = 0;
+      let i = 0, firstFence = true;
+      const heading = (txt) => {
+        const el = document.createElement('div');
+        el.className = 'egg-doc-h';
+        mdInline(el, txt);
+        container.appendChild(el);
+      };
       while (i < lines.length) {
-        const fence = lines[i].match(/^\s*```(\w*)\s*$/);
-        if (fence) {
+        if (/^\s*```/.test(lines[i])) {
           const buf = [];
           for (i++; i < lines.length && !/^\s*```\s*$/.test(lines[i]); i++) buf.push(lines[i]);
           i++;  // closing fence
           const pre = document.createElement('pre');
-          pre.className = 'egg-doc-code';
+          pre.className = firstFence ? 'egg-doc-sig' : 'egg-doc-code';
+          firstFence = false;
           pre.textContent = buf.join('\n');
           container.appendChild(pre);
           continue;
         }
         if (lines[i].trim() === '') { i++; continue; }
+        // NumPy-style section: a title line underlined by --- / === next.
+        if (isUnderline(lines[i + 1]) && lines[i].trim()) {
+          heading(lines[i].trim());
+          i += 2;
+          continue;
+        }
         if (/^\s*(---|\*\*\*|___)\s*$/.test(lines[i])) {
           container.appendChild(document.createElement('hr'));
           i++;
           continue;
         }
         const h = lines[i].match(/^\s*(#{1,6})\s+(.*)/);
-        if (h) {
-          const el = document.createElement('div');
-          el.className = 'egg-doc-h';
-          mdInline(el, h[2]);
-          container.appendChild(el);
+        if (h) { heading(h[2]); i++; continue; }
+        if (SECTION_RE.test(lines[i])) {
+          heading(lines[i].replace(/:\s*$/, '').trim());
           i++;
           continue;
         }
-        // gather a paragraph up to a blank line or a fence
+        // gather a paragraph up to a blank line, fence, or a section header
         const para = [];
-        for (; i < lines.length && lines[i].trim() !== '' && !/^\s*```/.test(lines[i]); i++)
-          para.push(lines[i]);
+        for (; i < lines.length; i++) {
+          const ln = lines[i];
+          if (ln.trim() === '' || /^\s*```/.test(ln) || SECTION_RE.test(ln)) break;
+          if (isUnderline(lines[i + 1])) break;  // next line starts a NumPy section
+          para.push(ln);
+        }
         const p = document.createElement('p');
         p.className = 'egg-doc-p';
         mdInline(p, para.join('\n'));
@@ -683,6 +701,36 @@ try {
       docPane.append(head, body);
       document.body.appendChild(docPane);
     };
+    // Embed a Sphinx-built documentation fragment (locally built, trusted HTML).
+    // Links point at doc pages not loaded here, so they are neutralised.
+    const showDocPaneHtml = (html, fqn) => {
+      closeDocPane();
+      docPane = document.createElement('div');
+      docPane.className = 'egg-doc-pane';
+      const head = document.createElement('div');
+      head.className = 'egg-doc-head';
+      const title = document.createElement('span');
+      title.textContent = fqn ? 'documentation: ' + fqn : 'documentation';
+      const x = document.createElement('button');
+      x.textContent = '×';
+      x.title = 'dismiss (esc)';
+      x.addEventListener('click', closeDocPane);
+      head.append(title, x);
+      const body = document.createElement('div');
+      body.className = 'egg-doc-body egg-doc-sphinx';
+      body.innerHTML = html;
+      body.querySelectorAll('a').forEach((a) => a.removeAttribute('href'));
+      docPane.append(head, body);
+      document.body.appendChild(docPane);
+    };
+    // The identifier under a document offset (for the Sphinx doc lookup).
+    const wordAt = (value, pos) => {
+      const ok = (c) => c && /[A-Za-z0-9_]/.test(c);
+      let a = pos, b = pos;
+      while (a > 0 && ok(value[a - 1])) a--;
+      while (b < value.length && ok(value[b])) b++;
+      return value.slice(a, b);
+    };
     const hoverText = (contents) => {
       if (contents == null) return '';
       if (typeof contents === 'string') return contents;
@@ -691,7 +739,18 @@ try {
       return '';
     };
     const showDocumentation = async () => {
-      if (!ready || ctxPos == null) return;
+      if (ctxPos == null) return;
+      // Prefer the Sphinx-built docs for the identifier at point (rich
+      // signatures/params); fall back to the LSP hover for anything not there.
+      const word = wordAt(editor.value, ctxPos);
+      if (word) {
+        try {
+          const r = await fetch('/api/docsym?name=' + encodeURIComponent(word));
+          const j = await r.json();
+          if (j && j.found && j.html) { showDocPaneHtml(j.html, j.fqn); return; }
+        } catch (e) { /* fall through to the LSP hover */ }
+      }
+      if (!ready) { showDocPane('No documentation for the symbol at point.'); return; }
       syncDoc();
       const r = await rpc('textDocument/hover', {
         textDocument: {uri: docUri}, position: offsetToLC(editor.value, ctxPos)});
@@ -710,7 +769,7 @@ try {
       {label: 'Paste', run: doPaste, on: true},
       {sep: true},
       {label: 'Go to definition', run: gotoDefinition, on: ready},
-      {label: 'Show documentation', run: showDocumentation, on: ready},
+      {label: 'Show documentation', run: showDocumentation, on: true},
       {sep: true},
       {label: 'Toggle comment', run: () => { cmds.toggleComment(editor); editor.textarea.focus(); }, on: true},
     ];

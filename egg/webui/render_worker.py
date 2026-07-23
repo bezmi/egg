@@ -101,37 +101,43 @@ class RenderWorker:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def submit(
-        self, code: str, mode: str = "grid", path: str = "", timeout: float | None = None
+        self, code: str, mode: str = "grid", path: str = "",
+        timeout: float | None = None, sid: str = ""
     ) -> Future:
         """Queue one render. The Future always resolves to a SceneResult —
         timeouts and worker crashes are reported inside it. Cancelling the
-        Future (the client gave up) skips the render."""
-        return self._submit("render", code, mode, path, timeout)
+        Future (the client gave up) skips the render. ``sid`` scopes the
+        keystroke coalescing to one UI instance (see :meth:`_loop`)."""
+        return self._submit("render", code, mode, path, timeout, sid)
 
-    def suggest(self, code: str, path: str = "", timeout: float | None = None) -> Future:
+    def suggest(self, code: str, path: str = "", timeout: float | None = None,
+                sid: str = "") -> Future:
         """Probe a script for the ``__egg_webui__`` block suggestion.
         Resolves to ``str | None`` (None on timeout/crash: no nagging)."""
-        return self._submit("suggest", code, "", path, timeout)
+        return self._submit("suggest", code, "", path, timeout, sid)
 
-    def su2(self, code: str, path: str = "", timeout: float | None = None) -> Future:
+    def su2(self, code: str, path: str = "", timeout: float | None = None,
+            sid: str = "") -> Future:
         """Exec + export the script's grid as SU2 text. Resolves to
         ``(text, "")`` or ``(None, reason)``."""
-        return self._submit("su2", code, "", path, timeout)
+        return self._submit("su2", code, "", path, timeout, sid)
 
     def validate(
-        self, code: str, blocking: dict, path: str = "", timeout: float | None = None
+        self, code: str, blocking: dict, path: str = "", timeout: float | None = None,
+        sid: str = ""
     ) -> Future:
         """Flatten a candidate blocking against the script's base + geometry
         (the blocking rides the ``mode`` slot as JSON). Resolves to a dict:
         ``diagnostics`` (empty means green/committable) plus ``edge_res`` /
         ``res_classes`` when the flatten succeeds in 2D."""
-        return self._submit("validate", code, json.dumps(blocking), path, timeout)
+        return self._submit("validate", code, json.dumps(blocking), path, timeout, sid)
 
     def _submit(
-        self, kind: str, code: str, mode: str, path: str, timeout: float | None
+        self, kind: str, code: str, mode: str, path: str, timeout: float | None,
+        sid: str = ""
     ) -> Future:
         fut: Future = Future()
-        self._q.put((kind, code, mode, path, timeout or self.timeout, fut))
+        self._q.put((sid, kind, code, mode, path, timeout or self.timeout, fut))
         return fut
 
     def close(self) -> None:
@@ -165,18 +171,22 @@ class RenderWorker:
             with suppress(Empty):
                 while True:
                     jobs.append(self._q.get_nowait())
-            # newest job per (kind, mode, path); the rest are stale keystrokes
-            newest: dict[tuple[str, str, str], tuple[str, float]] = {}
+            # Newest job per (sid, kind, mode, path); the rest are stale
+            # keystrokes. The sid keeps the coalescing per UI instance, so two
+            # sessions rendering the same path (e.g. both unsaved, path="") never
+            # collapse into one another's result.
+            newest: dict[tuple[str, str, str, str], tuple[str, float]] = {}
             futures: dict[tuple, list[Future]] = {}
-            for kind, code, mode, path, timeout, fut in jobs:
-                key = (kind, mode, path)
+            for sid, kind, code, mode, path, timeout, fut in jobs:
+                key = (sid, kind, mode, path)
                 newest[key] = (code, timeout)
                 futures.setdefault(key, []).append(fut)
             for key, (code, timeout) in newest.items():
                 futs = [f for f in futures[key] if not f.cancelled()]
                 if not futs:
                     continue
-                result = self._request(code, *key, timeout)
+                _sid, kind, mode, path = key
+                result = self._request(code, kind, mode, path, timeout)
                 for f in futs:
                     with suppress(InvalidStateError):
                         f.set_result(result)

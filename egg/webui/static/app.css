@@ -115,7 +115,7 @@ header { padding: 6px 12px; background: var(--ctp-crust); color: var(--ctp-text)
          flex-wrap: wrap; }
 header label { font-size: 12px; display: flex; gap: 3px; align-items: center; }
 
-/* Native-app (pywebview) titlebar — replaces the browser header at
+/* Native-app (pywebview) titlebar; replaces the browser header at
    /?desktop=1 (egg-desktop launcher). Hosts the same file/view/help menus
    plus the window controls, themed off --ctp-* so it tracks the active
    flavor. Dragging the .desktop-titlebar__drag spacer starts a window move
@@ -154,8 +154,8 @@ header.desktop-titlebar { flex: 0 0 auto; height: 34px; align-items: center;
 
 /* Themed checkboxes. accent-color only tints a native box, whose shape/size
    (and, under color-scheme, its light background on dark flavors) still comes
-   from the OS — most jarring in the desktop app's QtWebEngine. appearance:
-   none replaces it with a --ctp-* box and a drawn checkmark. */
+   from the OS. That is most jarring in the desktop app's QtWebEngine, so
+   appearance:none replaces it with a --ctp-* box and a drawn checkmark. */
 input[type="checkbox"] { -webkit-appearance: none; appearance: none;
   box-sizing: border-box; flex: none; width: 15px; height: 15px; margin: 0;
   border: 1px solid var(--ctp-surface2); border-radius: 4px;
@@ -311,7 +311,7 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 .panes.split-active .editor, .panes.split-active .viewer { flex: none; }
 /* Split.js gutter (created at runtime): the whole strip is the grab target
    (::after just widens the hit area for the pointer) and it tints on hover.
-   No visible grip handle — it read as a redundant scrollbar. */
+   No visible grip handle (it read as a redundant scrollbar). */
 .gutter { flex: none; cursor: col-resize; touch-action: none; position: relative;
           background: var(--ctp-surface1); transition: background 0.15s; z-index: 5; }
 .gutter:hover { background: var(--ctp-overlay0); }
@@ -329,6 +329,22 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 html.egg-watching .pce-diag-tip,
 html.egg-watching .pce-sig-tip { display: none !important; }
 .panes.watching .viewer { flex: 1 !important; width: auto !important; }
+/* landing page: full-window splash + entry points shown when nothing is open */
+#landing { position: fixed; inset: 0; z-index: 30; display: none;
+  align-items: center; justify-content: center; background: var(--ctp-base); }
+.landing-card { display: flex; flex-direction: column; align-items: center;
+  gap: 4px; padding: 32px; max-width: 90vw; }
+.landing-logo svg, .landing-logo { width: 84px; height: 84px; color: var(--ctp-yellow); }
+.landing-title { font-size: 46px; font-weight: 700; letter-spacing: 0.02em;
+  color: var(--ctp-text); line-height: 1.1; }
+.landing-sub { font-size: 14px; color: var(--ctp-subtext0); margin-bottom: 22px; }
+.landing-opts { display: flex; flex-direction: column; gap: 6px; width: 300px;
+  max-width: 90vw; }
+.landing-opt { text-align: left; background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface0); color: var(--ctp-text);
+  padding: 10px 16px; border-radius: 8px; font-size: 14px; cursor: pointer;
+  transition: background 0.1s, border-color 0.1s; }
+.landing-opt:hover { background: var(--ctp-surface0); border-color: var(--ctp-surface1); }
 /* right-click editor menu: a vertical list of actions with group separators */
 .pce-ctx { position: fixed; z-index: 40; min-width: 200px; padding: 4px;
   background: var(--ctp-mantle); border: 1px solid var(--ctp-surface1);
@@ -365,6 +381,36 @@ html.egg-watching .pce-ctx { display: none !important; }
   background: var(--ctp-crust); border: 1px solid var(--ctp-surface0);
   border-radius: 6px; font: 12px/1.5 ui-monospace, monospace;
   color: var(--ctp-text); white-space: pre; }
+/* the leading signature block of an LSP-hover fallback (matches the Sphinx sig) */
+.egg-doc-sig { overflow-x: auto; margin: 4px 0 8px; padding: 6px 10px;
+  background: var(--ctp-crust); border-left: 3px solid var(--ctp-blue);
+  border-radius: 4px; font: 12px/1.5 ui-monospace, monospace;
+  color: var(--ctp-text); white-space: pre-wrap; word-break: break-word; }
+/* embedded Sphinx documentation fragment (dl/dt/dd from the built docs) */
+.egg-doc-sphinx dl { margin: 0 0 10px; }
+.egg-doc-sphinx dt.sig, .egg-doc-sphinx .sig { display: block; margin: 6px 0 4px;
+  padding: 6px 10px; background: var(--ctp-crust);
+  border-left: 3px solid var(--ctp-blue); border-radius: 4px;
+  font: 12px/1.5 ui-monospace, monospace; color: var(--ctp-text);
+  overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+.egg-doc-sphinx .sig-name, .egg-doc-sphinx .descname { color: var(--ctp-blue);
+  font-weight: 600; }
+.egg-doc-sphinx .sig-prename, .egg-doc-sphinx .descclassname { color: var(--ctp-subtext0); }
+.egg-doc-sphinx .property, .egg-doc-sphinx .k { color: var(--ctp-mauve); }
+.egg-doc-sphinx .sig-param, .egg-doc-sphinx .n { color: var(--ctp-text); }
+.egg-doc-sphinx .default_value, .egg-doc-sphinx .o { color: var(--ctp-peach); }
+.egg-doc-sphinx dd { margin: 4px 0 8px; padding-left: 8px; }
+.egg-doc-sphinx .headerlink { display: none; }
+.egg-doc-sphinx p { margin: 6px 0; }
+.egg-doc-sphinx code, .egg-doc-sphinx .pre { font: 12px/1.4 ui-monospace, monospace; }
+.egg-doc-sphinx dl.field-list { display: grid;
+  grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 8px 0; }
+.egg-doc-sphinx dl.field-list > dt { font-weight: 600; color: var(--ctp-subtext1); }
+.egg-doc-sphinx dl.field-list > dd { margin: 0; padding: 0; }
+.egg-doc-sphinx ul { margin: 4px 0; padding-left: 18px; }
+.egg-doc-sphinx table { border-collapse: collapse; margin: 8px 0; }
+.egg-doc-sphinx th, .egg-doc-sphinx td { border: 1px solid var(--ctp-surface0);
+  padding: 3px 8px; text-align: left; }
 @media (max-width: 900px) {
   /* static no-JS fallback for the stacked layout */
   .panes { flex-direction: column; }
@@ -613,7 +659,7 @@ button.primary:not(:disabled) { background: var(--egg-spark-energy);
 .bar .btns button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--ctp-red) 10%, var(--ctp-base));
                                                 border-color: var(--ctp-red); }
 /* #theme-select (the flavor picker in the view menu) shares this: without
-   appearance:none a native <select> falls back to OS chrome — most visible
+   appearance:none a native <select> falls back to OS chrome, most visible
    in the desktop app's QtWebEngine, where it clashes with the flavor. */
 .bar .btns select, #theme-select, #fs-sort { font: inherit; font-size: 12px; padding: 3px 26px 3px 10px;
   border: 1px solid var(--ctp-surface1); border-radius: 5px; color: var(--ctp-text);

@@ -82,7 +82,7 @@ def main() -> None:
         resume_npy = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else None
         ns, _out, err = exec_script(code, path)
         if err is not None:
-            send(("fatal", "script error — fix it first"))
+            send(("fatal", "script error, fix it first"))
             return
         reg = ns.get("__egg_webui_run__")
         if reg is None:

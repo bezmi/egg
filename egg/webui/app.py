@@ -112,6 +112,8 @@ def _find_repo_root(start: Path) -> Path | None:
 
 _REPO_ROOT = _find_repo_root(Path(__file__).resolve())
 EXAMPLES_DIR = _REPO_ROOT / "examples" / "2D" if _REPO_ROOT else None
+# Examples root (2D + 3D); the landing "examples" shortcut opens here.
+EXAMPLES_ROOT = _REPO_ROOT / "examples" if _REPO_ROOT else None
 DEFAULT_SCRIPT = EXAMPLES_DIR / "egg" / "egg.py" if EXAMPLES_DIR else None
 
 # The page's CSS / JS / static SVG live under static/ (loaded here, embedded
@@ -236,46 +238,87 @@ if DOCS_DIR and DOCS_DIR.is_dir():
         0, Mount("/docs", app=StaticFiles(directory=DOCS_DIR, html=True), name="docs")
     )
 
-# --- websocket fan-out (server -> client frames pushed by the worker) ---
+# --- per-session state (server pushes frames to the client) ---
+# A solver run's state is keyed by a session id: one per open UI (a browser tab,
+# the desktop window, another browser). The client makes the id and sends it with
+# every request and on the frame socket. So sessions stay separate: a run's frames
+# go only to the UI that started it, and several runs can go at once, one worker
+# each. The id is an opaque token, so any frontend that keeps a stable id works.
 
-_clients: dict[int, tuple] = {}
-# "svg"/"quality": the latest streamed frame, so editor renders during a
-# run can keep the relaxing mesh in the canvas instead of flashing back
-# to a static TFI render. "log": the script's egg.webui_print lines this
-# run (streamed to the #runlog panel; bounded to the last LOG_MAX lines).
-_run: dict = {
-    "proc": None,
-    "reader": None,
-    "stop": False,
-    "tmp": None,
-    "svg": None,
-    "quality": None,
-    "log": [],
-}
-# Last completed smoothing run: {"code": str, "harvest": Harvest, "hist":
-# convergence series}. The SU2 export uses it so "what you see is what you
-# export" after a run; "hist" draws faded under the next run's chart.
-_last: dict = {"code": None, "harvest": None, "hist": None, "net": None}
+_clients: dict[str, tuple] = {}  # sid -> (ws, loop): the frame socket
+_ws_sid: dict[int, str] = {}     # id(ws) -> sid, so a disconnect knows its session
+_sessions: dict[str, dict] = {}
 
-# Resume cache: the node coordinates streamed by the latest *stopped*
-# run, plus the code that produced them. While present, the run button shows
-# "resume": a fresh run re-execs the (possibly edited) script and seeds the grid
-# to this cache before running its stages, so a stopped solve picks up from where
-# it left off instead of restarting. Cleared by a full completion or the reset
-# button. Survives across runs (unlike ``_run``, which resets every run).
-_resume: dict = {"X": None, "code": None}
+# A run survives its client disconnecting this long (a page reload reconnects
+# with the same sid inside the window); a closed tab is cleaned up after it.
+_ORPHAN_GRACE = 20.0
 
 
-def _is_resumable() -> bool:
-    return _resume["X"] is not None
+def _new_run_state() -> dict:
+    # "svg"/"quality": the latest streamed frame, so editor renders during a run
+    # keep the relaxing mesh instead of flashing back to a static render. "log":
+    # this run's egg.webui_print lines (streamed to #runlog, bounded to LOG_MAX).
+    return {
+        "proc": None,
+        "reader": None,
+        "stop": False,
+        "tmp": None,
+        "resume_tmp": None,
+        "svg": None,
+        "quality": None,
+        "log": [],
+    }
 
 
-def _set_resume(X, code: str) -> None:
-    _resume.update(X=X, code=code)
+def _session(sid: str) -> dict:
+    """The state bag for a session id, created on first use."""
+    s = _sessions.get(sid)
+    if s is None:
+        s = _sessions[sid] = {
+            "run": _new_run_state(),
+            # Last completed run: {code, harvest, hist, net}. The SU2/net export
+            # uses it ("what you see is what you export"); hist draws faded under
+            # the next run's chart.
+            "last": {"code": None, "harvest": None, "hist": None, "net": None},
+            # Resume cache: node coords + code of the latest *stopped* run. While
+            # present the run button shows "resume" (a fresh run re-execs the
+            # script and seeds the grid to this cache). Cleared by a full
+            # completion or the reset button.
+            "resume": {"X": None, "code": None},
+        }
+    return s
 
 
-def _clear_resume() -> None:
-    _resume.update(X=None, code=None)
+def _is_resumable(sess: dict | None) -> bool:
+    return bool(sess and sess["resume"]["X"] is not None)
+
+
+def _set_resume(sess: dict, X, code: str) -> None:
+    sess["resume"].update(X=X, code=code)
+
+
+def _clear_resume(sess: dict) -> None:
+    sess["resume"].update(X=None, code=None)
+
+
+def _kill_run(run: dict) -> None:
+    """Stop a session's worker if it is still alive."""
+    proc = run.get("proc")
+    if proc is not None and proc.poll() is None:
+        run["stop"] = True
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _cleanup_session(sid: str) -> None:
+    """Drop a session (and kill its run) once its client is gone for good."""
+    if sid in _clients:
+        return  # reconnected within the grace window
+    sess = _sessions.pop(sid, None)
+    if sess:
+        _kill_run(sess["run"])
 
 # Editor renders exec the script in this persistent worker process, not in
 # the server: the event loop only awaits, a script stuck in a loop is
@@ -285,18 +328,38 @@ def _clear_resume() -> None:
 _render_worker = RenderWorker()
 
 
-async def _render_scene(code: str, mode: str, path: str) -> SceneResult:
-    return await asyncio.wrap_future(_render_worker.submit(code, mode, path))
+async def _render_scene(code: str, mode: str, path: str, sid: str = "") -> SceneResult:
+    return await asyncio.wrap_future(_render_worker.submit(code, mode, path, sid=sid))
+
+
+def _ws_sid_of(ws) -> str:
+    """The session id a frame socket connected with (``/ws?sid=...``)."""
+    try:
+        return ws.query_params.get("sid") or ""
+    except Exception:
+        return ""
 
 
 # NB: async on purpose — fasthtml runs sync handlers in a threadpool,
 # where get_running_loop() has nothing to return.
 async def _on_conn(ws):
-    _clients[id(ws)] = (ws, asyncio.get_running_loop())
+    sid = _ws_sid_of(ws)
+    _ws_sid[id(ws)] = sid
+    _clients[sid] = (ws, asyncio.get_running_loop())
 
 
 async def _on_disconn(ws):
-    _clients.pop(id(ws), None)
+    sid = _ws_sid.pop(id(ws), None)
+    if sid is None:
+        return
+    # Only drop the client if this exact socket is still the current one (a fast
+    # reconnect may already have replaced it).
+    cur = _clients.get(sid)
+    if cur and cur[0] is ws:
+        _clients.pop(sid, None)
+    # A closed instance must not leave its worker running forever; a reload
+    # reconnects with the same sid inside the grace window and is spared.
+    threading.Timer(_ORPHAN_GRACE, _cleanup_session, args=(sid,)).start()
 
 
 @app.ws("/ws", conn=_on_conn, disconn=_on_disconn)
@@ -349,22 +412,24 @@ async def lsp_ws(ws, data):
         bridge.from_client(data)
 
 
-def _broadcast(html: str) -> None:
-    """Push pre-rendered HTML (OOB fragments) to every connected client."""
-    if not _clients:
-        print("webui: no websocket clients connected, frame dropped", flush=True)
-    for ws, loop in list(_clients.values()):
-        fut = asyncio.run_coroutine_threadsafe(ws.send_text(html), loop)
-        fut.add_done_callback(
-            lambda f: (
-                f.exception()
-                and print(f"webui: frame send failed: {f.exception()!r}", flush=True)
-            )
+def _broadcast(sid: str, html: str) -> None:
+    """Push pre-rendered HTML (OOB fragments) to one session's frame socket."""
+    client = _clients.get(sid)
+    if client is None:
+        print(f"webui: no client for session {sid!r}, frame dropped", flush=True)
+        return
+    ws, loop = client
+    fut = asyncio.run_coroutine_threadsafe(ws.send_text(html), loop)
+    fut.add_done_callback(
+        lambda f: (
+            f.exception()
+            and print(f"webui: frame send failed: {f.exception()!r}", flush=True)
         )
+    )
 
 
-def _running() -> bool:
-    p = _run["proc"]
+def _running(sess: dict) -> bool:
+    p = sess["run"]["proc"]
     return p is not None and p.poll() is None
 
 
@@ -387,8 +452,8 @@ _REFRESH_SVG = (
 )
 
 
-def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid"):
-    resumable = _is_resumable()
+def view_bar(*chips, running: bool, oob: bool = False, mode: str = "grid",
+             resumable: bool = False):
     runner = (
         [
             Button(
@@ -594,9 +659,10 @@ def _edit_disabled_note(r: SceneResult):
     )
 
 
-def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
+def view_fragment(r: SceneResult, code: str, mode: str = "grid", sess: dict | None = None):
     """Build the #view contents from a worker-rendered scene."""
-    running = _running()
+    run = sess["run"] if sess else None
+    running = _running(sess) if sess else False
     chips = []
     if running:
         # page loaded mid-run: read as running right away — the next
@@ -610,9 +676,12 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
     # edit view: a green/red validity chip for an editable topology
     if r.edit_data is not None and r.edit_data["editable"]:
         n = len(r.edit_data["diagnostics"])
+        # id ed-validity: the client updates this one chip in place as the user
+        # edits (eggShowValidity), so no second validity chip is created.
         chips.append(
             Span(
                 "valid" if n == 0 else f"{n} issue{'' if n == 1 else 's'}",
+                id="ed-validity",
                 cls="q-tag" if n == 0 else "bad",
             )
         )
@@ -631,12 +700,12 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
     # Editing (or reloading) mid-run must not flash the canvas back to a
     # static TFI render: keep the streaming mesh; the fresh exec still
     # supplies the chips, errors, and stdout above/below it.
-    run_svg = _run["svg"] if running else None
+    run_svg = run["svg"] if (running and run) else None
     svg = run_svg or r.svg
-    quality = _run["quality"] if running and run_svg else r.quality
+    quality = run["quality"] if (running and run_svg) else r.quality
     edit_note = _edit_disabled_note(r) if mode == "edit" else None
     parts = [
-        view_bar(*chips, running=running, mode=mode),
+        view_bar(*chips, running=running, mode=mode, resumable=_is_resumable(sess)),
         # edit view with nothing editable: say so (draw tools stay hidden)
         *([edit_note] if edit_note is not None else []),
         # run parameters only make sense in grid view (where the run happens);
@@ -647,7 +716,7 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
         Div(id="chart"),
         # live script output (egg.webui_print) — populated by the run reader's
         # OOB frames; seeded here so a mid-run reload keeps what was printed
-        _log_panel("".join(_run["log"]) if running else ""),
+        _log_panel("".join(run["log"]) if (running and run) else ""),
         Div(*extras, id="viewextra"),
     ]
     # the edit view's structured blocking, for the client draw tools to read
@@ -677,23 +746,24 @@ QUALITY_INTERVAL = 1.0  # s; quality stats recompute at most this often mid-run
 
 
 def _frame(
-    h, chips: list, running: bool, bounds, hist=None, prev_hist=None, quality=True
+    sid, sess, h, chips: list, running: bool, bounds, hist=None, prev_hist=None,
+    quality=True
 ) -> None:
     refresh_grid_layer(h.scene, h.grid)
-    svg = _run["svg"] = render_svg(h.scene, bounds=bounds)
+    svg = sess["run"]["svg"] = render_svg(h.scene, bounds=bounds)
     # Mid-run frames refresh only the chips so the control buttons stay put; the
     # terminal frame (running=False) swaps the whole bar to re-enable run / grey
     # out stop.
     bar = (
         view_chips(*chips, oob=True)
         if running
-        else view_bar(*chips, running=False, oob=True)
+        else view_bar(*chips, running=False, oob=True, resumable=_is_resumable(sess))
     )
     msg = to_xml(bar) + to_xml(
         Div(NotStr(svg), id="canvas", cls="canvas", hx_swap_oob="true")
     )
     if quality:
-        q = _run["quality"] = grid_quality(h.scene.grid_blocks)
+        q = sess["run"]["quality"] = grid_quality(h.scene.grid_blocks)
         msg += to_xml(_quality_panel(q, oob=True))
     if hist is not None:
         msg += to_xml(
@@ -703,14 +773,17 @@ def _frame(
                 hx_swap_oob="true",
             )
         )
-    _broadcast(msg)
+    _broadcast(sid, msg)
 
 
-def _fail_frame(msg: str, detail: str | None = None) -> None:
-    parts = to_xml(view_bar(Span(msg, cls="warn"), running=False, oob=True))
+def _fail_frame(sid, sess, msg: str, detail: str | None = None) -> None:
+    parts = to_xml(
+        view_bar(Span(msg, cls="warn"), running=False, oob=True,
+                 resumable=_is_resumable(sess))
+    )
     if detail:
         parts += to_xml(Div(Pre(detail, cls="err"), id="viewextra", hx_swap_oob="true"))
-    _broadcast(parts)
+    _broadcast(sid, parts)
 
 
 NO_RUN_MSG = (
@@ -719,11 +792,13 @@ NO_RUN_MSG = (
 )
 
 
-def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
+def _run_reader(sid: str, code: str, path: str, proc: subprocess.Popen) -> None:
     """Server-side half of a run: render + fan out the frames the worker
-    process streams back; keep the harvest for the SU2 export at the end."""
+    process streams back to this session; keep the harvest for the SU2 export."""
     import traceback as tb
 
+    sess = _session(sid)
+    run = sess["run"]
     done = False
     try:
         # The server keeps its own exec of the same script purely for
@@ -733,7 +808,7 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
         ns, _out, err = exec_script(code, path or None)
         reg = ns.get("__egg_webui_run__")
         if err is not None or reg is None:
-            _fail_frame("script error — fix it first" if err else NO_RUN_MSG)
+            _fail_frame(sid, sess, "script error, fix it first" if err else NO_RUN_MSG)
             proc.kill()
             return
         h = harvest(ns, init_grid=False)
@@ -741,7 +816,7 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
         assert h.grid is not None  # a registered run always carries a grid
         bounds = scene_bounds(h.scene)
         hist: dict[str, list[float]] = {"energy": [], "min det": []}
-        prev_hist = _last["hist"]  # previous run, faded under the chart
+        prev_hist = sess["last"]["hist"]  # previous run, faded under the chart
         net_bytes: bytes | None = None
         last_emit = 0.0
         last_q = 0.0  # quality stats debounce off the frame hot path
@@ -757,19 +832,19 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                 break
             match msg[0]:
                 case "fatal":
-                    _fail_frame(msg[1])
+                    _fail_frame(sid, sess, msg[1])
                     done = True
                 case "error":
-                    _fail_frame("pipeline failed", detail=msg[1])
+                    _fail_frame(sid, sess, "pipeline failed", detail=msg[1])
                     done = True
                 case "print":
                     # a script/pipeline egg.webui_print — append and push the
                     # (bounded) log to #runlog; interleaves with step frames
-                    log = _run["log"]
+                    log = run["log"]
                     log.append(msg[1])
                     if len(log) > LOG_MAX:
                         del log[: len(log) - LOG_MAX]
-                    _broadcast(to_xml(_log_panel("".join(log), oob=True)))
+                    _broadcast(sid, to_xml(_log_panel("".join(log), oob=True)))
                 case "net_state":
                     # Streamed per-step control lattice: update the overlay so
                     # the net animates with the grid (the paired step frame
@@ -793,6 +868,8 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                         pass  # export still works from the raw bytes
                     else:
                         _frame(
+                            sid,
+                            sess,
                             h,
                             chips,
                             running=False,
@@ -802,10 +879,10 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                             quality=False,
                         )
                 case "done":
-                    _last["code"], _last["harvest"] = code, h
-                    _last["net"] = net_bytes
+                    sess["last"]["code"], sess["last"]["harvest"] = code, h
+                    sess["last"]["net"] = net_bytes
                     if any(len(v) >= 2 for v in hist.values()):
-                        _last["hist"] = {k: list(v) for k, v in hist.items()}
+                        sess["last"]["hist"] = {k: list(v) for k, v in hist.items()}
                     done = True
                 case "step":
                     phase, info, X = msg[1], msg[2], msg[3]
@@ -818,7 +895,7 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                         hist["energy"].append(e)
                     if (m := info.get("min_det")) is not None:
                         hist["min det"].append(m)
-                    stopped = _run["stop"]
+                    stopped = run["stop"]
                     # The named stage is the headline chip; the raw phase is
                     # the fallback for events with no stage label.
                     stage_label = info.get("stage") or phase
@@ -842,9 +919,9 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                     # clears it (button -> "run").
                     if final:
                         if stopped and latest_X is not None:
-                            _set_resume(latest_X, code)
+                            _set_resume(sess, latest_X, code)
                         elif not stopped:
-                            _clear_resume()
+                            _clear_resume(sess)
                     now = time.perf_counter()
                     # Emit on any phase OR named-stage transition, so fast runs
                     # show each step (two stages can share a phase, e.g. two
@@ -857,6 +934,8 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                     ):
                         with_q = final or now - last_q >= QUALITY_INTERVAL
                         _frame(
+                            sid,
+                            sess,
                             h,
                             chips,
                             running=not final,
@@ -873,18 +952,18 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
         if not done:
             # Channel closed without a terminal message: crash or hard kill.
             rc = proc.wait()
-            if _run["stop"]:
+            if run["stop"]:
                 # A hard kill (double-click stop) can end mid-chunk with no
                 # terminal frame; still cache the last result for resume.
                 if latest_X is not None:
-                    _set_resume(latest_X, code)
-                _fail_frame("stopped")
+                    _set_resume(sess, latest_X, code)
+                _fail_frame(sid, sess, "stopped")
             else:
-                _clear_resume()
-                _fail_frame(f"pipeline failed (worker exited {rc})")
+                _clear_resume(sess)
+                _fail_frame(sid, sess, f"pipeline failed (worker exited {rc})")
     except Exception:
-        _clear_resume()
-        _fail_frame("pipeline failed", detail=tb.format_exc())
+        _clear_resume(sess)
+        _fail_frame(sid, sess, "pipeline failed", detail=tb.format_exc())
     finally:
         for pipe in (proc.stdout, proc.stdin):
             try:
@@ -896,11 +975,11 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        if _run["tmp"]:
-            Path(_run["tmp"]).unlink(missing_ok=True)
-        if _run.get("resume_tmp"):
-            Path(_run["resume_tmp"]).unlink(missing_ok=True)
-        _run.update(
+        if run["tmp"]:
+            Path(run["tmp"]).unlink(missing_ok=True)
+        if run.get("resume_tmp"):
+            Path(run["resume_tmp"]).unlink(missing_ok=True)
+        run.update(
             proc=None,
             reader=None,
             stop=False,
@@ -913,8 +992,10 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
 
 
 @rt("/run", methods=["post"])
-def run_route(code: str, path: str = "", resume: int = 0):
-    if _running():
+def run_route(code: str, path: str = "", resume: int = 0, sid: str = ""):
+    sess = _session(sid)
+    run = sess["run"]
+    if _running(sess):
         return view_bar(Span("already running", cls="warn"), running=True)
     fd, tmp = tempfile.mkstemp(suffix=".py", prefix="egg-webui-run-")
     with os.fdopen(fd, "w") as f:
@@ -924,36 +1005,37 @@ def run_route(code: str, path: str = "", resume: int = 0):
     # stale cache so the next stop starts a fresh resume point.
     resume_tmp = None
     argv = [sys.executable, "-m", WORKER_MODULE, tmp, path]
-    if resume and _is_resumable():
+    if resume and _is_resumable(sess):
         import numpy as np
 
         rfd, resume_tmp = tempfile.mkstemp(suffix=".npy", prefix="egg-webui-resume-")
         os.close(rfd)
-        np.save(resume_tmp, _resume["X"])
+        np.save(resume_tmp, sess["resume"]["X"])
         argv.append(resume_tmp)
     else:
-        _clear_resume()
+        _clear_resume(sess)
     proc = subprocess.Popen(
         argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,  # the frame channel; stderr stays on the console
     )
-    t = threading.Thread(target=_run_reader, args=(code, path, proc), daemon=True)
-    _run.update(proc=proc, reader=t, stop=False, tmp=tmp, resume_tmp=resume_tmp, log=[])
+    t = threading.Thread(target=_run_reader, args=(sid, code, path, proc), daemon=True)
+    run.update(proc=proc, reader=t, stop=False, tmp=tmp, resume_tmp=resume_tmp, log=[])
     t.start()
     label = "resuming…" if resume_tmp else "starting…"
     return view_bar(Span(label, cls="phase"), running=True)
 
 
 @rt("/stop", methods=["post"])
-def stop():
-    proc = _run["proc"]
+def stop(sid: str = ""):
+    run = _session(sid)["run"]
+    proc = run["proc"]
     if proc is None or proc.poll() is not None:
         return ""
-    if _run["stop"]:
+    if run["stop"]:
         proc.kill()  # second press: hard kill (worker hung mid-chunk)
         return ""
-    _run["stop"] = True
+    run["stop"] = True
     try:
         proc.stdin.write(b"stop\n")
         proc.stdin.flush()
@@ -1037,12 +1119,13 @@ def _write_out(out: str, data: bytes | str):
 
 
 @rt("/export/su2", methods=["post"])
-async def export_su2_route(code: str, path: str = "", out: str = ""):
+async def export_su2_route(code: str, path: str = "", out: str = "", sid: str = ""):
     """Write the current mesh as SU2 to ``out`` — the last smoothed grid if the
     script hasn't changed since that run (straight from the resident grid, no
     exec), else a fresh TFI-initialized one built in the render worker."""
-    if _last["harvest"] is not None and _last["code"] == code:
-        h = _last["harvest"]
+    last = _session(sid)["last"]
+    if last["harvest"] is not None and last["code"] == code:
+        h = last["harvest"]
         if h.grid is None:
             return JSONResponse({"error": "no grid to export"}, status_code=400)
         try:
@@ -1053,7 +1136,7 @@ async def export_su2_route(code: str, path: str = "", out: str = ""):
         # big grids TFI-init in the worker; give them room beyond the
         # editor-render timeout
         text, why = await asyncio.wrap_future(
-            _render_worker.su2(code, path, timeout=120.0)
+            _render_worker.su2(code, path, timeout=120.0, sid=sid)
         )
         if text is None:
             return JSONResponse({"error": why}, status_code=400)
@@ -1068,22 +1151,23 @@ def export_svg_route(svg: str, out: str = ""):
 
 
 @rt("/export/net", methods=["post"])
-def export_net_route(code: str = "", path: str = "", out: str = ""):
+def export_net_route(code: str = "", path: str = "", out: str = "", sid: str = ""):
     """Write the resident grid's control net as an ``.npz`` to ``out`` — the
     escape hatch for a run whose pipeline had no :class:`~egg.pipeline.Save`
     stage. Uses the last smoothed grid's net (no re-run) when the script is
     unchanged; 400 when there is no net (a nodal run with no Refit produces none).
     """
-    if _last["harvest"] is None or _last["code"] != code:
+    last = _session(sid)["last"]
+    if last["harvest"] is None or last["code"] != code:
         return JSONResponse(
             {"error": "run the pipeline first, then save the net"}, status_code=400
         )
-    h = _last["harvest"]
+    h = last["harvest"]
     net = getattr(h.grid, "control_net", None) if h.grid is not None else None
     if net is None:
         return JSONResponse(
             {
-                "error": "this run produced no control net — use the control-point "
+                "error": "this run produced no control net; use the control-point "
                 "smoother or add a Refit stage, then run again"
             },
             status_code=400,
@@ -1151,6 +1235,166 @@ def open_dir_route(which: str = "config"):
     except Exception as exc:
         return JSONResponse({"error": f"could not open: {exc}"}, status_code=400)
     return JSONResponse({"ok": True, "path": str(target)})
+
+
+# The starter script a new project is seeded with: a tiny self-contained
+# single-block topology that untangles + smooths, so a fresh project runs at once.
+_NEW_PROJECT_STARTER = '''\
+"""A new egg project. Build a topology, then register a run for the web UI."""
+
+from egg.geometry import Vector3
+from egg.topology.builder import TopologyBuilder
+
+
+def build():
+    b = TopologyBuilder(d=2)
+    b.add_block(
+        "square",
+        sw=Vector3(0, 0, 0), se=Vector3(1, 0, 0),
+        nw=Vector3(0, 1, 0), ne=Vector3(1, 1, 0),
+        res=(21, 21),
+    )
+    return b.build()
+
+
+topology = build()
+
+if __name__ == "__egg_webui__":
+    import egg.webui as egg_webui
+    from egg.pipeline import Untangle, JacobiSmoother, generate_steps
+
+    grid = topology.initialize_grid()
+    egg_webui.run(
+        grid,
+        generate_steps(
+            grid,
+            stages=[Untangle(name="untangle folds"),
+                    JacobiSmoother(name="shape smoothing")],
+        ),
+    )
+'''
+
+
+@rt("/new/project", methods=["post"])
+def new_project_route(dest: str, name: str):
+    """Create a new project directory ``dest/name`` with a starter script and
+    return ``{path, code}`` so the client can open it. The script is the bundled
+    default example when present, otherwise a minimal runnable topology."""
+
+    def work():
+        base = Path(dest).expanduser() / name
+        base.mkdir(parents=True, exist_ok=True)
+        script = base / f"{name}.py"
+        if script.exists():
+            raise ValueError(f"{script} already exists")
+        script.write_text(_NEW_PROJECT_STARTER)
+        return str(script), _NEW_PROJECT_STARTER
+
+    try:
+        script, code = work()
+    except Exception as exc:
+        return JSONResponse({"error": f"could not create project: {exc}"}, status_code=400)
+    return JSONResponse({"path": script, "code": code})
+
+
+# --- documentation lookup: map the symbol at point to its Sphinx section ---
+# The editor's "show documentation" prefers the already-built Sphinx HTML (rich
+# signatures/params) over the raw LSP hover. objects.inv gives FQN -> page#anchor;
+# the object's <dl> is lifted out of the page and embedded in the docs pane.
+
+_DOC_ROLES = {
+    "class", "function", "method", "attribute", "data",
+    "exception", "property", "module",
+}
+_inventory_cache: list[tuple[str, str, str]] | None = None
+
+
+def _load_inventory() -> list[tuple[str, str, str]]:
+    """Parse Sphinx ``objects.inv`` into ``(fqn, role, uri)`` for py objects.
+    Cached; empty when docs (or the inventory) are absent."""
+    global _inventory_cache
+    if _inventory_cache is not None:
+        return _inventory_cache
+    import zlib
+
+    out: list[tuple[str, str, str]] = []
+    try:
+        data = (DOCS_DIR / "objects.inv").read_bytes()  # type: ignore[operator]
+        body = zlib.decompress(data.split(b"\n", 4)[4]).decode()
+        for line in body.splitlines():
+            m = re.match(r"(.+?)\s+py:(\S+)\s+-?\d+\s+(\S+)\s+", line)
+            if m:
+                out.append((m.group(1), m.group(2), m.group(3)))
+    except Exception:
+        out = []
+    _inventory_cache = out
+    return out
+
+
+def _find_doc_object(name: str) -> tuple[Path, str] | None:
+    """Map a bare identifier (or FQN) to ``(html_file, anchor)``: the shortest
+    documented py object whose last name part matches."""
+    cands = [
+        e for e in _load_inventory()
+        if e[1] in _DOC_ROLES and (e[0] == name or e[0].rsplit(".", 1)[-1] == name)
+    ]
+    if not cands:
+        return None
+    # Prefer a real object over a bare module, then the shortest FQN.
+    cands.sort(key=lambda e: (e[1] == "module", len(e[0])))
+    fqn, _role, uri = cands[0]
+    file_part, _, anchor = uri.partition("#")
+    anchor = anchor.replace("$", fqn)  # Sphinx abbreviates the anchor as "$"
+    return DOCS_DIR / file_part, anchor  # type: ignore[operator]
+
+
+def _extract_dl_fragment(html_path: Path, anchor: str) -> str | None:
+    """Return the ``<dl>…</dl>`` describing ``anchor`` (depth-matched so a class
+    keeps its methods), or ``None`` if the page/anchor is missing."""
+    try:
+        s = html_path.read_text()
+    except OSError:
+        return None
+    idpos = s.find(f'id="{anchor}"')
+    if idpos < 0:
+        return None
+    start = s.rfind("<dl", 0, idpos)
+    if start < 0:
+        return None
+    depth, i, n = 0, start, len(s)
+    while i < n:
+        no = s.find("<dl", i)
+        nc = s.find("</dl>", i)
+        if nc < 0:
+            return None
+        if no != -1 and no < nc:
+            depth += 1
+            i = no + 3
+        else:
+            depth -= 1
+            i = nc + 5
+            if depth == 0:
+                return s[start:i]
+    return None
+
+
+@rt("/api/docsym")
+def docsym_route(name: str):
+    """The Sphinx documentation fragment for the symbol ``name`` (a bare
+    identifier), or ``{found: False}`` to let the client fall back to the LSP
+    hover. Serves only from the locally built docs."""
+    if not name or not DOCS_DIR or not DOCS_DIR.is_dir():
+        return JSONResponse({"found": False})
+    try:
+        found = _find_doc_object(name)
+        if not found:
+            return JSONResponse({"found": False})
+        html = _extract_dl_fragment(found[0], found[1])
+        if not html:
+            return JSONResponse({"found": False})
+        return JSONResponse({"found": True, "html": html, "fqn": found[1]})
+    except Exception:
+        return JSONResponse({"found": False})
 
 
 @rt("/save/eggy", methods=["post"])
@@ -1238,8 +1482,8 @@ def api_syntax(code: str):
     """Whether ``code`` is syntactically valid Python (compile only, no exec).
 
     The editor's auto-run gates on this so a half-typed line never re-execs into
-    an error — but only real syntax errors block it; type-checker complaints
-    (which don't stop the code running) do not reach here.
+    an error. Only real syntax errors block it; type-checker complaints (which
+    do not stop the code running) never reach here.
     """
     try:
         compile(code, "<editor>", "exec")
@@ -1460,6 +1704,21 @@ def api_recent(path: str):
     )
 
 
+@rt("/api/clientlog", methods=["post"])
+def api_clientlog(level: str = "error", msg: str = "", src: str = ""):
+    """Log a browser-side error to this process's stderr, so the tee writes it
+    to the logfile. JS console errors (browser devtools or the desktop webview)
+    are otherwise lost. Truncated to keep a runaway page from flooding the log."""
+    tag = level.strip()[:16] or "error"
+    text = (msg or "").replace("\r", " ")[:2000]
+    where = (" @ " + src[:300]) if src else ""
+    try:
+        print(f"js {tag}: {text}{where}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+    return JSONResponse({"ok": True})
+
+
 @rt("/api/favourites", methods=["post"])
 def api_favourites(path: str, action: str = "add"):
     """Add/remove one directory from the favourites; returns the updated
@@ -1629,13 +1888,16 @@ def set_param(code: str, name: str, value: str):
 
 
 @rt("/render", methods=["post"])
-async def render(code: str, view: str = "grid", path: str = ""):
+async def render(code: str, view: str = "grid", path: str = "", sid: str = ""):
     mode = view if view in ("grid", "topo", "edit") else "grid"
-    return view_fragment(await _render_scene(code, mode, path), code, mode=mode)
+    return view_fragment(
+        await _render_scene(code, mode, path, sid=sid), code, mode=mode,
+        sess=_session(sid)
+    )
 
 
 @rt("/api/topo/validate", methods=["post"])
-async def topo_validate(code: str, blocking: str = "{}", path: str = ""):
+async def topo_validate(code: str, blocking: str = "{}", path: str = "", sid: str = ""):
     """Diagnostics for a candidate blocking (JSON) against the script's base +
     geometry; an empty list means green/committable. Runs in the render worker
     (it execs the script), never in the server."""
@@ -1643,12 +1905,12 @@ async def topo_validate(code: str, blocking: str = "{}", path: str = ""):
         f = json.loads(blocking)
     except json.JSONDecodeError:
         return JSONResponse({"error": "bad blocking json"}, status_code=400)
-    out = await asyncio.wrap_future(_render_worker.validate(code, f, path))
+    out = await asyncio.wrap_future(_render_worker.validate(code, f, path, sid=sid))
     return JSONResponse(out)
 
 
 @rt("/api/topo/commit", methods=["post"])
-async def topo_commit(code: str, blocking: str = "{}", path: str = ""):
+async def topo_commit(code: str, blocking: str = "{}", path: str = "", sid: str = ""):
     """Write a blocking back into the ``editable({...})`` source span — but only
     when it has no errors. Validates in the worker; advisory ``warn_*``
     diagnostics don't block, real errors refuse with the reasons."""
@@ -1656,7 +1918,7 @@ async def topo_commit(code: str, blocking: str = "{}", path: str = ""):
         f = json.loads(blocking)
     except json.JSONDecodeError:
         return JSONResponse({"error": "bad blocking json"}, status_code=400)
-    val = await asyncio.wrap_future(_render_worker.validate(code, f, path))
+    val = await asyncio.wrap_future(_render_worker.validate(code, f, path, sid=sid))
     diags = val["diagnostics"]
     errors = [d for d in diags if not d.get("kind", "").startswith("warn")]
     if errors:
@@ -1675,20 +1937,23 @@ async def topo_commit(code: str, blocking: str = "{}", path: str = ""):
 
 
 @rt("/reset", methods=["post"])
-async def reset(code: str, view: str = "grid", path: str = ""):
-    """Discard the last smoothed result and show the fresh unsmoothed grid.
+async def reset(code: str, view: str = "grid", path: str = "", sid: str = ""):
+    """Drop the last smoothed result and show the fresh unsmoothed grid.
 
-    A completed run leaves the smoothed mesh on the canvas (and in _last for
-    export / _run for the mid-render keep). Reset drops those so a plain
-    re-exec of the script — TFI-initialized, unsmoothed — is what shows and
-    what exports. Disabled while a run streams (it owns the canvas).
+    A finished run leaves its smoothed mesh on the canvas (and in the session
+    state). Reset clears that, so a plain re-exec of the script (TFI-initialized,
+    unsmoothed) is what shows and what exports. Off while a run streams (the run
+    owns the canvas).
     """
     mode = view if view in ("grid", "topo", "edit") else "grid"
-    if not _running():
-        _last.update(code=None, harvest=None, hist=None)
-        _run["svg"] = _run["quality"] = None
-        _clear_resume()  # reset also discards the resume cache
-    return view_fragment(await _render_scene(code, mode, path), code, mode=mode)
+    sess = _session(sid)
+    if not _running(sess):
+        sess["last"].update(code=None, harvest=None, hist=None)
+        sess["run"]["svg"] = sess["run"]["quality"] = None
+        _clear_resume(sess)  # reset also discards the resume cache
+    return view_fragment(
+        await _render_scene(code, mode, path, sid=sid), code, mode=mode, sess=sess
+    )
 
 
 def _menu(label: str, *items):
@@ -1720,7 +1985,8 @@ def _window_controls():
             type="button",
             aria_label="Close",
             cls="desktop-titlebar__btn desktop-titlebar__close",
-            onclick="window.pywebview.api.close()",
+            # prompt on unsaved changes / unapplied topology edits, then close
+            onclick="window.eggDesktopClose()",
         ),
         cls="desktop-titlebar__controls",
     )
@@ -1731,10 +1997,10 @@ def _titlebar_or_header(desktop: object, *menu_items):
     followed by the filename chip and the pan/zoom hint.
 
     In an ordinary browser this is the plain app header. In the native
-    (pywebview) app — ``/?desktop=1``, opened by the ``egg-desktop``
-    launcher — it becomes the window titlebar: the menus move into it, and
-    it also carries a drag handle and the window controls. The launcher runs
-    a *frameless* window; dragging the spacer starts a compositor move via
+    (pywebview) app (``/?desktop=1``, opened by the ``egg-desktop`` launcher)
+    it becomes the window titlebar: the menus move into it, and it also carries
+    a drag handle and the window controls. The launcher runs a *frameless*
+    window; dragging the spacer starts a compositor move via
     ``window.pywebview.api.start_drag`` (wired in app.js), so it works on
     Wayland too, while the menus and buttons keep their own clicks.
     """
@@ -1759,8 +2025,8 @@ async def get(view: str = "grid", desktop: int = 0):
     scene_r = await _render_scene(code, mode, path)
     return (
         Title("egg webui"),
-        # The top toolbar: the ordinary browser header, or — at /?desktop=1,
-        # opened by the egg-desktop launcher — the native-app titlebar with
+        # The top toolbar: the ordinary browser header, or (at /?desktop=1,
+        # opened by the egg-desktop launcher) the native-app titlebar with
         # the same menus plus window controls.
         _titlebar_or_header(
             desktop,
@@ -1794,7 +2060,7 @@ async def get(view: str = "grid", desktop: int = 0):
                         Button(
                             "control net (npz)",
                             id="file-dl-net",
-                            title="save the last run's control net as an .npz — the "
+                            title="save the last run's control net as an .npz, the "
                             "escape hatch if the pipeline had no Save stage; a regrid "
                             "script can resample from it",
                         ),
@@ -1935,7 +2201,7 @@ async def get(view: str = "grid", desktop: int = 0):
                     # No input-driven render: the preview re-executes when an
                     # editable item is used (params/topology/loading a file) or,
                     # for typed edits, a couple of seconds after typing stops and
-                    # only when the LSP reports no errors — so a half-typed line
+                    # only when the LSP reports no errors, so a half-typed line
                     # never re-execs into a runtime error. Renders are driven
                     # explicitly via eggForceRender() in app.js.
                 ),
@@ -1972,8 +2238,51 @@ async def get(view: str = "grid", desktop: int = 0):
                 cls="viewer",
             ),
             cls="panes",
-            hx_ext="ws",
-            ws_connect="/ws",
+            # The run-frame socket is opened manually in app.js (with the session
+            # id: /ws?sid=...), so server-pushed OOB frames reach only this
+            # instance. (Not htmx-ws, which can't carry the per-instance sid.)
+        ),
+        # Landing page: shown by JS at startup when no script is open (no default
+        # example is loaded). A splash plus the entry points; each option drives
+        # an existing flow and hides the landing once a project is opened.
+        Div(
+            Div(
+                Div(NotStr(EGG_LOGO), cls="landing-logo"),
+                Div("egg", cls="landing-title"),
+                Div("egg aims to be an excellent grid generator", cls="landing-sub"),
+                Div(
+                    # shown by JS only when a cached session exists
+                    Button(
+                        "restore cached session", id="landing-restore",
+                        cls="landing-opt", style="display:none",
+                    ),
+                    Button("recently opened", id="landing-recent", cls="landing-opt"),
+                    # only in a source checkout, where the examples ship
+                    *(
+                        [Button(
+                            "examples", id="landing-examples", cls="landing-opt",
+                            data_dir=str(EXAMPLES_ROOT),
+                        )]
+                        if EXAMPLES_ROOT and EXAMPLES_ROOT.is_dir()
+                        else []
+                    ),
+                    Button("new project", id="landing-new", cls="landing-opt"),
+                    Button("open project", id="landing-open", cls="landing-opt"),
+                    Button("open archive", id="landing-archive", cls="landing-opt"),
+                    Button(
+                        "documentation", id="landing-docs", cls="landing-opt",
+                        data_url="/docs/",
+                    ),
+                    Button(
+                        "configuration directory", id="landing-config",
+                        cls="landing-opt",
+                    ),
+                    cls="landing-opts",
+                ),
+                cls="landing-card",
+            ),
+            id="landing",
+            style="display:none",
         ),
         Div(
             Div(
@@ -2146,12 +2455,14 @@ def _script_arg() -> Path | None:
 
 
 def _initial_code() -> str:
-    p = _script_arg() or DEFAULT_SCRIPT
+    # No script argument -> start on the landing page (no default example
+    # loaded); the editor stays empty until the user picks/creates one.
+    p = _script_arg()
     return p.read_text() if p else ""
 
 
 def _initial_path() -> str:
-    p = _script_arg() or DEFAULT_SCRIPT
+    p = _script_arg()
     return str(p) if p else ""
 
 

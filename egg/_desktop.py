@@ -8,13 +8,13 @@
 
 """``egg-desktop`` console script: run the web UI in a native window.
 
-This starts the very same server as ``egg-webui`` — spawned as a child
-process, so all of that launcher's behaviour (asset vendoring, docs
-refresh, ``--watch``, opening a script) is reused verbatim — and points a
-*frameless* pywebview window at ``/?desktop=1``. At that URL the FastHTML
-app renders a custom titlebar (min / maximize / close + a drag region)
-whose buttons call the window controls this module exposes to JavaScript
-through ``js_api`` as ``window.pywebview.api``. Usage::
+This starts the same server as ``egg-webui`` as a child process, so all of
+that launcher's behaviour (asset vendoring, docs refresh, ``--watch``,
+opening a script) is reused. It then points a *frameless* pywebview window
+at ``/?desktop=1``. At that URL the FastHTML app renders a custom titlebar
+(min / maximize / close plus a drag region) whose buttons call the window
+controls this module exposes to JavaScript through ``js_api`` as
+``window.pywebview.api``. Usage::
 
     egg-desktop                      # native window
     egg-desktop my_geometry.py       # open a script
@@ -48,13 +48,13 @@ class WindowControls:
     def start_drag(self) -> None:
         """Begin a compositor-driven window move for the frameless window.
 
-        pywebview's own drag region repositions the window to an absolute
-        coordinate, which Wayland compositors forbid (so it silently does
-        nothing there). Qt's ``QWindow.startSystemMove()`` instead asks the
-        compositor to move the window, which works on both Wayland and X11.
-        This runs on the Qt GUI thread — pywebview dispatches ``js_api``
-        calls through a main-thread ``QObject`` slot — so the native window
-        method can be called directly.
+        pywebview's own drag region moves the window to an absolute
+        coordinate, which Wayland compositors forbid (so it does nothing
+        there). Qt's ``QWindow.startSystemMove()`` instead asks the compositor
+        to move the window, which works on both Wayland and X11. This runs on
+        the Qt GUI thread (pywebview dispatches ``js_api`` calls through a
+        main-thread ``QObject`` slot), so the native window method can be
+        called directly.
         """
         if self.window is None:
             return
@@ -100,8 +100,8 @@ def _wait_until_serving(
 ) -> None:
     """Block until the child server accepts a TCP connection on host:port.
 
-    Bails out early (rather than waiting the full timeout) if the child
-    exits first — e.g. a bad port, a failed vendoring step, or a missing
+    Stops early (instead of waiting the full timeout) if the child exits
+    first, for example on a bad port, a failed vendoring step, or a missing
     dependency group.
     """
     deadline = time.monotonic() + timeout
