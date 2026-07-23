@@ -443,7 +443,10 @@ document.addEventListener('pointerdown', updateCoords);
 
 // Editor zoom: Ctrl+wheel (also trackpad pinch), touch pinch, and
 // Ctrl +/-/0. Adjusts a persisted font size, not the page zoom.
-let edFont = parseFloat(localStorage.getItem('egg-webui-edfont')) || 13;
+// Starts from the configured base editor size (fonts.editor_size); a persisted
+// Ctrl+scroll zoom, once set, takes over.
+let edFont = parseFloat(localStorage.getItem('egg-webui-edfont'))
+  || parseFloat((EGG_CFG.fonts || {}).editor_size) || 13;
 function setEdFont(px) {
   edFont = Math.min(28, Math.max(8, px));
   document.documentElement.style.setProperty('--egg-edfont', edFont.toFixed(1) + 'px');

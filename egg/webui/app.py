@@ -175,9 +175,37 @@ EDITOR_JS = _static("editor.js")
 # app.js / editor.js read it with defaults, so a missing key changes nothing.
 # Config changes take effect on the next server start.
 from .config import client_config as _client_config
+from .config import load_config
 from .security import SecurityMiddleware, canonical_path, configured_token
 
 CONFIG_JS = f"window.eggConfig = {json.dumps(_client_config())};"
+
+
+def _font_css() -> str:
+    """A ``:root`` override for the interface/editor fonts and base sizes from
+    ``[fonts]`` in config.toml: ``--font-ui`` / ``--font-editor`` (families) and
+    ``--fs-ui`` / ``--fs-editor`` (base px sizes that every other UI/editor size
+    is a factor of). Each configured family name is quoted and placed before
+    ``--font-mono-fallback`` so a font that is not installed falls back to the
+    built-in stack. Emitted into the head after app.css (which defines the
+    defaults) so it wins. Only a plain family name is honored (``[A-Za-z0-9 ._-]``)
+    and sizes must be a number in ``[6, 40]`` px, so nothing can break out of the
+    CSS string; unset or invalid values are skipped, and an empty string is
+    returned when nothing is set."""
+    fonts = load_config().get("fonts", {})
+    rules = []
+    for key, var in (("interface", "--font-ui"), ("editor", "--font-editor")):
+        name = str(fonts.get(key, "")).strip()
+        if name and re.fullmatch(r"[A-Za-z0-9 ._-]+", name):
+            rules.append(f'{var}: "{name}", var(--font-mono-fallback);')
+    for key, var in (("interface_size", "--fs-ui"), ("editor_size", "--fs-editor")):
+        size = fonts.get(key)
+        if isinstance(size, (int, float)) and not isinstance(size, bool) and 6 <= size <= 40:
+            rules.append(f"{var}: {size:g}px;")
+    return f":root {{ {' '.join(rules)} }}" if rules else ""
+
+
+FONT_CSS = _font_css()
 # The launch auth token, exposed to the page so JS can append it when it opens a
 # local URL in a separate browser (documentation in the system browser has no
 # cookie yet). Only an already-authenticated client can load this page, so this
@@ -222,6 +250,7 @@ app, rt = fast_app(
         *(Link(rel="stylesheet", href=f"/vendor/{c}") for c in _PCE_CSS),
         Style(CSS),
         Style(CATPPUCCIN),
+        Style(NotStr(FONT_CSS)),  # [fonts] family/size overrides; inert when unset
         Script(NotStr(CONFIG_JS)),  # window.eggConfig, before app.js reads it
         Script(NotStr(TOKEN_JS)),   # window.eggToken, for local links opened elsewhere
         Script(JS),

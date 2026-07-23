@@ -60,6 +60,26 @@ DEFAULTS: dict[str, Any] = {
         # a long docs page does not open a taller pane than a short one.
         "doc_pane_pct": 25,
     },
+    "fonts": {
+        # Interface font: the whole UI chrome (menus, buttons, panels, labels).
+        # Empty uses the built-in monospace stack. Set to any installed font
+        # family, proportional or monospace, e.g. "Inter" or "JetBrains Mono".
+        "interface": "",
+        # Base interface font size in px. Every other UI size is a fixed factor
+        # of this, so changing it scales the whole interface proportionally.
+        "interface_size": 13,
+        # Editor font: the code editor plus code and program output (stdout, run
+        # log, error text). Empty uses the built-in monospace stack; set it to
+        # your preferred programming font, e.g. "JetBrains Mono".
+        "editor": "",
+        # Base editor font size in px (code editor and code/output). The editor's
+        # Ctrl+scroll zoom starts from this; other code/output sizes are fixed
+        # factors of it.
+        "editor_size": 13,
+        # For the families: if the named font is not installed the built-in stack
+        # is used, and only a plain family name is honored (letters, digits,
+        # spaces, dots, hyphens). All four take effect on the next server start.
+    },
     "keybinds": {
         "run": "Ctrl+Enter",  # also stops when a run is streaming
         "comment_toggle": "Ctrl+/",
@@ -97,6 +117,17 @@ DEFAULTS: dict[str, Any] = {
 def config_dir() -> Path:
     """``~/.config/egg`` (or ``$XDG_CONFIG_HOME/egg``)."""
     base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+    return Path(base) / "egg"
+
+
+def state_dir() -> Path:
+    """``~/.local/state/egg`` (or ``$XDG_STATE_HOME/egg``).
+
+    Persistent, non-config state for the desktop app lives here, notably the
+    webview's storage (localStorage/cookies) so the picked theme and other UI
+    preferences survive a relaunch.
+    """
+    base = os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
     return Path(base) / "egg"
 
 
@@ -149,11 +180,12 @@ def auth_disabled(cfg: dict | None = None) -> bool:
 
 
 def client_config(cfg: dict | None = None) -> dict:
-    """The subset the browser needs (delays, behaviour, keybinds, ui)."""
+    """The subset the browser needs (delays, behaviour, keybinds, ui, fonts)."""
     cfg = cfg if cfg is not None else load_config()
     return {
         "delays": cfg.get("delays", {}),
         "behavior": cfg.get("behavior", {}),
         "keybinds": cfg.get("keybinds", {}),
         "ui": cfg.get("ui", {}),
+        "fonts": cfg.get("fonts", {}),
     }

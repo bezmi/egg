@@ -416,7 +416,7 @@ try {
     tip.className = 'pce-diag-tip';
     tip.style.cssText = 'position:fixed;z-index:30;display:none;max-width:520px;' +
       'padding:5px 8px;border-radius:6px;white-space:pre-wrap;pointer-events:none;' +
-      'font:12px/1.5 ui-monospace,monospace;';
+      'font:12px/1.5 var(--font-editor);';
     document.body.appendChild(tip);
     const hideTip = () => { tip.style.display = 'none'; };
     // Map a viewport point to a line/col. prism overlays a transparent
@@ -473,7 +473,7 @@ try {
     sigTip.className = 'pce-sig-tip';
     sigTip.style.cssText = 'position:fixed;z-index:29;display:none;max-width:640px;' +
       'padding:5px 9px;border-radius:6px;white-space:pre-wrap;' +
-      'font:12px/1.5 ui-monospace,monospace;';
+      'font:12px/1.5 var(--font-editor);';
     document.body.appendChild(sigTip);
     const hideSig = () => { sigTip.style.display = 'none'; };
     // Cheap client-side gate: only ask the server when there's an unclosed '('

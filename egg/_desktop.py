@@ -226,7 +226,7 @@ def main() -> None:
     # spawning the server child, so the child inherits and reuses it (parent and
     # child agree on one token) and the webview can carry it on the first load.
     # The developer-only experimental config flag turns it off.
-    from egg.webui.config import auth_disabled
+    from egg.webui.config import auth_disabled, state_dir
     from egg.webui.security import prepare_auth
 
     token = prepare_auth(a.host, a.port, disabled=auth_disabled())
@@ -292,7 +292,13 @@ def main() -> None:
         # (default-src 'self'), and a token-less external origin cannot reach the
         # server, so no webview-level navigation lock is installed (an earlier Qt
         # URL interceptor ran on the wrong thread and destabilised the window).
-        webview.start(_theme_qt_tooltips)
+        # Persist the webview's storage (localStorage/cookies) across launches;
+        # pywebview defaults to private_mode=True, which drops it on exit and is
+        # why the picked theme (and other UI prefs) reset to the default every
+        # relaunch. A stable per-user storage_path keeps them.
+        storage = state_dir() / "webview"
+        storage.mkdir(parents=True, exist_ok=True)
+        webview.start(_theme_qt_tooltips, private_mode=False, storage_path=str(storage))
     finally:
         # The window is gone (or we failed to open it): stop the whole tree.
         _terminate_group(proc)
