@@ -599,90 +599,80 @@ window.addEventListener('DOMContentLoaded', () => {
   stackedMQ.addEventListener('change', initSplit);
 });
 
-// Downloads: current view as SVG (client-side), current mesh as SU2.
-function dl(name, blob) {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
 // header dropdown menus (file / view). Checkbox items keep the menu
 // open; action buttons and outside clicks close it.
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.menu-btn');
   document.querySelectorAll('.menu').forEach((m) => {
     if (btn && m.contains(btn)) m.classList.toggle('open');
-    else if (!m.contains(e.target)
-             || e.target.closest('.menu-items button, .menu-items a'))
+    else if ((!m.contains(e.target)
+              || e.target.closest('.menu-items button, .menu-items a'))
+             // the submenu parent (export ▸) opens on hover; a click on it
+             // must not close the whole menu
+             && !e.target.closest('.menu-sub-btn'))
       m.classList.remove('open');
   });
 });
 
+// Native desktop app (egg-desktop, /?desktop=1): drag the frameless window
+// from the titlebar spacer. pywebview's built-in drag repositions the window
+// to an absolute coordinate, which Wayland compositors forbid — so instead
+// we ask Qt for a compositor-driven move (startSystemMove), which works on
+// both Wayland and X11. The element only exists in desktop mode, and
+// window.pywebview.api is present only under pywebview, so this is inert in
+// an ordinary browser.
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0 || !e.target.closest('.desktop-titlebar__drag')) return;
+  window.pywebview?.api?.start_drag?.();
+});
+
 document.addEventListener('click', async (e) => {
-  if (e.target.closest('#dl-svg, #file-dl-svg')) {
-    const el = svgEl();
-    if (el) {
-      // styling lives in the page stylesheet — embed it so the export
-      // is self-contained; in the standalone file the svg element is
-      // :root, so it carries the flavor itself
-      const clone = el.cloneNode(true);
-      clone.setAttribute('data-theme', eggTheme);
-      const st = document.createElementNS('http://www.w3.org/2000/svg', 'style');
-      st.textContent = document.querySelector('style').textContent;
-      clone.insertBefore(st, clone.firstChild);
-      dl('egg-scene.svg',
-         new Blob([new XMLSerializer().serializeToString(clone)],
-                  {type: 'image/svg+xml'}));
-    }
+  // Exports go through the file picker + backend (browser downloads do
+  // nothing under pywebview): pick a destination, the server writes it.
+  if (e.target.closest('#dl-svg, #file-dl-svg')) exportPick('svg');
+  if (e.target.closest('#dl-su2, #file-dl-su2')) exportPick('su2');
+  if (e.target.closest('#file-dl-net')) exportPick('net');
+  if (e.target.closest('#file-export-as')) {   // re-run the last export, overwrite
+    const le = eggGetLastExport();
+    if (le) doExport(le.kind, le.out);
   }
-  if (e.target.closest('#dl-su2, #file-dl-su2')) {
-    const code = document.querySelector('.editor textarea').value;
-    const path = document.getElementById('scriptpath').value;
-    const r = await fetch('/export/su2', {method: 'POST', body: new URLSearchParams({code, path})});
-    const t = await r.text();
-    if (!r.ok) { alert(t); return; }
-    dl('mesh.su2', new Blob([t], {type: 'text/plain'}));
+  const rep = e.target.closest('#help-report');
+  if (rep) {  // open in the system browser (desktop) or a new tab (browser)
+    if (window.pywebview?.api?.open_url) window.pywebview.api.open_url(rep.dataset.url);
+    else window.open(rep.dataset.url, '_blank', 'noopener');
   }
-  if (e.target.closest('#file-dl-net')) {
-    const code = currentCode();
-    const path = document.getElementById('scriptpath').value;
-    const r = await fetch('/export/net', {method: 'POST', body: new URLSearchParams({code, path})});
-    if (!r.ok) { alert(await r.text()); return; }
-    dl('net.npz', await r.blob());
-  }
-  if (e.target.closest('#file-save-eggy')) {
-    const code = currentCode();
-    const path = document.getElementById('scriptpath').value;
-    const r = await fetch('/save/eggy', {method: 'POST', body: new URLSearchParams({code, path})});
-    if (!r.ok) { alert(await r.text()); return; }
-    dl('case.eggy', await r.blob());
-  }
-  if (e.target.closest('#file-open-eggy')) {
-    const inp = document.createElement('input');
-    inp.type = 'file';
-    inp.accept = '.eggy';
-    inp.onchange = async () => {
-      const f = inp.files[0];
-      if (!f) return;
-      const fd = new FormData();
-      fd.append('file', f);
-      const r = await fetch('/open/eggy', {method: 'POST', body: fd});
-      if (!r.ok) { alert(await r.text()); return; }
-      const j = await r.json();
-      // Load the unpacked script; nothing runs until the user hits run.
-      // A regrid script can Load the net sitting beside it on disk.
-      window.eggSetCode(j.code);
-      setFile(j.path, j.code);
-    };
-    inp.click();
-  }
+  if (e.target.closest('#file-save-eggy')) saveEggyPick();
+  if (e.target.closest('#file-open-eggy')) openEggyPick();
 });
 
 // --- open/save: normal file workflow against the server's filesystem
 // (local single-user tool). State: the open file's path + its last
 // saved content, for the dirty dot on the filename chip.
 let curFile = null, lastSaved = null, fsMode = 'open', fsDir = null;
+// picker sidebar + search state
+let fsQuick = [], fsFavs = [], fsRecent = [];   // quick / favourite / recent entries
+let fsSearchId = null, fsSearchSeq = 0, fsSearchTimer = null, fsPendingQuery = '';
+let fsSearchPoll = null;             // interval polling live search progress
+let fsListing = null;                // last dir listing, re-rendered on sort change
+let fsSort = localStorage.getItem('egg-fs-sort') || 'az';
+let fsOpts = {};                     // active picker config (mode, ext, callbacks)
+const fsNote = (id, on) => document.getElementById(id).classList.toggle('show', on);
+// Small inline monochrome icons for the sidebar (themed via currentColor;
+// no external assets, per the no-CDN rule).
+const FS_ICONS = (() => {
+  const w = (inner) => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + inner + '</svg>';
+  return {
+    home: w('<path d="M3 10l7-6 7 6"/><path d="M5 9v7h10V9"/>'),
+    desktop: w('<rect x="2.5" y="4" width="15" height="9.5" rx="1"/><path d="M7 16.5h6M10 13.5v3"/>'),
+    documents: w('<path d="M5.5 2.5h6l3 3v12h-9z"/><path d="M11.5 2.5v3h3"/>'),
+    downloads: w('<path d="M10 3v8"/><path d="M6.5 8L10 11.5 13.5 8"/><path d="M4.5 16.5h11"/>'),
+    drive: w('<rect x="2.5" y="5.5" width="15" height="9" rx="1.5"/><path d="M6 10h5"/><path d="M14 10h.01"/>'),
+    folder: w('<path d="M2.5 5.5h5l1.5 2h8.5v8h-15z"/>'),
+    star: w('<path d="M10 2.5l2.2 4.6 5 .5-3.7 3.5 1 5L10 13.5 5.5 16.1l1-5L2.8 7.6l5-.5z"/>'),
+    clock: w('<circle cx="10" cy="10" r="7"/><path d="M10 6.5v4l2.8 1.8"/>'),
+  };
+})();
 const baseOf = (p) => p.slice(p.lastIndexOf('/') + 1);
 const dirOf = (p) => p.slice(0, Math.max(1, p.lastIndexOf('/')));
 const joinP = (d, n) => d + (d.endsWith('/') ? '' : '/') + n;
@@ -714,13 +704,39 @@ function updateChip(flash) {
   c.textContent = baseOf(curFile) + (flash ? ' ✓' : dirty ? ' •' : '');
   c.title = curFile;
 }
-function fsHide() { document.getElementById('fsmodal').style.display = 'none'; }
+function fsHide() { fsCancelSearch(); document.getElementById('fsmodal').style.display = 'none'; }
+// Abort an in-flight search (tell the server to stop its walk) and clear the
+// debounce / note bars. Any partial results already fetched still render.
+function fsCancelSearch() {
+  clearTimeout(fsSearchTimer);
+  clearInterval(fsSearchPoll);
+  fsNote('fs-confirm', false); fsNote('fs-searching', false);
+  if (fsSearchId) {
+    const id = fsSearchId; fsSearchId = null;
+    fetch('/api/search/cancel', {method: 'POST', body: new URLSearchParams({id})});
+  }
+}
 async function fsList(dir) {
-  const r = await fetch('/api/files?dir=' + encodeURIComponent(dir || ''));
+  fsCancelSearch();
+  const ext = fsOpts.ext || '.py';
+  const r = await fetch('/api/files?dir=' + encodeURIComponent(dir || '')
+    + '&ext=' + encodeURIComponent(ext));
   const j = await r.json();
-  if (j.error) { alert(j.error); return; }
+  if (j.error) { alert(j.error); return false; }
   fsDir = j.dir;
-  document.getElementById('fs-dir').textContent = j.dir;
+  document.getElementById('fs-path').value = j.dir;
+  document.getElementById('fs-search').value = '';
+  fsUpdateStar();
+  fsListing = {dir: j.dir, parent: j.parent, dirs: j.dirs, files: j.files};
+  fsRenderListing();
+  fsRecordRecent(j.dir);   // a visit: feeds recents + auto-favourite counts
+  return true;
+}
+// Render the cached directory listing under the active sort (folders first,
+// then files; name A–Z or Z–A). Re-run when the sort control changes.
+function fsRenderListing() {
+  const j = fsListing;
+  if (!j) return;
   const list = document.getElementById('fs-list');
   list.innerHTML = '';
   const add = (label, cls, fn) => {
@@ -728,28 +744,218 @@ async function fsList(dir) {
     b.textContent = label; b.className = 'fs-entry ' + cls; b.onclick = fn;
     list.appendChild(b);
   };
+  const cmp = (a, b) => (fsSort === 'za' ? -1 : 1)
+    * a.toLowerCase().localeCompare(b.toLowerCase());
+  const dirs = [...j.dirs].sort(cmp), files = [...j.files].sort(cmp);
   if (j.parent && j.parent !== j.dir) add('..', 'fs-dirent', () => fsList(j.parent));
-  j.dirs.forEach((d) => add(d + '/', 'fs-dirent', () => fsList(joinP(j.dir, d))));
-  j.files.forEach((f) => add(f, 'fs-fileent', () => fsPick(joinP(j.dir, f))));
+  dirs.forEach((d) => add(d + '/', 'fs-dirent', () => fsList(joinP(j.dir, d))));
+  files.forEach((f) => add(f, 'fs-fileent', () => fsPick(joinP(j.dir, f))));
 }
-async function fsShow(mode) {
-  fsMode = mode;
+// Reflect whether the current folder is a MANUAL favourite in the ★ toggle
+// (automatic favourites are not starred; the star manually pins/unpins).
+function fsUpdateStar() {
+  const b = document.getElementById('fs-fav');
+  b.disabled = false;
+  const on = fsFavs.some((f) => f.path === fsDir && !f.auto);
+  b.textContent = on ? '★' : '☆';
+  b.classList.toggle('on', on);
+  b.title = on ? 'remove this folder from favourites' : 'add this folder to favourites';
+}
+async function fsLoadPlaces() {
+  try {
+    const j = await (await fetch('/api/places')).json();
+    fsQuick = j.quick || []; fsRecent = j.recent || []; fsFavs = j.favourites || [];
+  } catch (err) { fsQuick = []; fsRecent = []; fsFavs = []; }
+  fsRenderSidebar();
+  fsUpdateStar();
+}
+function fsRenderSidebar() {
+  const sb = document.getElementById('fs-sidebar');
+  sb.innerHTML = '';
+  const group = (label) => {
+    const d = document.createElement('div');
+    d.className = 'fs-side-group'; d.textContent = label; sb.appendChild(d);
+  };
+  const entry = (label, path, iconKey, onClick, onRemove) => {
+    const b = document.createElement('button');
+    b.className = 'fs-side-entry';
+    const ic = document.createElement('span');
+    ic.className = 'fs-side-icon'; ic.innerHTML = FS_ICONS[iconKey] || FS_ICONS.folder;
+    const lab = document.createElement('span');
+    lab.className = 'fs-side-label'; lab.textContent = label; lab.title = path;
+    b.appendChild(ic); b.appendChild(lab);
+    if (onRemove) {
+      const rm = document.createElement('button');
+      rm.className = 'fs-side-rm'; rm.textContent = '✕'; rm.title = 'remove';
+      rm.onclick = (e) => { e.stopPropagation(); onRemove(); };
+      b.appendChild(rm);
+    }
+    b.onclick = onClick;
+    sb.appendChild(b);
+  };
+  group('places');
+  fsQuick.forEach((p) => entry(p.name, p.path, p.icon, () => fsList(p.path)));
+  // "Recent" is a clickable pseudo-directory, not a real path (see fsShowRecent)
+  entry('Recent', '', 'clock', () => fsShowRecent());
+  if (fsFavs.length) {
+    group('favourites');
+    fsFavs.forEach((f) => entry(
+      f.name || f.path, f.path, f.auto ? 'clock' : 'star',
+      () => fsList(f.path), () => fsFavAction(f.path, 'remove')));
+  }
+}
+// The "Recent" pseudo-directory: recently visited dirs + opened files, each
+// shown by its (truncated) full path. Not a real filesystem location.
+function fsShowRecent() {
+  fsCancelSearch();
+  fsListing = null;
+  document.getElementById('fs-path').value = 'Recent';
+  document.getElementById('fs-search').value = '';
+  const star = document.getElementById('fs-fav');
+  star.disabled = true; star.textContent = '☆'; star.classList.remove('on');
+  const list = document.getElementById('fs-list');
+  list.innerHTML = '';
+  if (!fsRecent.length) {
+    const d = document.createElement('div');
+    d.className = 'fs-note-row'; d.textContent = 'no recent items yet';
+    list.appendChild(d); return;
+  }
+  fsRecent.forEach((it) => {
+    const b = document.createElement('button');
+    b.className = 'fs-entry ' + (it.is_dir ? 'fs-dirent' : 'fs-fileent');
+    b.textContent = fsTruncPath(it.path) + (it.is_dir ? '/' : '');
+    b.title = it.path;
+    b.onclick = () => (it.is_dir ? fsList(it.path) : fsPick(it.path));
+    list.appendChild(b);
+  });
+}
+function fsTruncPath(p, max = 54) {
+  if (p.length <= max) return p;
+  const head = Math.ceil((max - 1) / 2), tail = Math.floor((max - 1) / 2);
+  return p.slice(0, head) + '…' + p.slice(p.length - tail);
+}
+// Record a visit (opened file, or navigated-to directory) in the persistent
+// recents/usage; the server may promote a frequently used dir to a favourite.
+async function fsRecordRecent(path) {
+  if (!path) return;
+  try {
+    const j = await (await fetch('/api/recent', {
+      method: 'POST', body: new URLSearchParams({path}),
+    })).json();
+    if (j.recent) fsRecent = j.recent;
+    if (j.favourites) fsFavs = j.favourites;
+    if (document.getElementById('fsmodal').style.display !== 'none') {
+      fsRenderSidebar(); fsUpdateStar();
+    }
+  } catch (err) { /* best-effort */ }
+}
+async function fsFavAction(path, action) {
+  try {
+    const j = await (await fetch('/api/favourites', {
+      method: 'POST', body: new URLSearchParams({path, action}),
+    })).json();
+    fsFavs = j.favourites || [];
+  } catch (err) { return; }
+  fsRenderSidebar();
+  fsUpdateStar();
+}
+// Recursive fuzzy search of fsDir. `confirmed` skips the deep-tree guard.
+async function fsRunSearch(q, confirmed) {
+  fsCancelSearch();
+  const seq = ++fsSearchSeq;
+  const id = 'srch-' + seq + '-' + Date.now();
+  fsSearchId = id;
+  fsNote('fs-confirm', false); fsNote('fs-searching', true);
+  const label = document.getElementById('fs-searching-text');
+  label.textContent = 'searching…';
+  // poll the server for a live "N matches (M searched)" counter
+  fsSearchPoll = setInterval(async () => {
+    try {
+      const p = await (await fetch(
+        '/api/search/progress?id=' + encodeURIComponent(id))).json();
+      if (p && p.scanned != null)
+        label.textContent = 'searching… ' + (p.matches || 0) + ' matches ('
+          + (p.scanned || 0).toLocaleString() + ' searched)';
+    } catch (err) { /* ignore transient poll errors */ }
+  }, 150);
+  let j;
+  try {
+    j = await (await fetch('/api/search?' + new URLSearchParams({
+      dir: fsDir, q, id, confirm: confirmed ? '1' : '0',
+    }))).json();
+  } catch (err) {
+    clearInterval(fsSearchPoll);
+    if (seq === fsSearchSeq) { fsSearchId = null; fsNote('fs-searching', false); }
+    return;
+  }
+  clearInterval(fsSearchPoll);
+  if (seq !== fsSearchSeq) return;   // a newer search superseded this one
+  fsSearchId = null;
+  fsNote('fs-searching', false);
+  if (j.error) { alert(j.error); return; }
+  if (j.needs_confirm) {
+    fsPendingQuery = q;
+    document.getElementById('fs-confirm-text').textContent =
+      'Continue scanning large directory (10,000+ items)?';
+    fsNote('fs-confirm', true);
+    return;
+  }
+  fsRenderResults(j, q);
+}
+function fsRenderResults(j, q) {
+  const list = document.getElementById('fs-list');
+  list.innerHTML = '';
+  const results = j.results || [];
+  const note = (txt) => {
+    const d = document.createElement('div');
+    d.className = 'fs-note-row'; d.textContent = txt; list.appendChild(d);
+  };
+  if (!results.length) { note('no matches for “' + q + '”'); return; }
+  results.forEach((it) => {
+    const b = document.createElement('button');
+    b.className = 'fs-entry ' + (it.is_dir ? 'fs-dirent' : 'fs-fileent');
+    const name = document.createElement('span');
+    name.textContent = it.is_dir ? it.name + '/' : it.name;
+    const sub = document.createElement('span');
+    sub.className = 'fs-entry-sub'; sub.textContent = it.rel;
+    b.appendChild(name); b.appendChild(sub);
+    b.onclick = () => (it.is_dir ? fsList(it.path) : fsPick(it.path));
+    list.appendChild(b);
+  });
+  if (j.truncated) note('showing the first ' + results.length + ' matches (refine the query)');
+}
+// opts: {mode:'open'|'save', title, startDir, defaultName, namePlaceholder,
+//        ext, confirmOverwrite, onPick(path), onSave(path)}. A bare string is
+//        accepted as {mode}. onPick defaults to loading the file into the
+//        editor; onSave defaults to saving the script.
+async function fsShow(opts) {
+  fsOpts = (typeof opts === 'string') ? {mode: opts} : (opts || {});
+  fsMode = fsOpts.mode || 'open';
   document.getElementById('fsmodal').style.display = 'flex';
-  document.querySelector('.fs-saverow').style.display = mode === 'save' ? 'flex' : 'none';
+  document.querySelector('.fs-saverow').style.display = fsMode === 'save' ? 'flex' : 'none';
   document.getElementById('fs-title').textContent =
-    mode === 'save' ? 'save as' : 'open';
-  if (mode === 'save')
-    document.getElementById('fs-name').value = curFile ? baseOf(curFile) : 'geometry.py';
-  await fsList(fsDir || (curFile ? dirOf(curFile) : ''));
+    fsOpts.title || (fsMode === 'save' ? 'save as' : 'open');
+  const nameInput = document.getElementById('fs-name');
+  if (fsMode === 'save') {
+    nameInput.value = fsOpts.defaultName || (curFile ? baseOf(curFile) : 'geometry.py');
+    nameInput.placeholder = fsOpts.namePlaceholder || 'filename.py';
+  }
+  document.getElementById('fs-search').value = '';
+  document.getElementById('fs-sort').value = fsSort;
+  fsNote('fs-confirm', false); fsNote('fs-searching', false);
+  fsLoadPlaces();
+  await fsList(fsOpts.startDir || fsDir || (curFile ? dirOf(curFile) : ''));
 }
 async function fsPick(path) {
   if (fsMode === 'save') {  // clicking a file in save mode = take its name
     document.getElementById('fs-name').value = baseOf(path);
     return;
   }
+  if (fsOpts.onPick) return fsOpts.onPick(path);   // custom open flow (e.g. .eggy)
   const r = await fetch('/api/file?path=' + encodeURIComponent(path));
   const j = await r.json();
   if (j.error) { alert(j.error); return; }
+  fsRecordRecent(j.path);
   // library-style script (defines a builder, no __egg_webui__ block):
   // watching -> show the block to paste (never touch a watched file);
   // otherwise offer to append it to the file, on confirmation only
@@ -788,8 +994,157 @@ async function doSave(path) {
   const j = await r.json();
   if (j.error) { alert('save failed: ' + j.error); return; }
   setFile(j.path, code);
+  fsRecordRecent(j.path);
   updateChip(true);
   setTimeout(() => updateChip(), 1200);
+}
+// Themed yes/no confirm as a promise — reused for every overwrite prompt.
+let cfResolve = null;
+function eggConfirm(message, okLabel) {
+  document.getElementById('cf-text').textContent = message;
+  document.getElementById('cf-yes').textContent = okLabel || 'ok';
+  document.getElementById('cfmodal').style.display = 'flex';
+  return new Promise((res) => { cfResolve = res; });
+}
+function cfClose(val) {
+  document.getElementById('cfmodal').style.display = 'none';
+  const r = cfResolve; cfResolve = null;
+  if (r) r(val);
+}
+async function fsExists(path) {
+  try { return await (await fetch('/api/exists?path=' + encodeURIComponent(path))).json(); }
+  catch (err) { return {exists: false, is_dir: false}; }
+}
+// The picker's save button: confirm overwrite (when the flow asks for it),
+// then hand the chosen path to the flow's onSave (default: save the script).
+async function fsDoSaveClick() {
+  const name = document.getElementById('fs-name').value.trim();
+  if (!name) return;
+  const target = joinP(fsDir, name);
+  if (fsOpts.confirmOverwrite) {
+    const info = await fsExists(target);
+    if (info.exists && !info.is_dir
+        && !(await eggConfirm('“' + name + '” already exists here. Overwrite it?', 'overwrite')))
+      return;
+  }
+  fsHide();
+  (fsOpts.onSave || doSave)(target);
+}
+
+// --- exports (SVG / SU2 / control-net npz): pick a destination via the file
+// picker, the backend writes it; remember the last one for "export as".
+function fsSuggestName(ext) {
+  const b = curFile ? baseOf(curFile).replace(/\.[^.]+$/, '') : 'grid';
+  return (b || 'grid') + ext;
+}
+function exportPick(kind) {
+  const meta = {svg: {ext: '.svg', title: 'export SVG'},
+                su2: {ext: '.su2', title: 'export SU2'},
+                net: {ext: '.npz', title: 'save control net'}}[kind];
+  fsShow({
+    mode: 'save', title: meta.title, ext: meta.ext,
+    defaultName: fsSuggestName(meta.ext), namePlaceholder: 'name' + meta.ext,
+    confirmOverwrite: true, onSave: (out) => runExport(kind, out),
+  });
+}
+async function runExport(kind, out) {
+  if (await doExport(kind, out)) eggSetLastExport(kind, out);
+}
+async function doExport(kind, out) {
+  let url, body;
+  if (kind === 'svg') {
+    const svg = serializeSceneSvg();
+    if (!svg) { alert('nothing to export yet (render a scene first)'); return false; }
+    url = '/export/svg'; body = {svg, out};
+  } else {
+    url = kind === 'su2' ? '/export/su2' : '/export/net';
+    body = {code: currentCode(), path: document.getElementById('scriptpath').value, out};
+  }
+  const r = await fetch(url, {method: 'POST', body: new URLSearchParams(body)});
+  let j = null; try { j = await r.json(); } catch (err) { /* non-JSON error */ }
+  if (!r.ok || !j || j.error) { alert((j && j.error) || 'export failed'); return false; }
+  fsRecordRecent(j.path || out);
+  return true;
+}
+// Serialize the live scene SVG standalone (embed the page CSS so the file
+// carries its own flavor), same as the old client-side download did.
+function serializeSceneSvg() {
+  const el = svgEl();
+  if (!el) return null;
+  const clone = el.cloneNode(true);
+  clone.setAttribute('data-theme', eggTheme);
+  const st = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+  st.textContent = document.querySelector('style').textContent;
+  clone.insertBefore(st, clone.firstChild);
+  return new XMLSerializer().serializeToString(clone);
+}
+function eggGetLastExport() {
+  try { return JSON.parse(localStorage.getItem('egg-last-export') || 'null'); }
+  catch (err) { return null; }
+}
+function eggSetLastExport(kind, out) {
+  localStorage.setItem('egg-last-export', JSON.stringify({kind, out}));
+  eggRefreshExportAs();
+}
+function eggRefreshExportAs() {
+  const btn = document.getElementById('file-export-as');
+  if (!btn) return;
+  const le = eggGetLastExport();
+  if (le && le.out) {
+    btn.style.display = '';
+    btn.textContent = 'export as ' + baseOf(le.out);
+    btn.title = 'overwrite ' + le.out;
+  } else btn.style.display = 'none';
+}
+document.addEventListener('DOMContentLoaded', eggRefreshExportAs);
+
+// --- .eggy case archives, through the picker + backend ---
+function saveEggyPick() {
+  const path = document.getElementById('scriptpath').value;
+  if (!path) { alert('save the script to a file first, then save the .eggy'); return; }
+  fsShow({
+    mode: 'save', title: 'save .eggy archive', ext: '.eggy',
+    defaultName: fsSuggestName('.eggy'), namePlaceholder: 'name.eggy',
+    confirmOverwrite: true, onSave: (out) => saveEggy(out),
+  });
+}
+async function saveEggy(out) {
+  const code = currentCode();
+  const path = document.getElementById('scriptpath').value;
+  const r = await fetch('/save/eggy', {method: 'POST',
+    body: new URLSearchParams({code, path, out})});
+  let j = null; try { j = await r.json(); } catch (err) { /* non-JSON */ }
+  if (!r.ok || !j || j.error) { alert((j && j.error) || 'save failed'); return; }
+  fsRecordRecent(j.path || out);
+}
+// open: step 1 pick the archive, step 2 pick a folder + workspace name to
+// extract into (dest/name), then load the unpacked script.
+function openEggyPick() {
+  fsShow({mode: 'open', title: 'open .eggy archive', ext: '.eggy',
+          onPick: (archive) => openEggyDest(archive)});
+}
+function openEggyDest(archive) {
+  fsShow({
+    mode: 'save', title: 'extract into folder', ext: '*',
+    startDir: dirOf(archive),
+    defaultName: baseOf(archive).replace(/\.eggy$/i, '') || 'workspace',
+    namePlaceholder: 'workspace name',
+    onSave: (target) => extractEggy(archive, target),
+  });
+}
+async function extractEggy(archive, target) {
+  const dest = dirOf(target), name = baseOf(target);
+  const info = await fsExists(target);
+  if (info.exists
+      && !(await eggConfirm('“' + name + '” already exists. Extract into it?', 'extract')))
+    return;
+  const r = await fetch('/open/eggy', {method: 'POST',
+    body: new URLSearchParams({archive, dest, name})});
+  let j = null; try { j = await r.json(); } catch (err) { /* non-JSON */ }
+  if (!r.ok || !j || j.error) { alert((j && j.error) || 'open failed'); return; }
+  window.eggSetCode(j.code);
+  setFile(j.path, j.code);
+  fsRecordRecent(j.path);
 }
 document.addEventListener('click', (e) => {
   // A run owns the view; opening/loading a different file mid-run would desync
@@ -799,11 +1154,12 @@ document.addEventListener('click', (e) => {
   if ((e.target.closest('#file-open') || e.target.closest('#file-examples'))
       && eggRunning())
     return;
-  if (e.target.closest('#file-open')) fsShow('open');
+  if (e.target.closest('#file-open')) fsShow({mode: 'open'});
   const ex = e.target.closest('#file-examples');
-  if (ex) { fsDir = ex.dataset.dir; fsShow('open'); }
-  if (e.target.closest('#file-saveas')) fsShow('save');
-  if (e.target.closest('#file-save')) curFile ? doSave(curFile) : fsShow('save');
+  if (ex) fsShow({mode: 'open', startDir: ex.dataset.dir});
+  if (e.target.closest('#file-saveas')) fsShow({mode: 'save', confirmOverwrite: true});
+  if (e.target.closest('#file-save'))
+    curFile ? doSave(curFile) : fsShow({mode: 'save', confirmOverwrite: true});
   if (e.target.closest('#fs-cancel') || e.target.id === 'fsmodal') fsHide();
   if (e.target.closest('#sug-close') || e.target.id === 'sugmodal')
     document.getElementById('sugmodal').style.display = 'none';
@@ -820,17 +1176,47 @@ document.addEventListener('click', (e) => {
     eggPendingCommit = null;
     document.getElementById('savemodal').style.display = 'none';
   }
-  if (e.target.closest('#fs-do-save')) {
-    const name = document.getElementById('fs-name').value.trim();
-    if (name) { doSave(joinP(fsDir, name)); fsHide(); }
+  if (e.target.closest('#fs-do-save')) fsDoSaveClick();
+  if (e.target.closest('#cf-yes')) cfClose(true);
+  if (e.target.closest('#cf-no') || e.target.id === 'cfmodal') cfClose(false);
+  if (e.target.closest('#fs-fav')) {
+    const isManual = fsFavs.some((f) => f.path === fsDir && !f.auto);
+    fsFavAction(fsDir, isManual ? 'remove' : 'add');
   }
+  if (e.target.closest('#fs-confirm-go')) {
+    fsNote('fs-confirm', false);
+    if (fsPendingQuery) fsRunSearch(fsPendingQuery, true);
+  }
+  if (e.target.closest('#fs-confirm-stop')) fsNote('fs-confirm', false);
+  if (e.target.closest('#fs-search-stop')) fsCancelSearch();
+});
+// picker: type a path + Enter to jump; debounced recursive search box
+document.addEventListener('keydown', (e) => {
+  if (e.target.id === 'fs-path' && e.key === 'Enter') {
+    e.preventDefault();
+    fsList(e.target.value.trim());   // fsList records the visit itself
+  }
+});
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'fs-search') return;
+  clearTimeout(fsSearchTimer);
+  const q = e.target.value.trim();
+  if (!q) { fsCancelSearch(); if (fsDir) fsList(fsDir); return; }
+  fsSearchTimer = setTimeout(() => fsRunSearch(q, false), 250);
+});
+document.addEventListener('change', (e) => {
+  if (e.target.id !== 'fs-sort') return;
+  fsSort = e.target.value;
+  localStorage.setItem('egg-fs-sort', fsSort);
+  fsRenderListing();
 });
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
-    curFile ? doSave(curFile) : fsShow('save');
+    curFile ? doSave(curFile) : fsShow({mode: 'save', confirmOverwrite: true});
   }
   if (e.key === 'Escape') {
+    if (document.getElementById('cfmodal').style.display === 'flex') { cfClose(false); return; }
     fsHide();
     document.getElementById('sugmodal').style.display = 'none';
     document.getElementById('savemodal').style.display = 'none';

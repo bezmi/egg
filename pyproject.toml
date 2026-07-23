@@ -29,10 +29,18 @@ webui = [
   "python-fasthtml>=0.12",
   "basedpyright>=1.29",
 ]
+# Native desktop app: the same web UI in a frameless pywebview window
+# (`pip install egg[desktop]`). Builds on [webui]; [qt] pulls a GUI backend.
+desktop = [
+  "egg[webui]",
+  "pywebview[qt]>=5.4",
+]
 
 [project.scripts]
 # serves the web UI (egg/webui/); works from a checkout or an installed wheel
 egg-webui = "egg._webui_launcher:main"
+# runs the same web UI in a native (pywebview) window
+egg-desktop = "egg._desktop:main"
 
 [dependency-groups]
 # Web UI: `uv sync --group webui` once, then `uv run --no-sync egg-webui`
@@ -40,6 +48,13 @@ egg-webui = "egg._webui_launcher:main"
 webui = [
   "python-fasthtml>=0.12",
   "basedpyright>=1.29",
+]
+# Native desktop app: `uv sync --group desktop`, then `uv run --no-sync
+# egg-desktop` (mirrors the [project.optional-dependencies] desktop extra).
+desktop = [
+  "python-fasthtml>=0.12",
+  "basedpyright>=1.29",
+  "pywebview[qt]>=5.4",
 ]
 # CAD import adapter (egg.io.cad): `uv sync --group cad`
 cad = [

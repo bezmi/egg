@@ -113,8 +113,64 @@ body { margin: 0; height: 100vh; height: 100dvh;
 header { padding: 6px 12px; background: var(--ctp-crust); color: var(--ctp-text);
          font-size: 14px; display: flex; gap: 8px 14px; align-items: center;
          flex-wrap: wrap; }
-header .hint { color: var(--ctp-overlay1); font-size: 12px; margin-left: auto; }
 header label { font-size: 12px; display: flex; gap: 3px; align-items: center; }
+
+/* Native-app (pywebview) titlebar — replaces the browser header at
+   /?desktop=1 (egg-desktop launcher). Hosts the same file/view/help menus
+   plus the window controls, themed off --ctp-* so it tracks the active
+   flavor. Dragging the .desktop-titlebar__drag spacer starts a window move
+   (app.js -> start_drag); the control buttons call window.pywebview.api
+   (frameless window). Right edge is flush (padding-right: 0) so the controls
+   reach the corner. */
+header.desktop-titlebar { flex: 0 0 auto; height: 34px; align-items: center;
+  padding: 0 0 0 10px; gap: 0 8px; flex-wrap: nowrap;
+  background: var(--ctp-mantle); border-bottom: 1px solid var(--ctp-surface0);
+  user-select: none; }
+.desktop-titlebar .egg-logo { width: 20px; height: 20px; flex: 0 0 auto; }
+/* Empty flex spacer that doubles as the window-drag handle. */
+.desktop-titlebar__drag { flex: 1; align-self: stretch; min-width: 24px; }
+.desktop-titlebar__controls { display: flex; flex: 0 0 auto; align-self: stretch;
+  margin-left: 8px; }
+.desktop-titlebar__btn { width: 46px; height: 100%; padding: 0; border: 0;
+  background: transparent; color: inherit; font: inherit; font-size: 15px;
+  line-height: 1; cursor: default; display: flex; align-items: center;
+  justify-content: center; }
+.desktop-titlebar__btn:hover { background: var(--ctp-surface0); }
+.desktop-titlebar__close:hover { background: #c42b1c; color: #fff; }
+
+/* Themed scrollbars. QtWebEngine (the desktop app's Chromium engine) and
+   Chromium browsers otherwise draw the chunky default OS scrollbar, which
+   clashes with the flavor; this thins and recolors it off --ctp-*. Firefox
+   uses the standardized scrollbar-* properties. */
+* { scrollbar-width: thin;
+  scrollbar-color: var(--ctp-surface2) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--ctp-surface2);
+  border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--ctp-overlay0);
+  background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Themed checkboxes. accent-color only tints a native box, whose shape/size
+   (and, under color-scheme, its light background on dark flavors) still comes
+   from the OS — most jarring in the desktop app's QtWebEngine. appearance:
+   none replaces it with a --ctp-* box and a drawn checkmark. */
+input[type="checkbox"] { -webkit-appearance: none; appearance: none;
+  box-sizing: border-box; flex: none; width: 15px; height: 15px; margin: 0;
+  border: 1px solid var(--ctp-surface2); border-radius: 4px;
+  background: var(--ctp-base); cursor: pointer; display: inline-flex;
+  align-items: center; justify-content: center;
+  transition: background 0.1s, border-color 0.1s; }
+input[type="checkbox"]:hover { border-color: var(--ctp-overlay0); }
+input[type="checkbox"]:checked { background: var(--ctp-blue);
+  border-color: var(--ctp-blue); }
+input[type="checkbox"]:checked::after { content: ''; width: 4px; height: 8px;
+  margin-top: -1px; border: solid var(--ctp-base); border-width: 0 2px 2px 0;
+  transform: rotate(45deg); }
+input[type="checkbox"]:focus-visible { outline: 2px solid var(--ctp-blue);
+  outline-offset: 1px; }
+
 /* header dropdown menus (file / view) */
 header .menu { position: relative; }
 header .menu-btn { background: none; border: 1px solid var(--ctp-surface1); color: var(--ctp-text);
@@ -140,13 +196,27 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
   color: var(--ctp-overlay1); max-width: 230px; }
 .menu-items label { padding: 6px 12px; }
 .menu-sep { border-top: 1px solid var(--ctp-surface0); margin: 3px 2px; }
+/* nested flyout submenu (file > export > …), opens on hover to the side */
+.menu-sub { position: relative; }
+.menu-sub-btn { width: 100%; display: flex; justify-content: space-between;
+  align-items: center; }
+.menu-sub-btn::after { content: '▸'; color: var(--ctp-overlay1); margin-left: 12px; }
+.menu-sub-items { display: none; position: absolute; left: 100%; top: -4px;
+  margin-left: 2px; z-index: 41; background: var(--ctp-base); color: var(--ctp-text);
+  border: 1px solid var(--ctp-surface1); border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(20,26,34,0.25); padding: 4px; min-width: 150px;
+  flex-direction: column; }
+.menu-sub:hover .menu-sub-items { display: flex; }
 #filechip { font-size: 12px; font-family: ui-monospace, monospace;
   color: var(--ctp-subtext1); }
 #filechip:empty { display: none; }
 /* open / save-as file browser modal (+ the watch + save-edits popups) */
-#fsmodal, #sugmodal, #savemodal, #resmodal { display: none; position: fixed; inset: 0;
-  z-index: 60;
+#fsmodal, #sugmodal, #savemodal, #resmodal, #cfmodal { display: none; position: fixed;
+  inset: 0; z-index: 60;
   background: rgba(20,26,34,0.45); align-items: center; justify-content: center; }
+#cfmodal { z-index: 70; }  /* confirm sits above the picker */
+#cfmodal .cf-box { width: min(400px, 92vw); }
+#cf-text { font-size: 13px; line-height: 1.4; }
 #resmodal .fs-box { width: min(320px, 92vw); }
 .res-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .res-row input { width: 96px; padding: 6px 8px; border: 1px solid var(--ctp-surface1);
@@ -174,7 +244,58 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 .fs-dirent { font-weight: 600; }
 .fs-saverow { display: none; gap: 6px; }
 .fs-saverow input { flex: 1; padding: 6px 8px; border: 1px solid var(--ctp-surface1);
-  border-radius: 5px; font: inherit; }
+  border-radius: 5px; font: inherit; background: var(--ctp-mantle); color: var(--ctp-text); }
+.fs-saverow input:focus { outline: none; border-color: var(--ctp-mauve); }
+
+/* file picker: wider box with an editable path, favourite toggle, a quick-
+   locations sidebar, and a recursive fuzzy search. */
+#fsmodal .fs-box { width: min(780px, 94vw); }
+.fs-pathrow { display: flex; gap: 6px; }
+.fs-path-input, .fs-search { padding: 6px 8px; border: 1px solid var(--ctp-surface1);
+  border-radius: 5px; background: var(--ctp-mantle); color: var(--ctp-text);
+  font: inherit; font-size: 12px; }
+.fs-path-input { flex: 1; min-width: 0; font-family: ui-monospace, monospace; }
+.fs-path-input:focus, .fs-search:focus { outline: none; border-color: var(--ctp-mauve); }
+.fs-searchrow { display: flex; gap: 6px; }
+.fs-searchrow .fs-search { flex: 1; min-width: 0; }
+#fs-sort { flex: 0 0 auto; }
+.fs-fav { flex: 0 0 auto; width: 34px; padding: 0; border: 1px solid var(--ctp-surface1);
+  border-radius: 5px; background: var(--ctp-mantle); color: var(--ctp-overlay1);
+  cursor: pointer; font-size: 16px; line-height: 1; }
+.fs-fav:hover { background: var(--ctp-surface0); }
+.fs-fav.on { color: var(--ctp-yellow); }
+/* transient notes (deep-search confirm, live "searching…"); JS toggles .show */
+.fs-note { display: none; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 8px; font-size: 12px; border-radius: 5px;
+  color: var(--ctp-text); background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1); }
+.fs-note.show { display: flex; }
+.fs-note .fs-actions { gap: 6px; }
+.fs-main { display: flex; gap: 8px; flex: 1; min-height: 0; }
+.fs-main #fs-list { flex: 1; }
+.fs-sidebar { flex: 0 0 190px; overflow-y: auto; padding: 4px;
+  border: 1px solid var(--ctp-surface1); border-radius: 6px;
+  display: flex; flex-direction: column; gap: 1px; }
+.fs-side-group { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--ctp-overlay0); padding: 10px 8px 5px; }
+.fs-side-group:first-child { padding-top: 6px; }
+.fs-side-entry { display: flex; align-items: center; gap: 7px; width: 100%;
+  text-align: left; padding: 6px 8px; border: 0; border-radius: 5px; background: none;
+  color: var(--ctp-text); font: inherit; font-size: 12px; cursor: pointer; }
+.fs-side-entry:hover { background: var(--ctp-surface0); }
+.fs-side-icon { flex: 0 0 auto; display: flex; color: var(--ctp-subtext0); }
+.fs-side-icon svg { width: 15px; height: 15px; display: block; }
+.fs-side-entry:hover .fs-side-icon { color: var(--ctp-text); }
+.fs-side-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.fs-side-rm { flex: 0 0 auto; opacity: 0; border: 0; background: none; padding: 0 2px;
+  color: var(--ctp-overlay1); cursor: pointer; font-size: 13px; }
+.fs-side-entry:hover .fs-side-rm { opacity: 1; }
+.fs-side-rm:hover { color: var(--ctp-red); }
+/* search-result rows show the relative path under the name */
+.fs-entry-sub { display: block; color: var(--ctp-overlay0); font-size: 11px;
+  font-family: ui-monospace, monospace; margin-top: 1px; }
+.fs-note-row { padding: 10px 12px; color: var(--ctp-overlay0); font-size: 12px; }
 .panes { flex: 1; display: flex; min-height: 0; }
 /* Static 42/58 fallback; Split.js (when loaded) takes over the sizing. */
 /* egg mark in the header; tinted by the flavor and re-themes for free */
@@ -215,7 +336,6 @@ header .menu.open .menu-btn, header .menu-btn:hover { background: var(--ctp-surf
 .panes.watching .editor, .panes.watching .gutter { display: none !important; }
 .panes.watching .viewer { flex: 1 !important; width: auto !important; }
 @media (max-width: 900px) {
-  header .hint { display: none; }
   /* static no-JS fallback for the stacked layout */
   .panes { flex-direction: column; }
   .editor { width: auto; height: 42%; }
@@ -462,15 +582,22 @@ button.primary:not(:disabled) { background: var(--egg-spark-energy);
                                           border-color: color-mix(in srgb, var(--ctp-red) 35%, var(--ctp-base)); }
 .bar .btns button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--ctp-red) 10%, var(--ctp-base));
                                                 border-color: var(--ctp-red); }
-.bar .btns select { font: inherit; font-size: 12px; padding: 3px 26px 3px 10px;
+/* #theme-select (the flavor picker in the view menu) shares this: without
+   appearance:none a native <select> falls back to OS chrome — most visible
+   in the desktop app's QtWebEngine, where it clashes with the flavor. */
+.bar .btns select, #theme-select, #fs-sort { font: inherit; font-size: 12px; padding: 3px 26px 3px 10px;
   border: 1px solid var(--ctp-surface1); border-radius: 5px; color: var(--ctp-text);
   cursor: pointer; -webkit-appearance: none; appearance: none;
   background: var(--ctp-base) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5'><path d='M0 0l4 5 4-5z' fill='%234a5568'/></svg>")
     no-repeat right 9px center;
   transition: background-color 0.1s, border-color 0.1s; }
-.bar .btns select:hover { background-color: var(--ctp-surface0); border-color: var(--ctp-overlay0); }
+.bar .btns select:hover, #theme-select:hover, #fs-sort:hover { background-color: var(--ctp-surface0); border-color: var(--ctp-overlay0); }
 [data-theme="frappe"] .bar .btns select, [data-theme="macchiato"] .bar .btns select,
-[data-theme="mocha"] .bar .btns select {
+[data-theme="mocha"] .bar .btns select,
+[data-theme="frappe"] #theme-select, [data-theme="macchiato"] #theme-select,
+[data-theme="mocha"] #theme-select,
+[data-theme="frappe"] #fs-sort, [data-theme="macchiato"] #fs-sort,
+[data-theme="mocha"] #fs-sort {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5'><path d='M0 0l4 5 4-5z' fill='%23a5adce'/></svg>"); }
 /* finger-sized targets on touch devices */
 @media (pointer: coarse) {

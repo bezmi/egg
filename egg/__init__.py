@@ -36,6 +36,8 @@ _EXPORTS = {
     "drain_steps": "egg.pipeline",
     "build_topology_target": "egg.smoothing",
     "webui_print": "egg._webui_print",
+    # Bundle an out-of-tree file into a .eggy archive (opt-in; use .path).
+    "file_import": "egg.io.deps",
     # Pipeline stages and smoothers, so a script builds a stage list from a
     # single `import egg` (or `from egg import Untangle, JacobiSmoother, ...`).
     "Stage": "egg.pipeline",

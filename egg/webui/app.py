@@ -48,7 +48,7 @@ import time
 from typing import Any
 from pathlib import Path
 
-from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
 
@@ -936,19 +936,36 @@ def completions():
     return JSONResponse(_completions_cache)
 
 
+def _write_out(out: str, data: bytes | str):
+    """Write an export to a chosen destination path (this is a local tool, so
+    the picker's path is a real filesystem path). Returns a JSONResponse."""
+    if not out:
+        return JSONResponse({"error": "no destination chosen"}, status_code=400)
+    p = Path(out).expanduser()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(data, str):
+            p.write_text(data)
+        else:
+            p.write_bytes(data)
+    except OSError as exc:
+        return JSONResponse({"error": f"write failed: {exc}"}, status_code=400)
+    return JSONResponse({"path": str(p.resolve())})
+
+
 @rt("/export/su2", methods=["post"])
-async def export_su2_route(code: str, path: str = ""):
-    """SU2 export of the current mesh — the last smoothed grid if the script
-    hasn't changed since that run (exported straight from the resident grid,
-    no exec), else a fresh TFI-initialized one built in the render worker."""
+async def export_su2_route(code: str, path: str = "", out: str = ""):
+    """Write the current mesh as SU2 to ``out`` — the last smoothed grid if the
+    script hasn't changed since that run (straight from the resident grid, no
+    exec), else a fresh TFI-initialized one built in the render worker."""
     if _last["harvest"] is not None and _last["code"] == code:
         h = _last["harvest"]
         if h.grid is None:
-            return PlainTextResponse("no grid to export", status_code=400)
+            return JSONResponse({"error": "no grid to export"}, status_code=400)
         try:
             text = grid_to_su2_text(h.grid)
         except Exception as exc:
-            return PlainTextResponse(f"export failed: {exc}", status_code=400)
+            return JSONResponse({"error": f"export failed: {exc}"}, status_code=400)
     else:
         # big grids TFI-init in the worker; give them room beyond the
         # editor-render timeout
@@ -956,30 +973,36 @@ async def export_su2_route(code: str, path: str = ""):
             _render_worker.su2(code, path, timeout=120.0)
         )
         if text is None:
-            return PlainTextResponse(why, status_code=400)
-    return PlainTextResponse(
-        text,
-        headers={"Content-Disposition": 'attachment; filename="mesh.su2"'},
-    )
+            return JSONResponse({"error": why}, status_code=400)
+    return _write_out(out, text)
+
+
+@rt("/export/svg", methods=["post"])
+def export_svg_route(svg: str, out: str = ""):
+    """Write the client-serialized scene SVG to ``out`` (the SVG is built in the
+    browser from the live DOM, so it arrives as text here)."""
+    return _write_out(out, svg)
 
 
 @rt("/export/net", methods=["post"])
-def export_net_route(code: str = "", path: str = ""):
-    """Save the resident grid's control net as an ``.npz`` — the escape hatch
-    for a run whose pipeline had no :class:`~egg.pipeline.Save` stage. Exports
-    the last smoothed grid's net (no re-run) when the script is unchanged since
-    that run; 400 when there is no net (a nodal run with no Refit produces none).
+def export_net_route(code: str = "", path: str = "", out: str = ""):
+    """Write the resident grid's control net as an ``.npz`` to ``out`` — the
+    escape hatch for a run whose pipeline had no :class:`~egg.pipeline.Save`
+    stage. Uses the last smoothed grid's net (no re-run) when the script is
+    unchanged; 400 when there is no net (a nodal run with no Refit produces none).
     """
     if _last["harvest"] is None or _last["code"] != code:
-        return PlainTextResponse(
-            "run the pipeline first, then save the net", status_code=400
+        return JSONResponse(
+            {"error": "run the pipeline first, then save the net"}, status_code=400
         )
     h = _last["harvest"]
     net = getattr(h.grid, "control_net", None) if h.grid is not None else None
     if net is None:
-        return PlainTextResponse(
-            "this run produced no control net — use the control-point smoother "
-            "or add a Refit stage, then run again",
+        return JSONResponse(
+            {
+                "error": "this run produced no control net — use the control-point "
+                "smoother or add a Refit stage, then run again"
+            },
             status_code=400,
         )
     try:
@@ -988,84 +1011,72 @@ def export_net_route(code: str = "", path: str = ""):
         buf = io.BytesIO()
         save_control_net(net, buf)
     except Exception as exc:
-        return PlainTextResponse(f"export failed: {exc}", status_code=400)
-    return Response(
-        buf.getvalue(),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": 'attachment; filename="net.npz"'},
-    )
+        return JSONResponse({"error": f"export failed: {exc}"}, status_code=400)
+    return _write_out(out, buf.getvalue())
 
 
 @rt("/open/eggy", methods=["post"])
-async def open_eggy_route(request):
-    """Open a ``.eggy`` case archive: unpack it and load its script.
+async def open_eggy_route(archive: str, dest: str, name: str):
+    """Extract a ``.eggy`` case archive (a path on this machine) into
+    ``dest/name`` and load its entry script.
 
-    The upload is unpacked into a fresh directory on this machine and its
-    entry script is returned. Nothing runs: the editor shows the script (with
-    its saved net and assets sitting beside it on disk), which a regrid script
-    can resample from. Returns ``{path, code}``.
+    Nothing runs: the unpacked script + its saved net and assets sit on disk
+    (a regrid script can resample from them). Returns ``{path, code}``.
     """
-    form = await request.form()
-    up = form.get("file")
-    if up is None:
-        return PlainTextResponse("no file uploaded", status_code=400)
-    data = await up.read()
 
     def work():
         from egg.io import eggy
 
-        work_dir = tempfile.mkdtemp(prefix="egg-eggy-")
-        blob = os.path.join(work_dir, "_upload.eggy")
-        with open(blob, "wb") as f:
-            f.write(data)
-        if not eggy.is_eggy(blob):
+        arc = str(Path(archive).expanduser())
+        if not eggy.is_eggy(arc):
             raise ValueError("not a .eggy archive (a zip holding a script)")
-        eggy.unpack(blob, work_dir)
-        os.remove(blob)
-        script = eggy.entry_script(work_dir)
+        target = Path(dest).expanduser() / name
+        target.mkdir(parents=True, exist_ok=True)
+        eggy.unpack(arc, str(target))
+        script = eggy.entry_script(str(target))
         return script, Path(script).read_text()
 
     try:
         script, code = await asyncio.to_thread(work)
     except Exception as exc:
-        return PlainTextResponse(f"open failed: {exc}", status_code=400)
+        return JSONResponse({"error": f"open failed: {exc}"}, status_code=400)
     return JSONResponse({"path": script, "code": code})
 
 
 @rt("/save/eggy", methods=["post"])
-def save_eggy_route(code: str, path: str = ""):
-    """Pack the current case (script + its folder) into a ``.eggy`` to download.
+def save_eggy_route(code: str, path: str = "", out: str = ""):
+    """Pack the current case (script + its folder) into the ``.eggy`` at ``out``.
 
     The editor's script is written to ``path`` first, then that script's whole
-    folder (assets and the net a Save stage wrote) is zipped verbatim.
-    Save the script to a file before saving the archive, so it has a folder.
+    folder (assets and the net a Save stage wrote) is zipped verbatim. Save the
+    script to a file before saving the archive, so it has a folder to pack.
     """
     if not path:
-        return PlainTextResponse(
-            "save the script to a file first, then save the .eggy",
+        return JSONResponse(
+            {"error": "save the script to a file first, then save the .eggy"},
             status_code=400,
         )
+    if not out:
+        return JSONResponse({"error": "no destination chosen"}, status_code=400)
 
     def work():
-        from egg.io import eggy
+        from egg.io import deps
 
         p = Path(path).expanduser()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(code)
-        out = os.path.join(tempfile.mkdtemp(prefix="egg-eggy-"), "case.eggy")
-        eggy.pack(out, str(p.parent))
-        return out
+        outp = Path(out).expanduser()
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        # pack the case folder AND bundle any egg.file_import() deps of the
+        # script (copied under deps/, their paths rewritten in the archive).
+        deps.pack_case(str(outp), str(p.parent), str(p))
+        return str(outp.resolve())
 
     try:
-        out = work()
+        outp = work()
     except Exception as exc:
-        return PlainTextResponse(f"save failed: {exc}", status_code=400)
-    blob = Path(out).read_bytes()
-    return Response(
-        blob,
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": 'attachment; filename="case.eggy"'},
-    )
+        return JSONResponse({"error": f"save failed: {exc}"}, status_code=400)
+    return JSONResponse({"path": outp})
 
 
 # --- open/save: the server's filesystem IS the user's filesystem (local
@@ -1073,8 +1084,9 @@ def save_eggy_route(code: str, path: str = ""):
 
 
 @rt("/api/files")
-def api_files(dir: str = ""):
-    """List one directory: subdirs + .py files (hidden/__pycache__ skipped)."""
+def api_files(dir: str = "", ext: str = ".py"):
+    """List one directory: subdirs + files matching ``ext`` (``*`` for all;
+    hidden/__pycache__ skipped)."""
     d = (Path(dir).expanduser() if dir else (_REPO_ROOT or Path.home())).resolve()
     if not d.is_dir():
         return JSONResponse({"error": f"not a directory: {d}"}, status_code=400)
@@ -1083,12 +1095,13 @@ def api_files(dir: str = ""):
     except PermissionError:
         return JSONResponse({"error": f"permission denied: {d}"}, status_code=400)
     skip = lambda n: n.startswith(".") or n == "__pycache__"  # noqa: E731
+    keep = lambda p: ext == "*" or p.suffix == ext  # noqa: E731
     return JSONResponse(
         {
             "dir": str(d),
             "parent": str(d.parent),
             "dirs": [p.name for p in entries if p.is_dir() and not skip(p.name)],
-            "files": [p.name for p in entries if p.is_file() and p.suffix == ".py"],
+            "files": [p.name for p in entries if p.is_file() and keep(p)],
         }
     )
 
@@ -1110,6 +1123,17 @@ async def api_file_read(path: str, check: str = "1"):
     return JSONResponse(resp)
 
 
+@rt("/api/exists")
+def api_exists(path: str):
+    """Whether a path exists (and is a dir) — the picker uses this to prompt
+    before overwriting a file."""
+    p = Path(path).expanduser()
+    try:
+        return JSONResponse({"exists": p.exists(), "is_dir": p.is_dir()})
+    except OSError:
+        return JSONResponse({"exists": False, "is_dir": False})
+
+
 @rt("/api/file/save", methods=["post"])
 def api_file_save(path: str, code: str):
     p = Path(path).expanduser()
@@ -1119,6 +1143,352 @@ def api_file_save(path: str, code: str):
         return JSONResponse({"path": str(p.resolve())})
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+# --- file-picker sidebar: quick locations + persistent favourites ---
+
+# Favourites live in the user's config dir (XDG-aware) so they persist across
+# sessions and installs. One small JSON: {"favourites": ["/abs/path", ...]}.
+_CONFIG_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "egg"
+)
+_FAVOURITES_FILE = _CONFIG_DIR / "filepicker.json"
+
+
+def _xdg_user_dir(key: str, default_rel: str) -> Path:
+    """A freedesktop user dir (e.g. ``DESKTOP`` -> ~/Desktop), honouring
+    ~/.config/user-dirs.dirs when present, else the conventional ~ subdir."""
+    home = Path.home()
+    cfg = (
+        Path(os.environ.get("XDG_CONFIG_HOME") or (home / ".config"))
+        / "user-dirs.dirs"
+    )
+    if cfg.is_file():
+        try:
+            for line in cfg.read_text().splitlines():
+                line = line.strip()
+                if line.startswith(f"XDG_{key}_DIR"):
+                    val = line.split("=", 1)[1].strip().strip('"')
+                    return Path(val.replace("$HOME", str(home)))
+        except Exception:
+            pass
+    return home / default_rel
+
+
+def _quick_places() -> list[dict]:
+    """Sidebar shortcuts: home + a few XDG user dirs, the egg examples (in a
+    checkout), and the filesystem root — only those that exist, de-duplicated.
+    Each carries an ``icon`` key the client maps to a small inline SVG."""
+    cand: list[tuple[str, str, Path | None]] = [
+        ("Home", "home", Path.home()),
+        ("Desktop", "desktop", _xdg_user_dir("DESKTOP", "Desktop")),
+        ("Documents", "documents", _xdg_user_dir("DOCUMENTS", "Documents")),
+        ("Downloads", "downloads", _xdg_user_dir("DOWNLOAD", "Downloads")),
+        ("egg examples", "folder", EXAMPLES_DIR),
+        ("/", "drive", Path("/")),
+    ]
+    out: list[dict] = []
+    seen: set[str] = set()
+    for name, icon, p in cand:
+        if p is None:
+            continue
+        try:
+            if p.is_dir():
+                rp = str(p.resolve())
+                if rp not in seen:
+                    seen.add(rp)
+                    out.append({"name": name, "path": rp, "icon": icon})
+        except OSError:
+            pass
+    return out
+
+
+def _load_favourites() -> list[str]:
+    try:
+        data = json.loads(_FAVOURITES_FILE.read_text())
+        return [f for f in data.get("favourites", []) if isinstance(f, str)]
+    except Exception:
+        return []
+
+
+def _save_favourites(favs: list[str]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _FAVOURITES_FILE.write_text(json.dumps({"favourites": favs}, indent=2))
+
+
+# Recently opened files / visited directories, most-recent-first, capped.
+_RECENT_FILE = _CONFIG_DIR / "recent.json"
+_RECENT_MAX = 25
+
+# Per-directory visit counts drive "automatic" favourites: a directory visited
+# at least _AUTOFAV_MIN times is promoted to a favourite (clock icon, still
+# removable); at most _AUTOFAV_MAX are kept, the oldest promotion dropped.
+_USAGE_FILE = _CONFIG_DIR / "usage.json"
+_AUTOFAV_MIN = 5
+_AUTOFAV_MAX = 5
+
+
+def _load_recent() -> list[str]:
+    try:
+        data = json.loads(_RECENT_FILE.read_text())
+        return [f for f in data.get("recent", []) if isinstance(f, str)]
+    except Exception:
+        return []
+
+
+def _save_recent(items: list[str]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _RECENT_FILE.write_text(json.dumps({"recent": items[:_RECENT_MAX]}, indent=2))
+
+
+def _recent_entries() -> list[dict]:
+    """Recent paths that still exist, resolved to {path, name, is_dir}; stale
+    entries are silently dropped from the view (kept in the file until pushed
+    out by newer ones)."""
+    out: list[dict] = []
+    for p in _load_recent():
+        try:
+            pp = Path(p)
+            if pp.exists():
+                out.append({"path": p, "name": pp.name or p, "is_dir": pp.is_dir()})
+        except OSError:
+            pass
+    return out
+
+
+def _load_usage() -> dict:
+    try:
+        data = json.loads(_USAGE_FILE.read_text())
+        return {
+            "counts": {
+                k: v for k, v in data.get("counts", {}).items() if isinstance(v, int)
+            },
+            "auto": [a for a in data.get("auto", []) if isinstance(a, str)],
+        }
+    except Exception:
+        return {"counts": {}, "auto": []}
+
+
+def _save_usage(usage: dict) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _USAGE_FILE.write_text(json.dumps(usage, indent=2))
+
+
+def _record_visit(path: str) -> None:
+    """Front the recents with ``path``; for a directory, bump its visit count
+    and auto-promote it to a favourite past the threshold (unless it is already
+    a manual favourite)."""
+    try:
+        p = str(Path(path).expanduser().resolve())
+    except OSError:
+        return
+    _save_recent([p] + [x for x in _load_recent() if x != p])
+    try:
+        is_dir = Path(p).is_dir()
+    except OSError:
+        is_dir = False
+    if not is_dir:
+        return
+    usage = _load_usage()
+    counts, auto = usage["counts"], usage["auto"]
+    counts[p] = counts.get(p, 0) + 1
+    if counts[p] >= _AUTOFAV_MIN and p not in auto and p not in _load_favourites():
+        auto.append(p)
+        while len(auto) > _AUTOFAV_MAX:
+            auto.pop(0)
+    _save_usage({"counts": counts, "auto": auto})
+
+
+def _favourite_entries() -> list[dict]:
+    """Manual favourites (``auto: false``) then automatic ones (``auto: true``),
+    existing directories only, de-duplicated."""
+    manual = _load_favourites()
+    out = [{"path": p, "name": Path(p).name or p, "auto": False} for p in manual]
+    for p in _load_usage()["auto"]:
+        if p in manual:
+            continue
+        try:
+            if Path(p).is_dir():
+                out.append({"path": p, "name": Path(p).name or p, "auto": True})
+        except OSError:
+            pass
+    return out
+
+
+@rt("/api/places")
+def api_places():
+    return JSONResponse(
+        {
+            "quick": _quick_places(),
+            "recent": _recent_entries(),
+            "favourites": _favourite_entries(),
+        }
+    )
+
+
+@rt("/api/recent", methods=["post"])
+def api_recent(path: str):
+    """Record a visit (recents + usage/auto-favourite); returns both lists."""
+    _record_visit(path)
+    return JSONResponse(
+        {"recent": _recent_entries(), "favourites": _favourite_entries()}
+    )
+
+
+@rt("/api/favourites", methods=["post"])
+def api_favourites(path: str, action: str = "add"):
+    """Add/remove one directory from the favourites; returns the updated
+    favourite entries (manual + automatic) for the sidebar. Removing an
+    automatic favourite also resets its usage count so it isn't re-promoted at
+    once; manually adding one that was automatic converts it to manual."""
+    try:
+        p = str(Path(path).expanduser().resolve())
+    except OSError:
+        return JSONResponse({"error": "bad path"}, status_code=400)
+    favs = _load_favourites()
+    usage = _load_usage()
+    if action == "remove":
+        favs = [f for f in favs if f != p]
+        if p in usage["auto"]:
+            usage["auto"] = [a for a in usage["auto"] if a != p]
+            usage["counts"][p] = 0
+            _save_usage(usage)
+    elif p not in favs:
+        favs.append(p)
+        if p in usage["auto"]:  # promoted to a manual favourite: de-dup
+            usage["auto"] = [a for a in usage["auto"] if a != p]
+            _save_usage(usage)
+    _save_favourites(favs)
+    return JSONResponse({"favourites": _favourite_entries()})
+
+
+# --- file-picker recursive fuzzy search ---
+
+# A search bails to a confirm prompt once it has visited this many entries
+# without a prior go-ahead (starting a walk at $HOME is otherwise a foot-gun);
+# results are capped so a broad query can't return an unbounded list.
+_SEARCH_CONFIRM_AFTER = 10_000
+_SEARCH_MAX_RESULTS = 300
+# In-flight searches, keyed by the client-supplied id, so /api/search/cancel
+# (running on a separate threadpool thread) can signal the walk to stop.
+_searches: dict[str, threading.Event] = {}
+# Live counts per in-flight search ({scanned, matches}) that the client polls
+# via /api/search/progress to drive the "searching…" counter.
+_search_progress: dict[str, dict] = {}
+
+
+def _fuzzy_score(query: str, name: str) -> int | None:
+    """Case-insensitive subsequence match of ``query`` in ``name``. Returns a
+    score (higher is a better match) or None when it doesn't match at all."""
+    if not query:
+        return 0
+    q = query.lower()
+    n = name.lower()
+    qi = 0
+    score = 0
+    prev = -2
+    for i, ch in enumerate(n):
+        if qi < len(q) and ch == q[qi]:
+            score += 6 if i == prev + 1 else 1  # reward contiguous runs
+            if i == 0:
+                score += 5  # and a match at the very start
+            prev = i
+            qi += 1
+    return score if qi == len(q) else None
+
+
+@rt("/api/search")
+def api_search(dir: str, q: str, id: str, confirm: str = "0"):
+    """Recursively fuzzy-match .py files and folders under ``dir``.
+
+    Runs synchronously in fasthtml's threadpool (so the walk never blocks the
+    event loop) and checks a per-id cancel flag that ``/api/search/cancel``
+    sets. With ``confirm != "1"`` it stops and returns ``needs_confirm`` once
+    it has scanned :data:`_SEARCH_CONFIRM_AFTER` entries, so a huge tree
+    (e.g. $HOME) needs an explicit go-ahead before the full walk.
+    """
+    root = Path(dir).expanduser()
+    if not root.is_dir():
+        return JSONResponse({"error": f"not a directory: {root}"}, status_code=400)
+    root = str(root.resolve())
+    confirmed = confirm == "1"
+    cancel = threading.Event()
+    _searches[id] = cancel
+    _search_progress[id] = {"scanned": 0, "matches": 0}
+    matches: list[tuple[int, str, bool, str]] = []
+    scanned = 0
+    try:
+        stack = [root]
+        while stack:
+            if cancel.is_set():
+                break
+            cur = stack.pop()
+            try:
+                it = os.scandir(cur)
+            except OSError:
+                continue
+            with it:
+                for e in it:
+                    if cancel.is_set():
+                        break
+                    name = e.name
+                    if name.startswith(".") or name == "__pycache__":
+                        continue
+                    scanned += 1
+                    if scanned % 512 == 0:  # cheap live counter for the client
+                        _search_progress[id] = {
+                            "scanned": scanned,
+                            "matches": len(matches),
+                        }
+                    if not confirmed and scanned > _SEARCH_CONFIRM_AFTER:
+                        return JSONResponse({"needs_confirm": True, "scanned": scanned})
+                    try:
+                        is_dir = e.is_dir()
+                    except OSError:
+                        continue
+                    if not is_dir and not (e.is_file() and name.endswith(".py")):
+                        continue
+                    if is_dir:
+                        stack.append(e.path)
+                    sc = _fuzzy_score(q, name)
+                    if sc is not None:
+                        matches.append((sc, e.path, is_dir, name))
+        matches.sort(key=lambda m: (-m[0], len(m[3]), m[1]))
+        truncated = len(matches) > _SEARCH_MAX_RESULTS
+        results = [
+            {
+                "path": p,
+                "name": nm,
+                "is_dir": d,
+                "rel": os.path.relpath(p, root),
+            }
+            for _, p, d, nm in matches[:_SEARCH_MAX_RESULTS]
+        ]
+        return JSONResponse(
+            {
+                "results": results,
+                "truncated": truncated,
+                "scanned": scanned,
+                "cancelled": cancel.is_set(),
+            }
+        )
+    finally:
+        _searches.pop(id, None)
+        _search_progress.pop(id, None)
+
+
+@rt("/api/search/cancel", methods=["post"])
+def api_search_cancel(id: str):
+    ev = _searches.get(id)
+    if ev is not None:
+        ev.set()
+    return JSONResponse({"ok": True})
+
+
+@rt("/api/search/progress")
+def api_search_progress(id: str):
+    """Live {scanned, matches} for an in-flight search (client counter)."""
+    return JSONResponse(_search_progress.get(id, {}))
 
 
 # --- pages ---
@@ -1200,14 +1570,74 @@ def _menu(label: str, *items):
     return Div(Button(label, cls="menu-btn"), Div(*items, cls="menu-items"), cls="menu")
 
 
+def _window_controls():
+    """The min / maximize / close buttons for the native-app titlebar. They
+    call the window controls exposed through ``js_api`` under
+    ``window.pywebview.api`` (see egg/_desktop.py)."""
+    return Div(
+        Button(
+            "−",  # minus sign
+            type="button",
+            aria_label="Minimize",
+            cls="desktop-titlebar__btn",
+            onclick="window.pywebview.api.minimize()",
+        ),
+        Button(
+            "□",  # white square
+            type="button",
+            aria_label="Maximize",
+            cls="desktop-titlebar__btn",
+            onclick="window.pywebview.api.toggle_maximize()",
+        ),
+        Button(
+            "✕",  # multiplication x
+            type="button",
+            aria_label="Close",
+            cls="desktop-titlebar__btn desktop-titlebar__close",
+            onclick="window.pywebview.api.close()",
+        ),
+        cls="desktop-titlebar__controls",
+    )
+
+
+def _titlebar_or_header(desktop: object, *menu_items):
+    """The top toolbar: the same logo + file/view/help dropdowns either way,
+    followed by the filename chip and the pan/zoom hint.
+
+    In an ordinary browser this is the plain app header. In the native
+    (pywebview) app — ``/?desktop=1``, opened by the ``egg-desktop``
+    launcher — it becomes the window titlebar: the menus move into it, and
+    it also carries a drag handle and the window controls. The launcher runs
+    a *frameless* window; dragging the spacer starts a compositor move via
+    ``window.pywebview.api.start_drag`` (wired in app.js), so it works on
+    Wayland too, while the menus and buttons keep their own clicks.
+    """
+    filechip = Span(id="filechip")
+    if not desktop:
+        return Header(*menu_items, filechip)
+    return Header(
+        *menu_items,
+        filechip,
+        # Flex spacer between the menus and the window controls; mousedown
+        # here starts the window drag (see app.js / start_drag).
+        Div(cls="desktop-titlebar__drag"),
+        _window_controls(),
+        cls="desktop-titlebar",
+    )
+
+
 @rt("/")
-async def get(view: str = "grid"):
+async def get(view: str = "grid", desktop: int = 0):
     mode = view if view in ("grid", "topo", "edit") else "grid"
     code, path = _initial_code(), _initial_path()
     scene_r = await _render_scene(code, mode, path)
     return (
         Title("egg webui"),
-        Header(
+        # The top toolbar: the ordinary browser header, or — at /?desktop=1,
+        # opened by the egg-desktop launcher — the native-app titlebar with
+        # the same menus plus window controls.
+        _titlebar_or_header(
+            desktop,
             NotStr(EGG_LOGO),
             _menu(
                 "file",
@@ -1224,24 +1654,34 @@ async def get(view: str = "grid"):
                     "editor); hides the editor pane",
                 ),
                 Div(cls="menu-sep"),
-                Button("export svg", id="file-dl-svg"),
-                Button("export su2", id="file-dl-su2"),
-                Button(
-                    "save net (npz)",
-                    id="file-dl-net",
-                    title="save the last run's control net as an .npz — the "
-                    "escape hatch if the pipeline had no Save stage; a regrid "
-                    "script can resample from it",
+                Div(
+                    Button("export", cls="menu-sub-btn"),
+                    Div(
+                        Button("SVG", id="file-dl-svg"),
+                        Button("SU2", id="file-dl-su2"),
+                        Button(
+                            "control net (npz)",
+                            id="file-dl-net",
+                            title="save the last run's control net as an .npz — the "
+                            "escape hatch if the pipeline had no Save stage; a regrid "
+                            "script can resample from it",
+                        ),
+                        cls="menu-sub-items",
+                    ),
+                    cls="menu-sub",
                 ),
+                # populated + shown by JS after the first export (overwrite in place)
+                Button("export as…", id="file-export-as", style="display:none"),
                 Div(cls="menu-sep"),
                 Button(
-                    "open .eggy…",
+                    "open .eggy archive…",
                     id="file-open-eggy",
-                    title="open a case archive (.eggy): unpack it and load its "
-                    "script — a regrid script can resample from the packed net",
+                    title="open a case archive (.eggy): pick it, then choose a "
+                    "folder to extract it into; a regrid script can resample "
+                    "from the packed net",
                 ),
                 Button(
-                    "save .eggy",
+                    "save .eggy archive…",
                     id="file-save-eggy",
                     title="pack this case (script + its folder, including the "
                     "saved net) into a .eggy archive to share or regrid",
@@ -1325,9 +1765,12 @@ async def get(view: str = "grid"):
                     "docs not built — uv sync --group docs, then restart egg-webui",
                     cls="menu-note",
                 ),
+                Button(
+                    "report a problem",
+                    id="help-report",
+                    data_url="https://github.com/bezmi/egg/issues",
+                ),
             ),
-            Span(id="filechip"),
-            Span("scroll or pinch to zoom, drag to pan, hover for names", cls="hint"),
         ),
         Div(
             Div(
@@ -1393,8 +1836,63 @@ async def get(view: str = "grid"):
                     Button("cancel", id="fs-cancel"),
                     cls="fs-head",
                 ),
-                Div(id="fs-dir", cls="fs-path"),
-                Div(id="fs-list"),
+                # editable current-path bar + favourite toggle for this folder
+                Div(
+                    Input(
+                        id="fs-path",
+                        cls="fs-path-input",
+                        autocomplete="off",
+                        spellcheck="false",
+                        placeholder="/path/to/folder",
+                        title="type a path and press Enter to jump there",
+                    ),
+                    Button(
+                        "☆",
+                        id="fs-fav",
+                        cls="fs-fav",
+                        title="add this folder to favourites",
+                    ),
+                    cls="fs-pathrow",
+                ),
+                Div(
+                    Input(
+                        id="fs-search",
+                        cls="fs-search",
+                        autocomplete="off",
+                        spellcheck="false",
+                        placeholder="Search this directory",
+                    ),
+                    Select(
+                        Option("name A–Z", value="az"),
+                        Option("name Z–A", value="za"),
+                        id="fs-sort",
+                        title="sort order",
+                    ),
+                    cls="fs-searchrow",
+                ),
+                # deep-search confirm prompt (shown once a walk gets large)
+                Div(
+                    Span(id="fs-confirm-text"),
+                    Div(
+                        Button("keep searching", id="fs-confirm-go", cls="primary"),
+                        Button("stop", id="fs-confirm-stop"),
+                        cls="fs-actions",
+                    ),
+                    id="fs-confirm",
+                    cls="fs-note",
+                ),
+                # live "searching…" indicator with a cancel button
+                Div(
+                    Span("searching…", id="fs-searching-text"),
+                    Button("stop", id="fs-search-stop"),
+                    id="fs-searching",
+                    cls="fs-note",
+                ),
+                Div(
+                    Div(id="fs-sidebar", cls="fs-sidebar"),
+                    Div(id="fs-list"),
+                    cls="fs-main",
+                ),
                 Div(
                     Input(id="fs-name", placeholder="filename.py", autocomplete="off"),
                     Button("save", id="fs-do-save", cls="primary"),
@@ -1403,6 +1901,19 @@ async def get(view: str = "grid"):
                 cls="fs-box",
             ),
             id="fsmodal",
+        ),
+        # generic yes/no confirm (overwrite prompts); JS drives it as a promise
+        Div(
+            Div(
+                Div(Span(id="cf-text"), cls="cf-body"),
+                Div(
+                    Button("cancel", id="cf-no"),
+                    Button("ok", id="cf-yes", cls="primary"),
+                    cls="fs-actions",
+                ),
+                cls="fs-box cf-box",
+            ),
+            id="cfmodal",
         ),
         Div(
             Div(
