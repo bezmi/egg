@@ -1180,6 +1180,57 @@ async def export_su2_route(code: str, path: str = "", out: str = "", sid: str = 
     return _write_out(out, text)
 
 
+@rt("/export/lmr", methods=["post"])
+async def export_lmr_route(
+    code: str, path: str = "", out: str = "", sid: str = "", overwrite: str = ""
+):
+    """Write the current mesh as gdtk/Eilmer lmr structured blocks + grid.lua into
+    the chosen directory ``out`` — the last smoothed grid if the script hasn't
+    changed since that run (straight from the resident grid, no exec), else a
+    fresh TFI-initialized one built in the render worker. Multi-file, so the
+    export writes the files itself rather than returning text.
+
+    Refuses (409 ``conflict``) to overwrite a directory that already holds an
+    export unless ``overwrite`` is set, so a hand-edited grid.lua is not
+    silently clobbered."""
+    if not out:
+        return JSONResponse({"error": "no destination chosen"}, status_code=400)
+    try:
+        out_dir = str(canonical_path(out))
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": f"bad destination: {exc}"}, status_code=400)
+    force = overwrite.strip().lower() in ("1", "true", "yes", "on")
+    if not force and os.path.exists(os.path.join(out_dir, "grid.lua")):
+        return JSONResponse(
+            {
+                "conflict": True,
+                "message": "This folder already contains an exported grid "
+                "(grid.lua).",
+            },
+            status_code=409,
+        )
+    last = _session(sid)["last"]
+    if last["harvest"] is not None and last["code"] == code:
+        h = last["harvest"]
+        if h.grid is None:
+            return JSONResponse({"error": "no grid to export"}, status_code=400)
+        try:
+            from egg.io.lmr import export_lmr, untagged_external_faces
+
+            written = export_lmr(h.grid, out_dir, overwrite=True)
+            untagged = untagged_external_faces(h.grid)
+        except Exception as exc:
+            return JSONResponse({"error": f"export failed: {exc}"}, status_code=400)
+    else:
+        payload, why = await asyncio.wrap_future(
+            _render_worker.lmr(code, out_dir, path, timeout=120.0, sid=sid)
+        )
+        if payload is None:
+            return JSONResponse({"error": why}, status_code=400)
+        written, untagged = payload["written"], payload["untagged"]
+    return JSONResponse({"path": out_dir, "files": len(written), "untagged": untagged})
+
+
 @rt("/export/svg", methods=["post"])
 def export_svg_route(svg: str, out: str = ""):
     """Write the client-serialized scene SVG to ``out`` (the SVG is built in the
@@ -2117,6 +2168,13 @@ async def get(view: str = "grid", desktop: int = 0):
                     Div(
                         Button("SVG", id="file-dl-svg"),
                         Button("SU2", id="file-dl-su2"),
+                        Button(
+                            "gdtk grid (Eilmer)",
+                            id="file-dl-lmr",
+                            title="write the current mesh as gdtk/Eilmer lmr "
+                            "structured blocks plus a grid.lua for prep-grid; pick "
+                            "a folder to write them into",
+                        ),
                         Button(
                             "control net (npz)",
                             id="file-dl-net",

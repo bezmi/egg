@@ -991,6 +991,7 @@ document.addEventListener('click', async (e) => {
   // nothing under pywebview): pick a destination, the server writes it.
   if (e.target.closest('#dl-svg, #file-dl-svg')) exportPick('svg');
   if (e.target.closest('#dl-su2, #file-dl-su2')) exportPick('su2');
+  if (e.target.closest('#file-dl-lmr')) exportLmrPick();
   if (e.target.closest('#file-dl-net')) exportPick('net');
   if (e.target.closest('#file-export-as')) {   // re-run the last export, overwrite
     const le = eggGetLastExport();
@@ -1554,26 +1555,66 @@ function exportPick(kind) {
     confirmOverwrite: true, onSave: (out) => runExport(kind, out),
   });
 }
+// lmr is multi-file (per-block grids + grid.lua), so it writes into a folder
+// (dest/name) rather than a single file — pick the folder like .eggy extract.
+function exportLmrPick() {
+  const base = curFile ? baseOf(curFile).replace(/\.[^.]+$/, '') : 'grid';
+  fsShow({
+    mode: 'save', title: 'export lmr grid into folder', ext: '*',
+    defaultName: (base || 'grid') + '-lmr', namePlaceholder: 'folder name',
+    onSave: (out) => runExport('lmr', out),
+  });
+}
 async function runExport(kind, out) {
   if (await doExport(kind, out)) eggSetLastExport(kind, out);
 }
-async function doExport(kind, out) {
+async function doExport(kind, out, overwrite) {
   let url, body;
   if (kind === 'svg') {
     const svg = serializeSceneSvg();
     if (!svg) { eggAlert('nothing to export yet (render a scene first)'); return false; }
     url = '/export/svg'; body = {svg, out};
   } else {
-    // su2/net export from this session's last run -> send the sid
-    url = kind === 'su2' ? '/export/su2' : '/export/net';
+    // su2/net/lmr export from this session's last run -> send the sid
+    url = kind === 'su2' ? '/export/su2'
+        : kind === 'lmr' ? '/export/lmr' : '/export/net';
     body = {code: currentCode(), path: document.getElementById('scriptpath').value,
             out, sid: eggSessionId()};
+    if (kind === 'lmr' && overwrite) body.overwrite = 'true';
   }
   const r = await fetch(url, {method: 'POST', body: new URLSearchParams(body)});
   let j = null; try { j = await r.json(); } catch (err) { /* non-JSON error */ }
+  // lmr writes into a folder; if one already holds an export, confirm before
+  // clobbering a possibly hand-edited grid.lua, then retry forcing overwrite.
+  if (kind === 'lmr' && r.status === 409 && j && j.conflict) {
+    const ok = await eggConfirm(
+      (j.message || 'This folder already contains an exported grid.')
+      + ' Overwrite it?', 'overwrite');
+    if (!ok) return false;
+    return doExport(kind, out, true);
+  }
   if (!r.ok || !j || j.error) { eggAlert((j && j.error) || 'export failed'); return false; }
   fsRecordRecent(j.path || out);
+  if (kind === 'lmr' && j.untagged && j.untagged.length) eggWarnUntagged(j.untagged);
   return true;
+}
+// The lmr export tags every external face; ones egg couldn't name from the
+// topology get an egg-untagged-N marker (faces on the same geometry share one,
+// faces with no geometry get one per block edge). Tell the user which faces so
+// they can map the markers in their sim bcDict.
+function eggWarnUntagged(groups) {
+  const MAX = 12;
+  const shown = groups.slice(0, MAX).map((g) => {
+    const where = g.faces.map((f) => f.block + ':' + f.face).join(', ');
+    const geo = g.geometry ? 'geometry "' + g.geometry + '"' : 'block edge (no geometry)';
+    return g.tag + '  (' + geo + ')\n    ' + where;
+  });
+  if (groups.length > MAX) shown.push('...and ' + (groups.length - MAX) + ' more');
+  eggAlert(
+    groups.length + ' external face group' + (groups.length === 1 ? '' : 's')
+    + ' had no boundary tag. Each was exported under an egg-untagged-N marker '
+    + '(faces on the same geometry share one). Define these in your sim '
+    + 'bcDict:\n\n' + shown.join('\n\n'));
 }
 // Serialize the live scene SVG standalone (embed the page CSS so the file
 // carries its own flavor), same as the old client-side download did.

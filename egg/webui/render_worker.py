@@ -78,6 +78,7 @@ _FAIL = {
     "render": _error_result,
     "suggest": lambda msg: None,
     "su2": lambda msg: (None, msg),
+    "lmr": lambda msg: (None, msg),
     "validate": lambda msg: [
         {"kind": "worker_error", "msg": msg, "where": [], "xy": None}
     ],
@@ -121,6 +122,13 @@ class RenderWorker:
         """Exec + export the script's grid as SU2 text. Resolves to
         ``(text, "")`` or ``(None, reason)``."""
         return self._submit("su2", code, "", path, timeout, sid)
+
+    def lmr(self, code: str, out_dir: str, path: str = "",
+            timeout: float | None = None, sid: str = "") -> Future:
+        """Exec + export the script's grid as lmr blocks + grid.lua into
+        ``out_dir`` (carried in the mode slot). Resolves to
+        ``({"written", "untagged"}, "")`` or ``(None, reason)``."""
+        return self._submit("lmr", code, out_dir, path, timeout, sid)
 
     def validate(
         self, code: str, blocking: dict, path: str = "", timeout: float | None = None,
@@ -251,6 +259,7 @@ def main() -> None:
 
     from .scene import (
         build_scene,
+        lmr_export_to_dir,
         su2_export_text,
         validate_blocking,
         webui_block_suggestion,
@@ -268,6 +277,7 @@ def main() -> None:
         "render": lambda code, mode, path: build_scene(code, mode=mode, path=path),
         "suggest": lambda code, mode, path: webui_block_suggestion(code, path),
         "su2": lambda code, mode, path: su2_export_text(code, path),
+        "lmr": lambda code, mode, path: lmr_export_to_dir(code, mode, path),
         "validate": lambda code, mode, path: validate_blocking(
             code, json.loads(mode), path
         ),

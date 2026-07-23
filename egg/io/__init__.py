@@ -13,10 +13,13 @@ from egg.io.control_net import (
     save_control_net,
     try_load_control_net,
 )
+from egg.io.lmr import export_lmr, untagged_external_faces
 from egg.io.su2 import export_su2
 
 __all__ = [
     "eggy",
+    "export_lmr",
+    "untagged_external_faces",
     "export_su2",
     "save_control_net",
     "load_control_net",

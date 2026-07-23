@@ -106,6 +106,22 @@ def test_su2_export_runs_in_the_worker(worker):
     assert text is None and "no grid" in why
 
 
+def test_lmr_export_runs_in_the_worker(worker, tmp_path):
+    out = str(tmp_path / "lmrgrid")
+    payload, why = worker.lmr(GRID_SCRIPT, out).result(timeout=120)
+    assert why == "" and payload is not None
+    import os
+
+    names = os.listdir(out)
+    assert "grid.lua" in names
+    assert any(n.startswith("block-") for n in names)
+    assert isinstance(payload["written"], list) and payload["written"]
+    assert isinstance(payload["untagged"], list)  # marker groups (may be empty)
+    # failure comes back as a reason, not an exception
+    payload, why = worker.lmr("x = 1", str(tmp_path / "empty")).result(timeout=60)
+    assert payload is None and "no grid" in why
+
+
 def test_validate_blocking_runs_in_the_worker(worker):
     code = (
         "from egg.topology import ExplicitTopology, editable\n"

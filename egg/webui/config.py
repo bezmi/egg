@@ -78,6 +78,12 @@ DEFAULTS: dict[str, Any] = {
         # how many previous run logs to keep (older ones are pruned)
         "keep": 10,
     },
+    "export": {
+        # Prepend a short "how to run this in lmr" comment block to an exported
+        # gdtk/Eilmer grid.lua (prep-grid/prep-gas/prep-sim steps, bcDict hint).
+        # Set false to emit just the registration calls.
+        "lmr_grid_lua_instructions": True,
+    },
     "experimental": {
         # Developer-only: skip the per-launch auth token, so any local client
         # can reach the server without it. This removes the main protection on

@@ -878,6 +878,38 @@ def su2_export_text(code: str, path: str | None = None) -> tuple[str | None, str
         return None, f"export failed: {exc}"
 
 
+def lmr_export_to_dir(
+    code: str, out_dir: str, path: str | None = None
+) -> tuple[dict | None, str]:
+    """Exec ``code`` and export its grid as lmr structured blocks + grid.lua.
+
+    Writes the per-block grid files and ``grid.lua`` into ``out_dir`` and
+    returns ``({"written": [...], "untagged": [...]}, "")`` on success,
+    ``(None, reason)`` otherwise. ``untagged`` reports the ``egg-untagged-N``
+    marker groups (empty when every external face is tagged) so the UI can warn.
+    Multi-file, so it writes directly rather than returning text; the registered
+    run's grid wins over a harvested one, mirroring what the view shows. Execs
+    the script — call it in a worker process.
+    """
+    ns, _out, err = exec_script(code, path)
+    if err is not None:
+        return None, f"script error:\n{err}"
+    h = harvest(ns)
+    if (reg := ns.get("__egg_webui_run__")) is not None:
+        h.grid = reg[0]
+    if h.grid is None:
+        return None, "no grid to export"
+    try:
+        from egg.io.lmr import export_lmr, untagged_external_faces
+
+        # The /export/lmr route already gates the overwrite conflict, so write
+        # unconditionally here.
+        written = export_lmr(h.grid, out_dir, overwrite=True)
+        return {"written": written, "untagged": untagged_external_faces(h.grid)}, ""
+    except Exception as exc:
+        return None, f"export failed: {exc}"
+
+
 def _iter_named(ns: dict | list, depth: int = HARVEST_DEPTH, prefix: str = ""):
     """Yield (name, obj) for values, recursing ``depth`` levels into containers."""
     items = (

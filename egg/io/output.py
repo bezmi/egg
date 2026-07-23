@@ -11,8 +11,10 @@
 Currently supported formats:
 
 - SU2 native ASCII (:func:`egg.io.su2.export_su2`)
+- gdtk/Eilmer lmr structured grids (:func:`egg.io.lmr.export_lmr`)
 """
 
+from egg.io.lmr import export_lmr
 from egg.io.su2 import export_su2
 
-__all__ = ["export_su2"]
+__all__ = ["export_lmr", "export_su2"]
