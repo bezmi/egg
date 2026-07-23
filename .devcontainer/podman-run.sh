@@ -185,6 +185,7 @@ if [ "$#" -gt 1 ]; then
 	exec "${run[@]}" "$IMAGE" "${@:2}"
 fi
 # Default: seed $HOME with default dotfiles (if missing), run the editable build
-# (uv sync), then open the shell — all in /egg-workspace. uv sync is best-effort so a
-# failure (e.g. offline) still drops you into the shell.
-exec "${run[@]}" "$IMAGE" zsh -c 'seed-home; cd /egg-workspace; uv sync; egg-prewarm; exec zsh'
+# (uv sync, with the web UI / desktop app and CAD import groups), then open the
+# shell — all in /egg-workspace. uv sync is best-effort so a failure (e.g.
+# offline) still drops you into the shell.
+exec "${run[@]}" "$IMAGE" zsh -c 'seed-home; cd /egg-workspace; uv sync --group ui --group cad; egg-prewarm; exec zsh'
