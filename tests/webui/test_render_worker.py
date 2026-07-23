@@ -126,12 +126,14 @@ def test_validate_blocking_runs_in_the_worker(worker):
         ],
         "res": 3,
     }
-    assert worker.validate(code, good).result(timeout=120) == []  # green
+    green = worker.validate(code, good).result(timeout=120)
+    assert green["diagnostics"] == []
+    assert green["edge_res"]  # loop-propagated per-edge resolutions ride along
     bad = {
         "nodes": {"a": {"xy": [0, 0]}, "b": {"xy": [1, 0]}, "c": {"xy": [0.5, 1]}},
         "edges": [{"a": "a", "b": "b"}, {"a": "b", "b": "c"}, {"a": "c", "b": "a"}],
     }
-    red = worker.validate(code, bad).result(timeout=60)
+    red = worker.validate(code, bad).result(timeout=60)["diagnostics"]
     assert red and red[0]["kind"] in ("non_quad_face", "no_blocks")
 
 

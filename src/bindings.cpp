@@ -846,12 +846,15 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         g2s[g] = it->second;
     }
 
-    // Spare ghost-ring slots per block, for foreign patch nodes (singular fans).
-    // A few of a singular node's fan neighbours cross non-axis-aligned interfaces,
-    // so they are not in any face-ghost slot; we mirror each into an otherwise
-    // unused ghost-ring slot of the owner block and refresh it every sweep from the
-    // node's owner interior (frozen halo). The pool excludes interior slots (never
-    // on the ring) and the regular face-ghost destinations.
+    // Spare ghost-ring slots per block, for foreign patch nodes (singular fans,
+    // constrained corner DOFs with diagonal cross-block neighbours). Such nodes
+    // cross non-axis-aligned interfaces, so they are not in any face-ghost slot;
+    // we mirror each into an otherwise unused ghost-ring slot of the owner block
+    // and refresh it every sweep from the node's owner interior (frozen halo).
+    // The pool excludes interior slots (never on the ring) and the regular
+    // face-ghost destinations. It is a best-effort locality optimization, not a
+    // capacity limit: when a block's ring is full, `lookup` below appends
+    // overflow nodes past the last block instead.
     std::vector<std::unordered_set<int>> used_ghost(num_blocks);
     for (std::size_t e = 0; e < halo_dst_block.size(); ++e) {
         used_ghost[static_cast<std::size_t>(halo_dst_block[e])].insert(
@@ -889,10 +892,13 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
     }
 
     std::vector<std::size_t> fan_src_off, fan_dst_off;
+    std::size_t n_overflow = 0;
 
     // Remap one global node id relative to block b's interior-or-ghost map. A node
-    // outside it is a singular-fan neighbour: allocate it a spare ghost slot in b,
-    // sourced from its owner interior, and record the extra halo copy.
+    // outside it is a singular-fan / foreign patch neighbour: mirror it into a
+    // spare ghost slot of b — or, when b's ring is full, an overflow node appended
+    // past the last block — sourced from its owner interior, and record the extra
+    // halo copy.
     auto lookup = [&](std::size_t b, int gid, const char* what) -> int {
         const auto it = block_map[b].find(gid);
         if (it != block_map[b].end()) { return it->second; }
@@ -902,12 +908,22 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
                                         " references global node " + std::to_string(gid) +
                                         " absent from every block's interior map");
         }
-        if (free_cursor[b] >= free_ghosts[b].size()) {
-            throw std::invalid_argument(
-              "structured: block " + std::to_string(b) +
-              " ran out of spare ghost slots for singular-fan / foreign patch nodes");
+        int slot = 0;
+        if (free_cursor[b] < free_ghosts[b].size()) {
+            slot = free_ghosts[b][free_cursor[b]++];
+        } else {
+            // Ring exhausted: grow the store instead of failing. The slot is
+            // reachable only through the tables built here, so appending past
+            // the last block is safe; seed it with the owner's coordinates
+            // (the fan broadcast refreshes it every sweep regardless).
+            slot = static_cast<int>(Xp.size() / static_cast<std::size_t>(D));
+            std::array<egg::real, D> seed {};
+            for (int k = 0; k < D; ++k) {
+                seed[static_cast<std::size_t>(k)] = Xp[(static_cast<std::size_t>(src) * D) + k];
+            }
+            Xp.insert(Xp.end(), seed.begin(), seed.end());
+            ++n_overflow;
         }
-        const int slot = free_ghosts[b][free_cursor[b]++];
         block_map[b][gid] = slot;
         fan_src_off.push_back(static_cast<std::size_t>(src) * D);
         fan_dst_off.push_back(static_cast<std::size_t>(slot) * D);
@@ -965,8 +981,17 @@ StructuredRemap<D> apply_structured_remap(egg::SweepContextHostT<D>& host,
         }
     }
 
+    // Register any overflow nodes the lookup appended, so every consumer sized
+    // off the layout (device X, metric scratch, gather-back staging, control
+    // work buffers) covers them.
+    layout.add_overflow_nodes(n_overflow);
+    if (Xp.size() != layout.total_reals()) {
+        throw std::logic_error("structured: packed X size disagrees with the layout");
+    }
+
     host.X = std::move(Xp);
     host.num_nodes = layout.total_reals() / static_cast<std::size_t>(D);
+    host.num_overflow = n_overflow;
 
     // Flatten the block layout into node-unit arrays the device synthesis reads
     // (block base + padded node strides per block). Doubles/D are exact: a block

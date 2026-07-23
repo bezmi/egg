@@ -1096,6 +1096,12 @@ function eggEditInit() {
   const bg = data.base || {nodes: {}, edges: []};
   eggEd.baseGraph = {nodes: new Map(Object.entries(bg.nodes || {})),
                      edges: bg.edges || []};
+  // loop-propagated per-edge resolutions from the source flatten; a dirty
+  // buffer gets fresh ones from the validate below
+  if (!eggEd.effRes) {
+    eggEd.effRes = data.edge_res || null;
+    eggEd.resClasses = data.res_classes || null;
+  }
   eggEnsureControls();
   eggEditRender();
   if (eggEd.dirty) eggValidate();
@@ -1148,10 +1154,24 @@ function eggEnsureControls() {
     sel.title = 'assign the selected edge / nodes to a geometry curve (F pins a node)';
     sel.addEventListener('change', () => {
       const v = sel.value;
-      if (v) eggBindSelection(v === '__none__' ? null : v);
+      if (v === '__fix__') eggSetFixed(true);
+      else if (v === '__unfix__') eggSetFixed(false);
+      else if (v) eggBindSelection(v === '__none__' ? null : v);
       sel.value = '';
     });
     bar.insertBefore(sel, bar.firstChild);
+  }
+  if (!document.getElementById('ed-snap')) {
+    const sb = document.createElement('button');
+    sb.id = 'ed-snap';
+    sb.textContent = eggSnap ? 'snap: on' : 'snap: off';
+    sb.title = 'snap newly placed nodes onto a nearby geometry curve and bind '
+             + 'them to it (off: nodes place freely; use bind to… to attach)';
+    sb.addEventListener('click', () => {
+      eggSnap = !eggSnap;
+      sb.textContent = eggSnap ? 'snap: on' : 'snap: off';
+    });
+    bar.insertBefore(sb, bar.firstChild);
   }
   eggRefreshBindOptions();
 }
@@ -1161,9 +1181,14 @@ function eggRefreshBindOptions() {
   const labels = (eggEd.geometry || []).map((g) => g.label);
   sel.innerHTML = '<option value="">bind to…</option>'
     + labels.map((l) => `<option value="${l}">${l}</option>`).join('')
+    + '<option value="__fix__">— FIX in place —</option>'
+    + '<option value="__unfix__">— UNFIX —</option>'
     + '<option value="__none__">— unbind —</option>';
 }
 let eggAuto = false;
+// place-time geometry snapping — off by default: a click near a curve places a
+// free node; the snap toggle (or the bind to… dropdown) opts into binding
+let eggSnap = false;
 // "save edits writes straight to the file" — off by default (so a watched file
 // is never modified without consent), remembered for the session, reset on load
 let eggWriteThrough = false;
@@ -1316,9 +1341,8 @@ function eggIsFixedNode(id) {
   const bn = eggEd.baseGraph && eggEd.baseGraph.nodes.get(id);
   return !!(bn && bn.fixed);
 }
-function eggToggleFixed() {  // F: pin / unpin the selected nodes
+function eggSetFixed(target) {  // pin / unpin the selected nodes explicitly
   if (!eggEd || !eggEd.selN.size) return;
-  const target = ![...eggEd.selN].every(eggIsFixedNode);  // all fixed -> unfix
   for (const id of eggEd.selN) {
     eggPromoteAny(id);
     const n = eggEd.nodes.get(id);
@@ -1326,18 +1350,32 @@ function eggToggleFixed() {  // F: pin / unpin the selected nodes
   }
   eggEditChanged();
 }
+function eggToggleFixed() {  // F: pin / unpin the selected nodes
+  if (!eggEd || !eggEd.selN.size) return;
+  eggSetFixed(![...eggEd.selN].every(eggIsFixedNode));  // all fixed -> unfix
+}
 function eggSetOn(id, label) {
   eggPromoteAny(id);
   const n = eggEd.nodes.get(id);
   if (n) n.on = label ? [label] : [];
 }
+function eggAddOn(id, label) {  // additive: a junction node keeps its other curves
+  eggPromoteAny(id);
+  const n = eggEd.nodes.get(id);
+  if (n && !(n.on || []).includes(label)) n.on = [...(n.on || []), label];
+}
 // assign the selection to a geometry curve (declarative associate): a selected
-// edge becomes a block face on the curve; nodes get bound to it
+// edge becomes a block face on the curve; its endpoints gain the curve on top
+// of any they already carry (a node on two curves is a pinned junction), while
+// a directly selected node is set to exactly this curve
 function eggBindSelection(label) {
   if (!eggEd || (!eggEd.selN.size && !eggEd.selE.size)) return;
   for (const ek of eggEd.selE) {
     const e = eggEd.edges.find((x) => eggEK(x.a, x.b) === ek);
-    if (e) { e.bind = label || null; eggSetOn(e.a, label); eggSetOn(e.b, label); }
+    if (!e) continue;
+    e.bind = label || null;
+    if (label) { eggAddOn(e.a, label); eggAddOn(e.b, label); }
+    else { eggSetOn(e.a, null); eggSetOn(e.b, null); }
   }
   for (const id of eggEd.selN) eggSetOn(id, label);
   eggEditChanged();
@@ -1423,7 +1461,10 @@ function eggMakeCoincident() {
 // set resolution: cell count along the selected edge(s). Because opposite faces
 // of a block share a resolution (and shared faces link blocks), the flatten
 // propagates one setting around the whole loop — so the user sets one edge and
-// every edge that must stay consistent follows. A blocking edge stores it inline;
+// every edge that must stay consistent follows. The modal opens at the edge's
+// EFFECTIVE (loop-propagated) value, and applying a new one also rewrites any
+// stale explicit override elsewhere in the loop, so no old driver lingers to
+// fight it via the flatten's max() rule. A blocking edge stores it inline;
 // a base edge gets a res-only blocking edge (no cut, no re-block). Opens a themed
 // input (not a browser prompt), applied on 'set'/Enter, dismissed on cancel/Esc.
 let eggResPending = null;  // selE snapshot awaiting the res modal
@@ -1431,6 +1472,7 @@ function eggSetEdgeRes() {
   if (!eggEd || !eggEd.selE.size) return;
   let cur = null;
   for (const ek of eggEd.selE) {
+    if (eggEd.effRes && eggEd.effRes[ek]) { cur = eggEd.effRes[ek]; break; }
     const fe = eggEd.edges.find((e) => eggEK(e.a, e.b) === ek);
     if (fe && fe.res) { cur = fe.res; break; }
   }
@@ -1452,6 +1494,20 @@ function eggResApply() {
       if (fe) { fe.res = n; continue; }
       const [a, b] = ek.split('|');  // an uncut base edge -> res-only override
       eggEd.edges.push({a, b, bind: null, base: null, res: n});
+    }
+    // Propagate through the touched loops: rewrite other explicit overrides
+    // in the same class, and update the effective map optimistically so the
+    // hover text is right before the next validate round-trip lands.
+    if (eggEd.resClasses) {
+      for (const cls of eggEd.resClasses) {
+        if (!cls.some((k) => eggResPending.has(k))) continue;
+        for (const k of cls) {
+          if (eggEd.effRes) eggEd.effRes[k] = n;
+          if (eggResPending.has(k)) continue;
+          const fe = eggEd.edges.find((e) => eggEK(e.a, e.b) === k);
+          if (fe && fe.res) fe.res = n;
+        }
+      }
     }
     eggEditChanged();
   }
@@ -1632,11 +1688,13 @@ function eggMoveNodes() {
 //   plain drag on item  -> move that node/edge; on empty -> pan
 //   shift|ctrl click    -> toggle-select the item under the cursor
 //   shift|ctrl drag     -> rubber-band box select
-//   middle button       -> always pan (not grabbed here)
+//   middle/right button -> always pan (not grabbed here; right-click rename
+//                          rides the contextmenu event)
 function eggEdPointerDown(e) {
   const svg = svgEl();
   if (!svg || !eggEd || !svg.getScreenCTM()) return;
-  if (e.pointerType === 'mouse' && e.button === 1) return;  // middle -> pan
+  if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2))
+    return;  // middle/right -> pan
   const vb = eggClientVB(svg, e.clientX, e.clientY);
   if (!vb) return;
   const [wx, wy] = eggV2W(svg, vb[0], vb[1]);
@@ -1781,14 +1839,16 @@ function eggRenameNode(id) {
   eggEditChanged();
 }
 document.addEventListener('contextmenu', (e) => {
+  if (!(e.target instanceof Element) || !e.target.closest('.canvas')) return;
+  e.preventDefault();  // right button is a pan gesture on the canvas, not a menu
   if (!eggEd) return;
   const svg = svgEl();
-  if (!svg || !svg.getScreenCTM() || !e.target.closest('.canvas')) return;
+  if (!svg || !svg.getScreenCTM()) return;
   const vb = eggClientVB(svg, e.clientX, e.clientY);
   if (!vb) return;
   const [wx, wy] = eggV2W(svg, vb[0], vb[1]);
   const node = eggPickNode(svg, wx, wy, 16 / svg.getScreenCTM().a);
-  if (node && eggIsBlockingNode(node)) { e.preventDefault(); eggRenameNode(node); }
+  if (node && eggIsBlockingNode(node)) eggRenameNode(node);
 });
 // place / snap a node at a click (existing node, edge split, curve, or free)
 function eggPlaceNode(svg, vb, wx, wy, coarse, maxD) {
@@ -1804,7 +1864,8 @@ function eggPlaceNode(svg, vb, wx, wy, coarse, maxD) {
   if (be)  // base block edge -> cut it into two editable sub-edges
     return eggCutBaseEdge(be.a, be.b, be.curve, be.xy);
   const target = 'u' + (eggEd.seq++);
-  const hit = eggPickCurve(svg, vb, coarse ? 24 : 12);  // snap+bind to a curve
+  // snap+bind to a curve only when the snap toggle is on
+  const hit = eggSnap ? eggPickCurve(svg, vb, coarse ? 24 : 12) : null;
   if (hit) eggEd.nodes.set(target, {xy: hit.xy, split: null, on: [hit.label]});
   else eggEd.nodes.set(target, {xy: [wx, wy], split: null, on: []});
   return target;
@@ -1898,6 +1959,11 @@ function eggValidate() {
     try {
       const res = await fetch('/api/topo/validate', {method: 'POST', body});
       const j = await res.json();
+      // effective per-edge resolution + the loop classes that must share one,
+      // from the flatten — so hover text and the res modal show the value an
+      // edge actually grids at, not just its own stored override
+      eggEd.effRes = j.edge_res || null;
+      eggEd.resClasses = j.res_classes || null;
       eggShowValidity(j.diagnostics || []);
     } catch (e) {}
   }, 350);
@@ -1953,7 +2019,10 @@ function eggEdgeDesc(ek) {
   let s = (isBase ? 'base edge ' : 'edge ') + p[0] + '–' + p[1];
   const bind = (fe && fe.bind) || curve;
   if (bind) s += ' · projected onto ' + bind;
-  if (fe && fe.res) s += ' · ' + fe.res + ' cells';
+  // effective (loop-propagated) resolution first; a stored override is only
+  // shown raw while the blocking is invalid and no flatten result exists
+  const r = (eggEd.effRes && eggEd.effRes[ek]) || (fe && fe.res);
+  if (r) s += ' · ' + r + ' cells' + (fe && fe.res ? '' : ' (shared)');
   return s;
 }
 function eggHoverInfo(svg, vb, wx, wy) {

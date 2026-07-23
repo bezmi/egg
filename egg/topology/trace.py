@@ -154,6 +154,7 @@ def trace_topology(
     res: int = 10,
     snap_tol: float | None = None,
     declared_curves: dict[int, set[str]] | None = None,
+    declared_edge_curves: dict[frozenset, str] | None = None,
     node_names: Sequence[str] | None = None,
     seed_builder: TopologyBuilder | None = None,
     base_edges: set[frozenset[int]] | None = None,
@@ -185,6 +186,11 @@ def trace_topology(
         Node index -> curve labels the node is *declared* to follow, merged
         with the proximity result. Lets a schematic (non-coincident) corner
         bind to a curve it is not drawn on top of.
+    declared_edge_curves
+        ``frozenset((i, j))`` -> curve label an edge is *explicitly* bound
+        to. An explicit bind always outranks the proximity inference (close
+        parallel curves are inside each other's snap tolerance, so
+        proximity alone can pick a neighbour).
     node_names
         Name per node index; base corners keep their names so new blocks
         connect to them. Defaults to ``n{index}``.
@@ -218,7 +224,164 @@ def trace_topology(
     else:
         snap = snap_tol
 
-    # --- angular adjacency for planar-face tracing -----------------------
+    # --- geometry association helpers ------------------------------------
+    ent_by_label = {lbl: ent for lbl, ent, _ in geometry}
+    closed_by_label = {lbl: cl for lbl, _ent, cl in geometry}
+    # carry the label onto the entity so the built topology's `entities` map
+    # (and, downstream, rendering/export) sees the same names the blocking binds by
+    for lbl, ent in ent_by_label.items():
+        if getattr(ent, "name", None) is None:
+            try:
+                ent.name = lbl
+            except AttributeError:
+                pass
+
+    def curves_on(p: np.ndarray) -> set[str]:
+        hits = set()
+        for lbl, ent, _ in geometry:
+            q = np.asarray(ent.project(p), dtype=float)[:2]
+            if np.linalg.norm(p - q) <= snap:
+                hits.add(lbl)
+        return hits
+
+    # Proximity membership only serves graphs with no declarations at all: a
+    # drawing that declares its attachments (node `on` lists, edge binds) is
+    # the whole truth, and a free node must stay free — the snap distance
+    # dwarfs the node spacing in a dense region (a curve threading a cluster
+    # of free nodes would capture and snap them onto itself, collapsing
+    # nodes collinear and threading edges exactly through them, which breaks
+    # the planar face trace).
+    declared_mode = bool(declared_curves) or bool(declared_edge_curves)
+    node_curves = {
+        i: (set() if declared_mode else curves_on(pos[i])) for i in range(len(pos))
+    }
+    if declared_curves:
+        for i, labels in declared_curves.items():
+            if 0 <= i < len(pos):
+                node_curves[i] |= set(labels)
+
+    def edge_curve(i: int, j: int) -> str | None:
+        # An explicitly bound edge follows its declared curve; otherwise a
+        # block edge follows a curve iff both its ends lie on that curve.
+        if declared_edge_curves:
+            lbl = declared_edge_curves.get(frozenset((i, j)))
+            if lbl is not None and lbl in ent_by_label:
+                return lbl
+        common = node_curves[i] & node_curves[j]
+        if not common:
+            return None
+        if len(common) == 1:
+            return next(iter(common))
+        # Tie-break on the endpoint feet, not the chord midpoint: the chord
+        # of a long curved edge sags by more than the gap between close
+        # parallel curves (a shock band), so the midpoint lands nearest the
+        # wrong one, while the endpoints lie (snapped) on the right one.
+        # The midpoint distance only breaks residual exact ties — e.g. two
+        # curves passing through both corners.
+        mid = 0.5 * (pos[i] + pos[j])
+
+        def _key(lbl: str):
+            ent = ent_by_label[lbl]
+            de = sum(
+                float(
+                    np.linalg.norm(
+                        pos[k] - np.asarray(ent.project(pos[k]), dtype=float)[:2]
+                    )
+                )
+                for k in (i, j)
+            )
+            dm = float(
+                np.linalg.norm(mid - np.asarray(ent.project(mid), dtype=float)[:2])
+            )
+            return (0.0 if de <= snap * 1e-6 else de, dm)
+
+        return min(common, key=_key)
+
+    # --- snap bound corners onto their curves -----------------------------
+    # A drawn corner is only approximately on its geometry (hand-placed, or a
+    # schematic declared binding); everything downstream — edge sampling,
+    # face projection, the DOF constraints — assumes a bound corner lies ON
+    # the curve, and sub-cell placement error seeds a tangled start. Snap
+    # each node onto the curves it is *meant* to be on: those it declares,
+    # plus those any of its incident edges bind (so a freely placed unbound
+    # node never moves). Two or more curves -> the shared junction, by
+    # alternating projection. Explicitly pinned nodes and seed (base)
+    # corners keep their positions.
+    frozen = set(fixed_nodes or ())
+    seed_corners = (
+        set(getattr(b, "_corners", {})) if seed_builder is not None else set()
+    )
+    for i in range(len(pos)):
+        if i in frozen:
+            continue
+        if node_names is not None and seed_corners and node_names[i] in seed_corners:
+            continue
+        # A node that declares its curves snaps to exactly those; incident
+        # edges only infer targets for undeclared nodes (their inference is
+        # proximity-based, and inside a band of close parallel curves a
+        # cross-band tie looks like it follows one — feeding its endpoints
+        # false extra targets).
+        labels = set(declared_curves.get(i, ()) if declared_curves else ())
+        if not labels:
+            for a, c in edge_set:
+                if i in (a, c):
+                    lbl = edge_curve(a, c)
+                    if lbl is not None:
+                        labels.add(lbl)
+        ents = [ent_by_label[lb] for lb in sorted(labels) if lb in ent_by_label]
+        if not ents:
+            continue
+        q = pos[i]
+        if len(ents) == 1:
+            q = np.asarray(ents[0].project(q), dtype=float)[:2]
+        else:
+            for _ in range(24):
+                q_prev = q
+                for e in ents:
+                    q = np.asarray(e.project(q), dtype=float)[:2]
+                if float(np.linalg.norm(q - q_prev)) <= 1e-14:
+                    break
+            # Accept the alternation only if it converged onto a common
+            # point of the curves. Curves with no nearby intersection have
+            # no junction — alternation ping-pongs between them and drifts
+            # tangentially — so keep the nearest single-curve foot instead.
+            if any(
+                float(np.linalg.norm(q - np.asarray(e.project(q), dtype=float)[:2]))
+                > snap * 1e-3
+                for e in ents
+            ):
+                feet = [np.asarray(e.project(pos[i]), dtype=float)[:2] for e in ents]
+                q = min(feet, key=lambda f: float(np.linalg.norm(pos[i] - f)))
+        pos[i] = q
+
+    # Re-derive membership from the snapped positions with an exact
+    # tolerance. The loose snap-distance membership above decides what to
+    # snap TO, but close parallel curves (a shock band) sit inside each
+    # other's snap distance — loose membership would pin every mid-band
+    # station as a two-curve junction and feed edge association false
+    # candidates. After snapping, a node is on a curve iff it lies on it.
+    # In declared mode even exact hits stay out: a drawing that declares its
+    # attachments is the whole truth, and a node placed exactly on a curve
+    # it never declared (a free band-edge corner exported from a placed
+    # Node) must not silently start sliding on it.
+    for i in range(len(pos)):
+        hits = (
+            set()
+            if declared_mode
+            else {
+                lbl
+                for lbl, ent, _ in geometry
+                if np.linalg.norm(
+                    pos[i] - np.asarray(ent.project(pos[i]), dtype=float)[:2]
+                )
+                <= snap * 1e-3
+            }
+        )
+        if declared_curves:
+            hits |= {lb for lb in declared_curves.get(i, ()) if lb in ent_by_label}
+        node_curves[i] = hits
+
+    # --- angular adjacency for planar-face tracing (snapped positions) ---
     adj: dict[int, list[int]] = {i: [] for i in range(len(pos))}
     for i, j in edge_set:
         adj[i].append(j)
@@ -251,31 +414,6 @@ def trace_topology(
                 a, c = next_dart(a, c)
             faces.append(loop)
 
-    # --- geometry association helpers ------------------------------------
-    def curves_on(p: np.ndarray) -> set[str]:
-        hits = set()
-        for lbl, ent, _ in geometry:
-            q = np.asarray(ent.project(p), dtype=float)[:2]
-            if np.linalg.norm(p - q) <= snap:
-                hits.add(lbl)
-        return hits
-
-    node_curves = {i: curves_on(pos[i]) for i in range(len(pos))}
-    if declared_curves:
-        for i, labels in declared_curves.items():
-            if 0 <= i < len(pos):
-                node_curves[i] |= set(labels)
-    ent_by_label = {lbl: ent for lbl, ent, _ in geometry}
-    closed_by_label = {lbl: cl for lbl, _ent, cl in geometry}
-    # carry the label onto the entity so the built topology's `entities` map
-    # (and, downstream, rendering/export) sees the same names the blocking binds by
-    for lbl, ent in ent_by_label.items():
-        if getattr(ent, "name", None) is None:
-            try:
-                ent.name = lbl
-            except AttributeError:
-                pass
-
     # Advisory: a node drawn strictly inside a closed curve. A closed curve is a
     # hole the mesh wraps around, so a node inside it seeds a tangled start (block
     # interiors interpolate into the hole and the untangler may not recover — even
@@ -306,21 +444,6 @@ def trace_topology(
                         xy=(float(p[0]), float(p[1])),
                     )
                 )
-
-    def edge_curve(i: int, j: int) -> str | None:
-        # A block edge follows a curve iff both its ends lie on that curve.
-        common = node_curves[i] & node_curves[j]
-        if not common:
-            return None
-        if len(common) == 1:
-            return next(iter(common))
-        mid = 0.5 * (pos[i] + pos[j])
-        return min(
-            common,
-            key=lambda lbl: np.linalg.norm(
-                mid - np.asarray(ent_by_label[lbl].project(mid), dtype=float)[:2]
-            ),
-        )
 
     # --- classify faces: drop the outer face and closed-curve interiors --
     outer = max(range(len(faces)), key=lambda k: abs(_loop_signed_area(faces[k], pos)))

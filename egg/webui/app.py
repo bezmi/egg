@@ -1140,8 +1140,8 @@ async def topo_validate(code: str, blocking: str = "{}", path: str = ""):
         f = json.loads(blocking)
     except json.JSONDecodeError:
         return JSONResponse({"error": "bad blocking json"}, status_code=400)
-    diags = await asyncio.wrap_future(_render_worker.validate(code, f, path))
-    return JSONResponse({"diagnostics": diags})
+    out = await asyncio.wrap_future(_render_worker.validate(code, f, path))
+    return JSONResponse(out)
 
 
 @rt("/api/topo/commit", methods=["post"])
@@ -1153,7 +1153,8 @@ async def topo_commit(code: str, blocking: str = "{}", path: str = ""):
         f = json.loads(blocking)
     except json.JSONDecodeError:
         return JSONResponse({"error": "bad blocking json"}, status_code=400)
-    diags = await asyncio.wrap_future(_render_worker.validate(code, f, path))
+    val = await asyncio.wrap_future(_render_worker.validate(code, f, path))
+    diags = val["diagnostics"]
     errors = [d for d in diags if not d.get("kind", "").startswith("warn")]
     if errors:
         return JSONResponse(

@@ -1508,10 +1508,17 @@ def cluster_spacings(topo: ControlTopology, specs_by_entity: dict) -> dict:
 
     grid = topo.grid
     d = topo.d
-    # Mean column length per entity (over all faces on it).
+    block_names = list(grid.topology.block_specs.keys())
+
+    def _in_scope(spec, bi):
+        blocks = spec.get("blocks")
+        return blocks is None or block_names[bi] in blocks
+
+    # Mean column length per entity (over the faces its spec covers).
     col_len: dict[int, list[float]] = {}
     for (bi, axis, _side), ent in topo.wall_faces.items():
-        if id(ent) not in specs_by_entity:
+        spec = specs_by_entity.get(id(ent))
+        if spec is None or not _in_scope(spec, bi):
             continue
         X = np.asarray(grid.blocks[bi].nodes, dtype=float)
         lengths = np.linalg.norm(np.diff(X, axis=axis), axis=-1).sum(axis=axis)
@@ -1521,7 +1528,7 @@ def cluster_spacings(topo: ControlTopology, specs_by_entity: dict) -> dict:
     ent_groups: dict[int, list] = {}
     for (bi, axis, side), ent in topo.wall_faces.items():
         spec = specs_by_entity.get(id(ent))
-        if spec is None:
+        if spec is None or not _in_scope(spec, bi):
             continue
         n_cells = int(grid.blocks[bi].logical_shape[axis]) - 1
         mean_len = float(np.mean(col_len[id(ent)]))

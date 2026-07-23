@@ -395,6 +395,7 @@ class TopologyBuilder:
         tangential_spacing: float | None = None,
         n_fixed: int = 1,
         relax_orthogonality: tuple = (),
+        blocks: tuple | None = None,
     ) -> "TopologyBuilder":
         """Request wall-normal clustering on every block face lying on ``entity``.
 
@@ -432,6 +433,12 @@ class TopologyBuilder:
             with sheared parallelograms instead of rotating the near-wall
             cells orthogonal to it and trading away the layer heights (see
             :func:`~egg.smoothing.targets.build_topology_target`).
+        blocks : tuple of str, optional
+            Restrict the spec to the faces of these blocks. By default the
+            clustering applies to every face associated with ``entity`` —
+            on an internal interface (associated from both flanking
+            strips) that means both sides; name the blocks of one side to
+            cluster only there.
         """
         if isinstance(entity, Edge):
             entity = entity.entity
@@ -445,6 +452,7 @@ class TopologyBuilder:
             relax_orthogonality=tuple(
                 e.entity if isinstance(e, Edge) else e for e in relax_orthogonality
             ),
+            blocks=tuple(blocks) if blocks is not None else None,
         )
         self._bl_entities[id(entity)] = entity
         return self
@@ -549,7 +557,7 @@ class TopologyBuilder:
         """
         connections = self._connections + self._infer_connections()
         associations = self._associations + self._infer_associations(connections)
-        boundary_tags = self._auto_boundary_tags(associations)
+        boundary_tags = self._auto_boundary_tags(associations, connections)
         boundary_layer_specs = self._collect_boundary_layers(associations)
         return BlockTopology(
             d=self._d,
@@ -601,7 +609,7 @@ class TopologyBuilder:
         return specs
 
     def _auto_boundary_tags(
-        self, associations: list[Association]
+        self, associations: list[Association], connections: list
     ) -> dict[str, list[FaceSpec]]:
         """Explicit :meth:`tag_boundary` tags plus an auto-derived marker for
         every associated face whose entity carries a
@@ -611,14 +619,24 @@ class TopologyBuilder:
         A face already carrying an explicit tag keeps it — a hand-written
         ``tag_boundary`` overrides the entity's tag on that face. An entity
         whose ``tag`` is ``None`` emits no marker (associated/drawn only).
+        A face that is a shared interface (connected to another block) never
+        receives an auto-derived marker: markers describe domain-boundary
+        faces, while an associated internal interface (e.g. a shock-fitted
+        band sliding on its spline) is a constraint only. An explicit
+        ``tag_boundary`` on such a face still fails validation.
         """
         tags = {name: list(faces) for name, faces in self._boundary_tags.items()}
         tagged = {(f.block_name, f.axis, f.side) for fs in tags.values() for f in fs}
+        shared = {
+            (f.block_name, f.axis, f.side)
+            for conn in connections
+            for f in (conn.face_a, conn.face_b)
+        }
         for assoc in associations:
             tag = getattr(assoc.entity, "tag", None)
             face = assoc.face
             key = (face.block_name, face.axis, face.side)
-            if tag is not None and key not in tagged:
+            if tag is not None and key not in tagged and key not in shared:
                 tags.setdefault(tag, []).append(face)
                 tagged.add(key)
         return tags

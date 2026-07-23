@@ -639,6 +639,30 @@ class BlockTopology:
 
     # ---- Grid initialization ----
 
+    @staticmethod
+    def _project_batch(entity, pts: np.ndarray) -> np.ndarray:
+        """Feet of ``pts`` on ``entity``, batched when the entity supports it."""
+        if hasattr(entity, "project_many"):
+            return np.asarray(entity.project_many(pts))
+        return np.stack([entity.project(p) for p in pts])
+
+    @staticmethod
+    def _row_defective(P: np.ndarray) -> bool:
+        """A sampled node line is defective when it folds back on itself or
+        its spacing collapses/blows up far beyond the median — the signature
+        of nearest-foot projection across a curve bending away from the
+        sampling chord. Mild monotone non-uniformity is not defective."""
+        v = np.diff(np.asarray(P, dtype=float), axis=0)
+        L = np.linalg.norm(v, axis=1)
+        if L.size < 2 or not np.all(np.isfinite(L)):
+            return False
+        med = float(np.median(L))
+        if med <= 0.0:
+            return True
+        if float(L.min()) < 0.25 * med or float(L.max()) > 4.0 * med:
+            return True
+        return bool(np.any(np.einsum("ij,ij->i", v[1:], v[:-1]) < 0.0))
+
     def initialize_grid(self) -> MultiBlockGrid:
         """Create the initial node array for the multiblock grid.
 
@@ -658,6 +682,10 @@ class BlockTopology:
 
         # Per-block logic for placing nodes into the global array
         block_names = list(self.block_specs.keys())
+        # Nodes placed by evaluating a curve between corner parameters
+        # (step 2's place_node path). Their spacing is deliberate — step 3's
+        # chord-projection refinement must leave them alone.
+        curve_sampled: set[int] = set()
 
         for bi, name in enumerate(block_names):
             spec = self.block_specs[name]
@@ -724,6 +752,7 @@ class BlockTopology:
                                 tt %= 1.0
                             p = edge.point_at(tt)
                             global_nodes[gidx] = np.array(list(p)[: self.d])
+                            curve_sampled.add(gidx)
                         else:
                             global_nodes[gidx] = (
                                 1.0 - t
@@ -740,6 +769,7 @@ class BlockTopology:
                 # A 3D+ face is a (d-1)-manifold whose interior nodes are NaN
                 # until the volume TFI, so fill it from its already-set edges
                 # here (TFI over the face) before projecting them onto the entity.
+                fgidx = None
                 if len(free_axes) >= 2:
                     face_shape = tuple(shape[a] for a in free_axes)
                     fnodes = np.full(face_shape + (self.d,), np.nan)
@@ -772,11 +802,65 @@ class BlockTopology:
                 pos = global_nodes[gidxs]
                 set_rows = ~np.isnan(pos).any(axis=1)
                 if set_rows.any():
-                    if hasattr(entity, "project_many"):
-                        feet = np.asarray(entity.project_many(pos[set_rows]))
-                    else:
-                        feet = np.stack([entity.project(p) for p in pos[set_rows]])
+                    feet = self._project_batch(entity, pos[set_rows])
                     global_nodes[gidxs[set_rows]] = feet
+
+                # Chord-sampled faces (no place_node parameter provenance —
+                # drawn/explicit topologies): a single nearest-foot projection
+                # keeps nodes ON the entity but bunches them where it bends
+                # away from the chord, and can fold them across a corner.
+                # When the projected row is actually defective (a fold, or
+                # spacing collapsed/blown far beyond its median), fair it by
+                # re-spacing along the projected shape and re-projecting until
+                # it settles — the parameter-free equivalent of sampling along
+                # the curve between the corners. Mildly non-uniform but
+                # monotone projections are left as-is, so programmatic
+                # topologies keep their established init distribution.
+                if len(free_axes) == 1 and len(gidxs) >= 3:
+                    interior = gidxs[1:-1]
+                    if not all(int(g) in curve_sampled for g in interior):
+                        for _ in range(3):
+                            P = global_nodes[gidxs]
+                            if not self._row_defective(P):
+                                break
+                            seg = np.linalg.norm(np.diff(P, axis=0), axis=1)
+                            s = np.concatenate([[0.0], np.cumsum(seg)])
+                            if s[-1] <= 0.0:
+                                break
+                            si = np.linspace(0.0, s[-1], len(gidxs))[1:-1]
+                            Q = np.stack(
+                                [np.interp(si, s, P[:, k]) for k in range(self.d)],
+                                axis=1,
+                            )
+                            global_nodes[interior] = self._project_batch(entity, Q)
+                elif fgidx is not None:
+                    # The (d-1)-face analogue: re-fill the interior by TFI from
+                    # the projected boundary rings, then re-project — only when
+                    # a face row is defective, by the same criterion.
+                    inner = tuple(slice(1, -1) for _ in fgidx.shape)
+                    if all(s > 2 for s in fgidx.shape):
+
+                        def _face_defective(F):
+                            for axf in range(F.ndim - 1):
+                                rows = np.moveaxis(F, axf, 0)
+                                rows = rows.reshape(rows.shape[0], -1, self.d)
+                                for c in range(rows.shape[1]):
+                                    if self._row_defective(rows[:, c]):
+                                        return True
+                            return False
+
+                        for _ in range(2):
+                            fnodes = global_nodes[fgidx]
+                            if not _face_defective(fnodes):
+                                break
+                            fnodes = fnodes.copy()
+                            fnodes[inner] = np.nan
+                            fb = Block(fnodes)
+                            tfi_fill_interior(fb)
+                            Q = fb.nodes[inner].reshape(-1, self.d)
+                            global_nodes[fgidx[inner].reshape(-1)] = (
+                                self._project_batch(entity, Q)
+                            )
 
         # Step 4: Copy global nodes into block node arrays and fill interiors
         for bi, name in enumerate(block_names):

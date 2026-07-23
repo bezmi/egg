@@ -579,6 +579,8 @@ def build_topology_target(
         if spec is None:
             continue
         face = assoc.face
+        if spec.get("blocks") is not None and face.block_name not in spec["blocks"]:
+            continue
         bi = block_names.index(face.block_name)
         s_t = spec["tangential_spacing"]
         if s_t is None:

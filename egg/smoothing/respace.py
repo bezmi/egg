@@ -280,6 +280,8 @@ def _wall_columns(grid, topology):
         if spec is None:
             continue
         face = assoc.face
+        if spec.get("blocks") is not None and face.block_name not in spec["blocks"]:
+            continue
         dm = _oriented_dof_lines(grid, topology, face.block_name, face.axis, face.side)
         yield assoc, spec, dm.reshape(dm.shape[0], -1)
 
@@ -606,6 +608,8 @@ def enforce_boundary_layer_spacing(
         if spec is None:
             continue
         face = assoc.face
+        if spec.get("blocks") is not None and face.block_name not in spec["blocks"]:
+            continue
         dm = _oriented_dof_lines(grid, topology, face.block_name, face.axis, face.side)
         flat = dm.reshape(dm.shape[0], -1)
 

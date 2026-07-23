@@ -70,9 +70,18 @@ template <int D> class BlockLayout
 
     [[nodiscard]] std::size_t num_blocks() const { return interior_.size(); }
 
-    /// Size (reals) of the packed coordinate buffer for all blocks together.
+    /// Size (reals) of the packed coordinate buffer: all padded blocks plus any
+    /// overflow nodes appended past the last block.
     [[nodiscard]] std::size_t total_reals() const
-    { return offsets_.empty() ? 0 : offsets_.back(); }
+    { return (offsets_.empty() ? 0 : offsets_.back()) + overflow_reals_; }
+
+    /// Append `n` overflow node slots past the last block. Used by the
+    /// structured remap when a block's ghost ring has no spare slot left for a
+    /// foreign patch node (dense singular fans, many constrained corners on one
+    /// block). Overflow slots belong to no block — no padded/interior index
+    /// resolves to them; they are reachable only through raw offsets recorded
+    /// in the patch tables and refreshed by the per-sweep fan broadcast.
+    void add_overflow_nodes(std::size_t n) { overflow_reals_ += n * static_cast<std::size_t>(D); }
 
     /// Interior (node-count) shape of block `b`.
     [[nodiscard]] const Shape& interior_shape(std::size_t b) const { return interior_[b]; }
@@ -149,7 +158,8 @@ template <int D> class BlockLayout
     }
 
     std::vector<Shape> interior_;       // per-block interior (node-count) shape
-    std::vector<std::size_t> offsets_;  // size num_blocks()+1; back() == total
+    std::vector<std::size_t> offsets_;  // size num_blocks()+1; back() == block total
+    std::size_t overflow_reals_ = 0;    // appended overflow nodes (see add_overflow_nodes)
 };
 
 // mdspan views over a (host or device) coordinate buffer laid out by a

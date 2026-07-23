@@ -279,14 +279,25 @@ def test_validate_blocking_reports_green_and_red():
         ],
         "res": 3,
     }
-    assert scene.validate_blocking(code, good) == []  # green
+    green = scene.validate_blocking(code, good)
+    assert green["diagnostics"] == []
+    # Loop-propagated resolutions ride along: every edge of the single block
+    # grids at 3 cells, and the two axis loops are the must-share classes.
+    assert green["edge_res"] == {"a|b": 3, "c|d": 3, "b|c": 3, "a|d": 3}
+    assert sorted(map(sorted, green["res_classes"])) == [
+        ["a|b", "c|d"],
+        ["a|d", "b|c"],
+    ]
 
     bad = {
         "nodes": {"a": {"xy": [0, 0]}, "b": {"xy": [1, 0]}, "c": {"xy": [0.5, 1]}},
         "edges": [{"a": "a", "b": "b"}, {"a": "b", "b": "c"}, {"a": "c", "b": "a"}],
     }
     red = scene.validate_blocking(code, bad)
-    assert red and any(d["kind"] in ("non_quad_face", "no_blocks") for d in red)
+    assert "edge_res" not in red  # no flatten -> no resolution payload
+    assert red["diagnostics"] and any(
+        d["kind"] in ("non_quad_face", "no_blocks") for d in red["diagnostics"]
+    )
 
 
 def test_set_editable_blocking_round_trips_and_is_idempotent():
@@ -295,17 +306,19 @@ def test_set_editable_blocking_round_trips_and_is_idempotent():
         "topo = ExplicitTopology(connectivity=editable({'nodes': {}, 'edges': []}))\n"
     )
     blocking = {
-        "nodes": {"a": {"xy": [0, 0]}, "b": {"xy": [1, 0]}},
+        "nodes": {"a": {"xy": [0, 0], "fixed": True}, "b": {"xy": [1, 0]}},
         "edges": [{"a": "a", "b": "b"}],
         "res": 5,
     }
     new = scene.set_editable_blocking(code, blocking)
-    # still editable, and re-execs to the committed blocking
+    # still editable, and re-execs to the committed blocking (booleans must
+    # land as Python True/False, not JSON true/false)
     assert scene.explicit_topology_source(new)["editable"] is True
     ns, _o, err = scene.exec_script(new, None)
     assert err is None
     h = scene.harvest(ns, init_grid=False)
     assert set(h.editable.connectivity["nodes"]) == {"a", "b"}
+    assert h.editable.connectivity["nodes"]["a"]["fixed"] is True
     assert h.editable.connectivity["res"] == 5
     # committing the same blocking again changes nothing (no source churn)
     assert scene.set_editable_blocking(new, blocking) == new

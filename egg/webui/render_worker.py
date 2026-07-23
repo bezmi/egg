@@ -118,8 +118,9 @@ class RenderWorker:
         self, code: str, blocking: dict, path: str = "", timeout: float = None
     ) -> Future:
         """Flatten a candidate blocking against the script's base + geometry
-        (the blocking rides the ``mode`` slot as JSON). Resolves to a list of
-        diagnostic dicts — empty means green/committable."""
+        (the blocking rides the ``mode`` slot as JSON). Resolves to a dict:
+        ``diagnostics`` (empty means green/committable) plus ``edge_res`` /
+        ``res_classes`` when the flatten succeeds in 2D."""
         return self._submit("validate", code, json.dumps(blocking), path, timeout)
 
     def _submit(

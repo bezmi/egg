@@ -56,6 +56,26 @@ def editable(value, *, choices=None, label=None):
     return value
 
 
+def _lit(v) -> str:
+    """One-line Python literal for a printed blocking (dicts/lists inline,
+    booleans as ``True``/``False`` — json.dumps would emit ``true``)."""
+    import json
+
+    if v is True:
+        return "True"
+    if v is False:
+        return "False"
+    if v is None:
+        return "None"
+    if isinstance(v, str):
+        return json.dumps(v)
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_lit(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "{" + ", ".join(f"{_lit(str(k))}: {_lit(x)}" for k, x in v.items()) + "}"
+    return repr(v)
+
+
 def _is_closed(entity) -> bool:
     for attr in ("closed", "periodic", "is_closed"):
         if getattr(entity, attr, None) is True:
@@ -234,6 +254,7 @@ class ExplicitTopology:
         names: list[str] = []
         index: dict = {}
         declared: dict[int, set[str]] = {}
+        edge_binds: dict[frozenset, str] = {}
 
         def bind_on(i: int, labels):
             for lbl in labels or ():
@@ -497,6 +518,8 @@ class ExplicitTopology:
             if e.get("bind") is not None:
                 bind_on(index[a], (e["bind"],))
                 bind_on(index[b], (e["bind"],))
+                if e["bind"] in self.geometry:
+                    edge_binds[frozenset((index[a], index[b]))] = e["bind"]
 
         # new (non-base) blocking nodes explicitly pinned via a fixed flag
         fixed_nodes = {
@@ -522,6 +545,7 @@ class ExplicitTopology:
             block_regions,
             face_markers,
             user_res,
+            edge_binds,
         )
 
     def _base_wireframe_3d(self):
@@ -620,7 +644,24 @@ class ExplicitTopology:
                 diags.append(Diagnostic("bad_node", f"node {nid!r} has no 'xyz'"))
                 continue
             fixed = bool(spec.get("fixed")) or len(known) >= 2
-            tb.add_corner(str(nid), np.asarray(xyz, dtype=float)[:3], fixed=fixed)
+            p = np.asarray(xyz, dtype=float)[:3]
+            # Snap a bound corner onto its surface(s): drawn coordinates are
+            # only approximate, and downstream sampling/constraints assume a
+            # bound corner lies ON the geometry. Two or more surfaces -> the
+            # shared junction, by alternating projection. An explicitly
+            # pinned node keeps its drawn position.
+            if known and not bool(spec.get("fixed")):
+                ents = [geometry[lbl] for lbl in sorted(set(known))]
+                if len(ents) == 1:
+                    p = np.asarray(ents[0].project(p), dtype=float)[:3]
+                else:
+                    for _ in range(24):
+                        p_prev = p
+                        for e in ents:
+                            p = np.asarray(e.project(p), dtype=float)[:3]
+                        if float(np.linalg.norm(p - p_prev)) <= 1e-14:
+                            break
+            tb.add_corner(str(nid), p, fixed=fixed)
             node_on[str(nid)] = set(known)
 
         # Blocks: an explicit list, or inferred (cube enumeration) from the
@@ -725,6 +766,7 @@ class ExplicitTopology:
             block_regions,
             face_markers,
             user_res,
+            edge_binds,
         ) = self._merge_graph(diags)
         builder, tdiags = trace_topology(
             pos,
@@ -732,6 +774,7 @@ class ExplicitTopology:
             self._gents(),
             res=self._res(),
             declared_curves=declared,
+            declared_edge_curves=edge_binds,
             node_names=names,
             seed_builder=seed,
             base_edges=base_edges,
@@ -774,3 +817,211 @@ class ExplicitTopology:
     def initialize_grid(self):
         """TFI-initialise the flattened topology (raises if not valid)."""
         return self.build().initialize_grid()
+
+    # -- export: the flattened topology as a standalone blocking ----------
+
+    def to_connectivity(self) -> dict:
+        """The flattened topology (base included) as a standalone connectivity
+        dict — the blocking that replicates it with ``base=None`` on the same
+        geometry. See :meth:`print_topology` for the copy-pasteable block."""
+        conn, _notes = self._export_connectivity()
+        return conn
+
+    def print_topology(self, *, geometry_var: str = "geometry", file=None) -> str:
+        """Print (and return) a ready-to-paste ``ExplicitTopology(...)`` block
+        replicating the full flattened topology — base blocks and drawn overlay
+        alike — as a standalone blocking on the same geometry.
+
+        Everything expressible in a blocking round-trips: node positions and
+        pins, per-edge resolutions, and face→curve bindings (so the free /
+        sliding / fixed classification and tag-derived boundary markers are
+        preserved). What cannot ride a blocking is reported as ``# ...``
+        comment lines above the block: boundary-layer specs (re-declare via
+        ``curve.clustered(...)`` on the geometry), bindings to unnamed
+        entities, and curve-following edge seeding of corners placed on an
+        unassociated curve. 2D block names are re-derived by the tracer
+        (``blk0``, ``blk1``, ...); 3D blocks keep their names.
+
+        ``geometry_var`` is the variable name the printed block references for
+        its ``geometry=`` argument.
+        """
+        import sys
+
+        conn, notes = self._export_connectivity()
+        out: list[str] = [f"# {n}" for n in notes]
+        out += [
+            "ExplicitTopology(",
+            "    base=None,",
+            f"    geometry={geometry_var},",
+            "    connectivity=editable({",
+            '        "nodes": {',
+        ]
+        out += [f"            {_lit(k)}: {_lit(v)}," for k, v in conn["nodes"].items()]
+        out.append("        },")
+        if self.d == 3:
+            out.append('        "blocks": [')
+            out += [f"            {_lit(b)}," for b in conn["blocks"]]
+            out.append("        ],")
+        else:
+            out.append('        "edges": [')
+            out += [f"            {_lit(e)}," for e in conn["edges"]]
+            out.append("        ],")
+        out += [f'        "res": {_lit(conn["res"])},', "    }),", ")"]
+        text = "\n".join(out)
+        print(text, file=file if file is not None else sys.stdout)
+        return text
+
+    def _export_connectivity(self) -> tuple[dict, list[str]]:
+        """Build the standalone connectivity dict plus human-readable notes on
+        anything the blocking cannot express."""
+        from collections import Counter
+
+        topo = self.build()
+        notes: list[str] = []
+
+        # entity id -> the label the printed block will reference. This
+        # object's geometry labels win; association-derived names fill in for
+        # base entities never passed in `geometry`.
+        label_of = {id(e): lbl for lbl, e in self.geometry.items()}
+        ent_of = dict(self.geometry)
+        for lbl, e in topo.entities.items():
+            label_of.setdefault(id(e), lbl)
+            ent_of.setdefault(lbl, e)
+
+        def rnd(v: float) -> float:
+            return float(f"{float(v):.10g}")
+
+        assoc_of: dict[tuple, list] = {}
+        for a in topo.associations:
+            key = (a.face.block_name, a.face.axis, a.face.side)
+            assoc_of.setdefault(key, []).append(a.entity)
+
+        nodes: dict[str, dict] = {}
+        for name, c in topo.corners.items():
+            spec: dict = {
+                ("xyz" if self.d == 3 else "xy"): [
+                    rnd(c.position[k]) for k in range(self.d)
+                ]
+            }
+            if getattr(c, "fixed", False):
+                spec["fixed"] = True
+            nodes[name] = spec
+
+        # Corners placed on a curve that has no association seed their edges
+        # along it at init; a blocking has no free-yet-curve-seeded notion.
+        associated_ids = {id(a.entity) for a in topo.associations}
+        seeded: dict[str, list[str]] = {}
+        for name, c in topo.corners.items():
+            edge = getattr(getattr(c, "source", None), "edge", None)
+            ent = getattr(edge, "entity", None)
+            if ent is not None and id(ent) not in associated_ids:
+                lbl = label_of.get(id(ent)) or getattr(ent, "name", None) or "?"
+                seeded.setdefault(lbl, []).append(name)
+        for lbl, names in seeded.items():
+            notes.append(
+                f"corners {', '.join(names)} were placed on {lbl!r}, which has no "
+                "association: exported as free nodes (curve-following edge "
+                "seeding at init is not replicated)"
+            )
+
+        if getattr(topo, "boundary_layer_specs", {}):
+            notes.append(
+                "boundary-layer spec(s) are not part of a blocking; re-declare "
+                "them on the geometry via <curve>.clustered(...)"
+            )
+
+        if self.d == 3:
+            blocks = [
+                {
+                    "name": bname,
+                    "corners": list(spec.corner_names),
+                    "res": [int(r) for r in spec.resolutions],
+                }
+                for bname, spec in topo.block_specs.items()
+            ]
+            # Bindings ride the corners in 3D: a boundary face whose corners
+            # all share a surface re-associates with it on flatten.
+            for (bname, axis, side), ents in assoc_of.items():
+                spec = topo.block_specs[bname]
+                for ent in ents:
+                    lbl = label_of.get(id(ent))
+                    if lbl is None:
+                        notes.append(
+                            f"face {bname}[{axis},{side}] is associated to an "
+                            "unnamed entity; binding dropped"
+                        )
+                        continue
+                    for cn in spec.face_corner_names(axis, side, 3):
+                        on = nodes[cn].setdefault("on", [])
+                        if lbl not in on:
+                            on.append(lbl)
+            for spec in nodes.values():
+                if "on" in spec:
+                    spec["on"] = sorted(spec["on"])
+            return {"nodes": nodes, "blocks": blocks, "res": 10}, notes
+
+        entries: dict[frozenset, dict] = {}
+        order: list[frozenset] = []
+        face_label: dict[tuple, str] = {}
+        for bname, spec in topo.block_specs.items():
+            for axis in (0, 1):
+                for side in (0, 1):
+                    a_, b_ = spec.face_corner_names(axis, side, 2)
+                    if a_ == b_:
+                        notes.append(f"degenerate face {bname}[{axis},{side}] skipped")
+                        continue
+                    key = frozenset((a_, b_))
+                    r = int(spec.resolutions[1 - axis])
+                    e = entries.get(key)
+                    if e is None:
+                        e = {"a": a_, "b": b_, "res": r}
+                        entries[key] = e
+                        order.append(key)
+                    elif e["res"] != r:
+                        notes.append(
+                            f"edge {e['a']}-{e['b']}: conflicting resolutions "
+                            f"{e['res']} vs {r}; kept {max(e['res'], r)}"
+                        )
+                        e["res"] = max(e["res"], r)
+                    for ent in assoc_of.get((bname, axis, side), ()):
+                        lbl = label_of.get(id(ent))
+                        if lbl is None:
+                            notes.append(
+                                f"face {bname}[{axis},{side}] is associated to an "
+                                "unnamed entity; binding dropped"
+                            )
+                        elif "bind" not in e:
+                            e["bind"] = lbl
+                            face_label[(bname, axis, side)] = lbl
+                        elif e["bind"] != lbl:
+                            notes.append(
+                                f"edge {e['a']}-{e['b']} is associated to both "
+                                f"{e['bind']!r} and {lbl!r}; kept {e['bind']!r}"
+                            )
+                        else:
+                            face_label[(bname, axis, side)] = lbl
+
+        # A marker that does not derive from its bound curve's tag is lost.
+        for tag, faces in getattr(topo, "boundary_tags", {}).items():
+            for f in faces:
+                lbl = face_label.get((f.block_name, f.axis, f.side))
+                ent = ent_of.get(lbl) if lbl else None
+                if ent is None or getattr(ent, "tag", None) != tag:
+                    notes.append(
+                        f"boundary marker {tag!r} on {f.block_name}"
+                        f"[{f.axis},{f.side}] does not derive from a bound "
+                        "curve's tag and will be lost"
+                    )
+
+        # Modal resolution becomes the default; edges at it drop their
+        # explicit "res" (a conforming loop shares one resolution, so a loop
+        # is either fully explicit or fully default — never mixed).
+        res_default = Counter(e["res"] for e in entries.values()).most_common(1)
+        res_default = int(res_default[0][0]) if res_default else self._res()
+        edges_out = []
+        for key in order:
+            e = entries[key]
+            if e["res"] == res_default:
+                del e["res"]
+            edges_out.append(e)
+        return {"nodes": nodes, "edges": edges_out, "res": res_default}, notes

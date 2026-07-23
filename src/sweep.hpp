@@ -113,6 +113,12 @@ template <int D> struct SweepContextHostT {
     std::size_t num_nodes;
     std::vector<real> X;  // [num_nodes * D] initial positions
 
+    // Overflow nodes the structured remap appended past the last block (foreign
+    // patch nodes that did not fit a ghost ring); the last num_overflow of
+    // num_nodes. layout_from_context must exclude them when inferring the last
+    // block's padded shape.
+    std::size_t num_overflow = 0;
+
     // Structured block layout in NODE units, for synthesizing interior DOF
     // patches on the device (empty on the unstructured path): block_off[b] is
     // block b's first node index, nstride[b*D + k] the padded node stride on

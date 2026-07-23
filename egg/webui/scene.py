@@ -461,6 +461,27 @@ def editable_block(code: str) -> str | None:
     return None
 
 
+def _py_literal(v) -> str:
+    """Inline Python literal for a JSON value — ``json.dumps`` spacing and
+    double-quoted strings, but ``True``/``False``/``None`` instead of the
+    JSON spellings (the rendering is spliced into Python source)."""
+    if v is True:
+        return "True"
+    if v is False:
+        return "False"
+    if v is None:
+        return "None"
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_py_literal(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return (
+            "{"
+            + ", ".join(f"{json.dumps(str(k))}: {_py_literal(x)}" for k, x in v.items())
+            + "}"
+        )
+    return json.dumps(v)
+
+
 def _format_blocking(blocking: dict, indent: int) -> str:
     """Pretty-print a blocking dict as diff-friendly Python at ``indent`` columns.
 
@@ -472,14 +493,14 @@ def _format_blocking(blocking: dict, indent: int) -> str:
     out = ["{"]
     out.append(f'{p1}"nodes": {{')
     for nid, spec in (blocking.get("nodes") or {}).items():
-        out.append(f"{p2}{json.dumps(str(nid))}: {json.dumps(spec)},")
+        out.append(f"{p2}{json.dumps(str(nid))}: {_py_literal(spec)},")
     out.append(f"{p1}}},")
     out.append(f'{p1}"edges": [')
     for e in blocking.get("edges") or []:
-        out.append(f"{p2}{json.dumps(e)},")
+        out.append(f"{p2}{_py_literal(e)},")
     out.append(f"{p1}],")
     if blocking.get("res") is not None:
-        out.append(f'{p1}"res": {json.dumps(blocking["res"])},')
+        out.append(f'{p1}"res": {_py_literal(blocking["res"])},')
     out.append(f"{pad}}}")
     return "\n".join(out)
 
@@ -619,13 +640,22 @@ def edit_data_for(code: str, h: Harvest) -> dict | None:
     if h.editable is None:
         return None
     src = explicit_topology_source(code) or {}
-    return {
+    out = {
         "editable": bool(src.get("editable")),
         "blocking": h.editable.connectivity,
         "geometry": _geometry_polylines(h.editable.geometry),
         "base": h.editable.base_graph(),
         "diagnostics": [_diag_dict(d) for d in h.diagnostics],
     }
+    # A valid flatten's per-edge effective resolutions + must-share classes,
+    # so the edit view shows loop-propagated values from the first paint
+    # (validate refreshes them after each edit).
+    errors = [d for d in h.diagnostics if not d.kind.startswith("warn")]
+    if h.topo is not None and not errors and getattr(h.topo, "d", 2) == 2:
+        eff, classes = _edge_res_classes(h.topo)
+        out["edge_res"] = eff
+        out["res_classes"] = classes
+    return out
 
 
 def _geometry_polylines(geometry: dict, n: int = 64) -> list[dict]:
@@ -650,8 +680,52 @@ def _geometry_polylines(geometry: dict, n: int = 64) -> list[dict]:
     return out
 
 
-def validate_blocking(code: str, blocking: dict, path: str | None = None) -> list[dict]:
-    """Diagnostics for a candidate blocking against the script's base + geometry.
+def _edge_res_classes(topo) -> tuple[dict[str, int], list[list[str]]]:
+    """Per-edge effective resolution plus the classes of edges that must share
+    one, from a flattened 2D topology.
+
+    Opposite faces of a block share a resolution and a shared face links two
+    blocks, so one explicit setting drives its whole loop (the same union-find
+    the flatten's ``_propagate_loop_res`` runs). Keys match the client's edge
+    keys: the sorted corner-name pair joined by ``|``.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def key(a: str, b: str) -> str:
+        return f"{a}|{b}" if a < b else f"{b}|{a}"
+
+    eff: dict[str, int] = {}
+    for spec in topo.block_specs.values():
+        for axis in (0, 1):
+            ks = []
+            for side in (0, 1):
+                a, b = spec.face_corner_names(axis, side, 2)
+                if a == b:
+                    continue
+                k = key(a, b)
+                eff[k] = int(spec.resolutions[1 - axis])
+                ks.append(k)
+            if len(ks) == 2:
+                parent[find(ks[0])] = find(ks[1])
+    classes: dict[str, list[str]] = {}
+    for k in eff:
+        classes.setdefault(find(k), []).append(k)
+    return eff, [sorted(v) for v in classes.values()]
+
+
+def validate_blocking(code: str, blocking: dict, path: str | None = None) -> dict:
+    """Validation payload for a candidate blocking against the script's base +
+    geometry: ``diagnostics`` (empty means green/committable) plus, when the
+    flatten succeeds in 2D, ``edge_res`` (edge key -> effective cell count)
+    and ``res_classes`` (groups of edge keys that must share a resolution), so
+    the edit view can show the propagated resolution on every loop edge.
 
     Execs ``code`` to recover the ExplicitTopology's base and geometry, then
     flattens ``blocking`` in their context — without touching the source — so the
@@ -660,30 +734,39 @@ def validate_blocking(code: str, blocking: dict, path: str | None = None) -> lis
     """
     ns, _out, err = exec_script(code, path)
     if err is not None:
-        return [
-            {
-                "kind": "script_error",
-                "msg": "script error — fix it first",
-                "where": [],
-                "xy": None,
-            }
-        ]
+        return {
+            "diagnostics": [
+                {
+                    "kind": "script_error",
+                    "msg": "script error — fix it first",
+                    "where": [],
+                    "xy": None,
+                }
+            ]
+        }
     h = harvest(ns, init_grid=False)
     if h.editable is None:
-        return [
-            {
-                "kind": "no_editable",
-                "msg": "script builds no ExplicitTopology",
-                "where": [],
-                "xy": None,
-            }
-        ]
+        return {
+            "diagnostics": [
+                {
+                    "kind": "no_editable",
+                    "msg": "script builds no ExplicitTopology",
+                    "where": [],
+                    "xy": None,
+                }
+            ]
+        }
     et = ExplicitTopology(
         base=h.editable.base, geometry=h.editable.geometry, connectivity=blocking
     )
-    _topo, diags = et.flatten()
+    topo, diags = et.flatten()
     _debug_blocking(blocking, diags)
-    return [_diag_dict(d) for d in diags]
+    out: dict = {"diagnostics": [_diag_dict(d) for d in diags]}
+    if topo is not None and getattr(topo, "d", 2) == 2:
+        eff, classes = _edge_res_classes(topo)
+        out["edge_res"] = eff
+        out["res_classes"] = classes
+    return out
 
 
 def webui_block_suggestion(code: str, path: str | None = None) -> str | None:
