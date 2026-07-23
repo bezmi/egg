@@ -336,6 +336,16 @@ def main() -> None:
         # The window is gone (or we failed to open it): stop the whole tree.
         _terminate_group(proc)
 
+    # We reach here only after a clean GUI session (an error path re-raises
+    # through the finally instead). The window is closed and the whole server
+    # tree is reaped, but QtWebEngine's own teardown deadlocks the interpreter
+    # on exit on some Qt/Wayland setups, hanging the terminal and swallowing
+    # Ctrl-C. All real cleanup is already done, so exit hard to hand the
+    # terminal back at once (flush first so nothing buffered is lost).
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
 
 if __name__ == "__main__":
     main()
