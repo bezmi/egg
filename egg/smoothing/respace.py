@@ -340,7 +340,7 @@ def _place_on_column(
         err = height - d_cur
         if abs(err) <= 1e-13 * max(height, 1.0):
             break
-        if arc_prev is not None and abs(d_cur - d_prev) > 0.0:
+        if arc_prev is not None and d_prev is not None and abs(d_cur - d_prev) > 0.0:
             step = err * (arc - arc_prev) / (d_cur - d_prev)
         else:
             step = err

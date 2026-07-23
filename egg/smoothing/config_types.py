@@ -250,6 +250,24 @@ class EnergyStencil(TypedDict):
     W_inv: np.ndarray
 
 
+class CellStencil(TypedDict):
+    """The dimension-general cell/sample membership tables from
+    :func:`egg.smoothing.flat_context.cell_stencil`.
+
+    ``gn``/``s`` hold one array per axis (``d`` entries); the ``m_*`` arrays are
+    the flattened node/sample/role membership lists."""
+
+    gc: np.ndarray
+    gn: list[np.ndarray]
+    s: list[np.ndarray]
+    m_node: np.ndarray
+    m_sid: np.ndarray
+    m_role: np.ndarray
+    nc: int
+    ns: int
+    ncell: int
+
+
 class FlatWire(TypedDict):
     """The ragged C++ wire from :func:`egg.smoothing.flat_context.build_flat_context`.
 

@@ -15,8 +15,13 @@ import numpy as np
 __all__ = ["GeometryEntity"]
 
 # Sentinel: a tag left to inherit the entity's name (distinct from tag=None,
-# which explicitly suppresses the export marker).
-_INHERIT = object()
+# which explicitly suppresses the export marker). A dedicated type makes it
+# distinguishable from a real str tag in the type checker.
+class _Inherit:
+    pass
+
+
+_INHERIT = _Inherit()
 
 
 class GeometryEntity(ABC):
@@ -69,7 +74,7 @@ class GeometryEntity(ABC):
         without emitting any marker.
         """
         t = getattr(self, "_egg_tag", _INHERIT)
-        return self.name if t is _INHERIT else t
+        return self.name if isinstance(t, _Inherit) else t
 
     @tag.setter
     def tag(self, value: str | None) -> None:
@@ -227,4 +232,13 @@ class GeometryEntity(ABC):
         protocol; raises AttributeError otherwise.
         """
         t = min(max(float(t), 0.0), 1.0)
-        return self.eval(self.t0 + t * (self.t1 - self.t0))
+        # eval / t0 / t1 belong to the parametric protocol, which only curve
+        # entities implement; fetch them dynamically so the base stays honest.
+        eval_fn = getattr(self, "eval", None)
+        t0 = getattr(self, "t0", None)
+        t1 = getattr(self, "t1", None)
+        if eval_fn is None or t0 is None or t1 is None:
+            raise AttributeError(
+                f"{type(self).__name__} does not implement the parametric protocol"
+            )
+        return eval_fn(t0 + t * (t1 - t0))

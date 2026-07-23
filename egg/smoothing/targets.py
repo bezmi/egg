@@ -148,9 +148,11 @@ class BoundaryLayerTarget:
         self.wall_axis = int(wall_axis)
         self.wall_side = int(wall_side)
         self.n_layers = int(n_layers)
-        self.tangential_spacing = float(
+        ts_val = (
             tangential_spacing if tangential_spacing is not None else interior_spacing
         )
+        assert ts_val is not None  # the check above guarantees one is set
+        self.tangential_spacing = float(ts_val)
         self.interior_spacing = float(
             interior_spacing
             if interior_spacing is not None

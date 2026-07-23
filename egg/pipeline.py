@@ -32,7 +32,7 @@ from __future__ import annotations
 import os
 import warnings
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Callable, Iterator, Literal
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, TypedDict
 
 import numpy as np
 
@@ -57,6 +57,10 @@ from .smoothing.config_types import (
     config_errors,
 )
 
+if TYPE_CHECKING:
+    from .smoothing.control_topology import ControlTopology
+    from .smoothing.solver import SweepContext
+
 __all__ = [
     "generate",
     "generate_steps",
@@ -78,6 +82,32 @@ __all__ = [
     "Save",
     "validate",
 ]
+
+
+class _SharedSmootherKwargs(TypedDict):
+    """The smoother constructor arguments the deprecated config path shares
+    across every smoother it builds; splatted into each so the type checker
+    validates them against the constructor signatures."""
+
+    metric: TmopMetric
+    cluster_boundary_layers: bool
+    bl_blend_neighbours: bool
+    bl_interior_spacing: float | None
+    directional: Directional | Mapping[str, object] | bool | None
+
+
+class _ControlRunKwargs(TypedDict):
+    """Per-chunk arguments the control-point smoother forwards to
+    ``run_control_topo``; typed so the splat is checked at the call site."""
+
+    topo: "ControlTopology"
+    device: Device
+    phase: str
+    c2_weight: float
+    ortho: ControlOrtho
+    ortho_weight: float
+    smooth_weight: float
+    directional: dict[str, object] | None
 
 
 @dataclass
@@ -332,19 +362,19 @@ class PipelineConfig:
             direct=self.untangle_direct,
             report_every=self.report_every,
         )
-        fas_params = dict(
+        fas_params = FasParams(
             nu_pre=self.fas_nu_pre,
             nu_post=self.fas_nu_post,
             nu_coarse=self.fas_nu_coarse,
             max_levels=self.fas_max_levels,
         )
-        obj = dict(
-            metric=self.tmop_metric,
-            cluster_boundary_layers=self.cluster_boundary_layers,
-            bl_blend_neighbours=self.bl_blend_neighbours,
-            bl_interior_spacing=self.bl_interior_spacing,
-            directional=self.directional,
-        )
+        obj: _SharedSmootherKwargs = {
+            "metric": self.tmop_metric,
+            "cluster_boundary_layers": self.cluster_boundary_layers,
+            "bl_blend_neighbours": self.bl_blend_neighbours,
+            "bl_interior_spacing": self.bl_interior_spacing,
+            "directional": self.directional,
+        }
         stages: list[Stage] = [untangle]
         if self.tmop_smoother == "control_point":
             # The old control smoother pre-smoothed internally; that is now an
@@ -571,24 +601,24 @@ class MeshState:
 
         # Explicit user target (wins over any auto-build); None lets a smoother
         # build its own.
-        self.target = target
+        self.target: Callable[..., np.ndarray] | None = target
 
         # The objective the last smoother established. pin / respace reuse it
         # so they optimise and score the same energy, and the final summary is
         # scored on it.
-        self.active_target = None
-        self.interface_ortho = None
-        self.interface_c2 = None
-        self.directional = None
-        self.score_ctx = self.ctx_iso
-        self.score_metric = "shape_2d"
+        self.active_target: Callable[..., np.ndarray] | None = None
+        self.interface_ortho: InterfaceOrtho | None = None
+        self.interface_c2: InterfaceC2 | None = None
+        self.directional: dict[str, object] | None = None
+        self.score_ctx: SweepContext = self.ctx_iso
+        self.score_metric: str = "shape_2d"
 
         # Control-net state, kept faithful to the output by a later refit.
-        self.control_net = None
+        self.control_net: ControlTopology | None = None
         # Set by a Resample stage: the grid starts from a loaded net (a solved
         # shape), so a following smoother polishes it instead of solving cold.
-        self.warm = False
-        self.net_stale = False
+        self.warm: bool = False
+        self.net_stale: bool = False
 
     def md_now(self) -> float:
         from .smoothing.untangle import grid_min_det
@@ -623,7 +653,9 @@ def _directional_config(directional) -> dict | None:
         return None
     if directional is None or directional is True:
         return asdict(Directional())
-    return asdict(Directional.coerce(directional))
+    cfg = Directional.coerce(directional)
+    assert cfg is not None  # directional is neither None nor a bool here
+    return asdict(cfg)
 
 
 def _establish_objective(
@@ -1237,13 +1269,14 @@ class ControlPointSmoother(Stage):
         # clustered grid representable by the net), so the smoother shapes the
         # layer profile (and the block interfaces) during the solve. Exact
         # first-layer heights stay the opt-in pin/respace phases.
-        warm = s.warm and getattr(s, "control_net", None) is not None
+        warm = s.warm and s.control_net is not None
 
         from .smoothing.control_backend import run_control_topo
 
         if warm:
             # Polish the loaded net in place (the chunk loop self-limits from a
             # near-optimal start).
+            assert s.control_net is not None  # implied by warm
             ctrl_topo = s.control_net
         else:
             from .smoothing.control_topology import (
@@ -1266,16 +1299,16 @@ class ControlPointSmoother(Stage):
         # the net as it moves (the final state is the solved net).
         grid.control_net = ctrl_topo
         s.control_net = ctrl_topo
-        ctrl_kw = dict(
-            topo=ctrl_topo,
-            device=device,
-            phase=tmop_phase,
-            c2_weight=self.c2_weight,
-            ortho=self.ortho,
-            ortho_weight=self.ortho_weight,
-            smooth_weight=self.smooth_weight,
-            directional=s.directional,
-        )
+        ctrl_kw: _ControlRunKwargs = {
+            "topo": ctrl_topo,
+            "device": device,
+            "phase": tmop_phase,
+            "c2_weight": self.c2_weight,
+            "ortho": self.ortho,
+            "ortho_weight": self.ortho_weight,
+            "smooth_weight": self.smooth_weight,
+            "directional": s.directional,
+        }
         ctrl_target = s.iso if target is None else target
         chunk_n = self.control_chunk if self.control_chunk > 0 else self.max_outer
         sess_c = None
@@ -1927,7 +1960,7 @@ def run_pipeline(
     config: PipelineConfig | None = None,
     *,
     stages=None,
-    device: str | None = None,
+    device: Device | None = None,
     mindet_history=None,
     energy_history=None,
     verbose=True,

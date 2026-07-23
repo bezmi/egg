@@ -10,7 +10,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
+
+if TYPE_CHECKING:
+    from egg.core.types import MultiBlockGrid
+    from egg.geometry.base import GeometryEntity
 
 __all__ = ["project_nodes", "tangential_slide", "tangent_projector"]
 
@@ -40,13 +46,15 @@ def tangential_slide(pos: np.ndarray, delta: np.ndarray, entity) -> np.ndarray:
     return np.asarray(entity.project(moved), dtype=float)
 
 
-def project_nodes(grid, dof_constraints: dict | None = None) -> None:
+def project_nodes(
+    grid: MultiBlockGrid, dof_constraints: dict[int, GeometryEntity] | None = None
+) -> None:
     """Snap every sliding DOF back onto its entity (orthogonal projection).
 
     Propagates the corrected positions into the per-block node arrays.
     """
     if dof_constraints is None:
-        dof_constraints = getattr(grid, "dof_constraints", {})
+        dof_constraints = grid.dof_constraints
     # ``global_nodes`` may be a read-only view (e.g. fresh from ``np.asarray`` of
     # a JAX array after a fused sweep); ensure it is writable before snapping.
     if not grid.global_nodes.flags.writeable:

@@ -22,10 +22,14 @@ The inner loop runs on the C++ backend via
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from . import batch as _batch
+
+if TYPE_CHECKING:
+    from .config_types import EnergyStencil
 
 __all__ = ["untangle", "UntangleResult"]
 
@@ -41,7 +45,7 @@ class UntangleResult:
     no_op: bool = False  # input already valid (margin met), nothing done
 
 
-def grid_min_det(X: np.ndarray, energy_stencil: dict) -> float:
+def grid_min_det(X: np.ndarray, energy_stencil: EnergyStencil) -> float:
     """Raw ``min det A`` over every (cell, corner) sample (host, NumPy)."""
     es = energy_stencil
     A = _batch.assemble_A(X, es["gc"], es["gn0"], es["gn1"], es["s0"], es["s1"])

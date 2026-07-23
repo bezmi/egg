@@ -20,11 +20,15 @@ parametrizations are implemented exactly once, in ``src/geometry.hpp``.
 
 from __future__ import annotations
 
-from typing import Any
+from abc import abstractmethod
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from .base import GeometryEntity
+
+if TYPE_CHECKING:
+    from egg.geometry.frontend2d import Vector3
 
 __all__ = [
     "CircleArc",
@@ -40,8 +44,9 @@ class _TrimmedCurve(GeometryEntity):
     """Shared parametric-evaluation base for interval-trimmed curves.
 
     Subclasses supply ``eval``/``deriv``/``deriv2`` plus ``t0``/``t1``/
-    ``closed``; the vector counterparts below default to scalar loops and
-    are overridden where the expressions broadcast.
+    ``closed``. Those three are numpy-broadcasting: a scalar ``t`` returns shape
+    ``(2,)`` and an array of ``n`` parameters returns ``(n, 2)``. The batched
+    ``*_many`` forms below therefore just call them with the whole array.
     """
 
     t0: float
@@ -52,17 +57,34 @@ class _TrimmedCurve(GeometryEntity):
     def dim(self) -> int:
         return 1
 
+    @abstractmethod
+    def eval(self, t: float | np.ndarray) -> np.ndarray:
+        """Point(s) at native parameter(s) ``t``. Shape ``np.shape(t) + (2,)``."""
+        ...
+
+    @abstractmethod
+    def deriv(self, t: float | np.ndarray) -> np.ndarray:
+        """d/dt of :meth:`eval` at ``t``. Shape ``np.shape(t) + (2,)``."""
+        ...
+
+    def deriv2(self, t: float | np.ndarray) -> np.ndarray:
+        """d2/dt2 of :meth:`eval` at ``t``. Shape ``np.shape(t) + (2,)``.
+
+        Optional second derivative (curvature): the curve kinds that support it
+        override this; the others raise."""
+        raise NotImplementedError(f"{type(self).__name__} has no second derivative")
+
     def eval_many(self, ts: np.ndarray) -> np.ndarray:
         """Points at each parameter in ``ts``. Shape (n, 2)."""
-        return np.stack([self.eval(float(t)) for t in ts])
+        return self.eval(np.asarray(ts, dtype=float))
 
     def deriv_many(self, ts: np.ndarray) -> np.ndarray:
         """d/dt of :meth:`eval` at each parameter in ``ts``. Shape (n, 2)."""
-        return np.stack([self.deriv(float(t)) for t in ts])
+        return self.deriv(np.asarray(ts, dtype=float))
 
     def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
         """d2/dt2 of :meth:`eval` at each parameter in ``ts``. Shape (n, 2)."""
-        return np.stack([self.deriv2(float(t)) for t in ts])
+        return self.deriv2(np.asarray(ts, dtype=float))
 
 
 class CircleArc(_TrimmedCurve):
@@ -73,6 +95,12 @@ class CircleArc(_TrimmedCurve):
     interval before it reaches the C++ projection kernels.
     """
 
+    # gdtk-style construction provenance: set by frontend2d.Arc, read by
+    # egg.webui.scene to recover a topology from local construction.
+    p0: Vector3 | None = None
+    p1: Vector3 | None = None
+    centre: Vector3 | None = None
+
     def __init__(
         self, center, radius: float, t0: float, t1: float, closed: bool = False
     ):
@@ -80,21 +108,13 @@ class CircleArc(_TrimmedCurve):
         self.radius = float(radius)
         self.t0, self.t1, self.closed = float(t0), float(t1), bool(closed)
 
-    def eval(self, t: float) -> np.ndarray:
+    def eval(self, t: float | np.ndarray) -> np.ndarray:
         """Point at angle t (radians)."""
-        return self.center + self.radius * np.array([np.cos(t), np.sin(t)])
+        return self.center + self.radius * np.stack([np.cos(t), np.sin(t)], axis=-1)
 
-    def deriv(self, t: float) -> np.ndarray:
+    def deriv(self, t: float | np.ndarray) -> np.ndarray:
         """d/dt of :meth:`eval`."""
-        return self.radius * np.array([-np.sin(t), np.cos(t)])
-
-    def eval_many(self, ts: np.ndarray) -> np.ndarray:
-        ts = np.asarray(ts, dtype=float)
-        return self.center + self.radius * np.stack([np.cos(ts), np.sin(ts)], -1)
-
-    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
-        ts = np.asarray(ts, dtype=float)
-        return self.radius * np.stack([-np.sin(ts), np.cos(ts)], -1)
+        return self.radius * np.stack([-np.sin(t), np.cos(t)], axis=-1)
 
 
 class EllipseArc(_TrimmedCurve):
@@ -114,78 +134,65 @@ class EllipseArc(_TrimmedCurve):
         self.a, self.b, self.phi = float(a), float(b), float(phi)
         self.t0, self.t1, self.closed = float(t0), float(t1), bool(closed)
 
-    def _rot(self, x: float, y: float) -> np.ndarray:
+    def _rot(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Rotate ``(x, y)`` by ``phi``, stacking the coordinate on the last
+        axis so scalar and array inputs both broadcast."""
         cp, sp = np.cos(self.phi), np.sin(self.phi)
-        return np.array([cp * x - sp * y, sp * x + cp * y])
+        return np.stack([cp * x - sp * y, sp * x + cp * y], axis=-1)
 
-    def eval(self, t: float) -> np.ndarray:
+    def eval(self, t: float | np.ndarray) -> np.ndarray:
         """Point at parametric angle t (radians)."""
         return self.center + self._rot(self.a * np.cos(t), self.b * np.sin(t))
 
-    def deriv(self, t: float) -> np.ndarray:
+    def deriv(self, t: float | np.ndarray) -> np.ndarray:
         """d/dt of :meth:`eval`."""
         return self._rot(-self.a * np.sin(t), self.b * np.cos(t))
 
-    def deriv2(self, t: float) -> np.ndarray:
+    def deriv2(self, t: float | np.ndarray) -> np.ndarray:
         """d2/dt2 of :meth:`eval`."""
         return self._rot(-self.a * np.cos(t), -self.b * np.sin(t))
-
-    def _rot_many(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        cp, sp = np.cos(self.phi), np.sin(self.phi)
-        return np.stack([cp * x - sp * y, sp * x + cp * y], -1)
-
-    def eval_many(self, ts: np.ndarray) -> np.ndarray:
-        ts = np.asarray(ts, dtype=float)
-        return self.center + self._rot_many(self.a * np.cos(ts), self.b * np.sin(ts))
-
-    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
-        ts = np.asarray(ts, dtype=float)
-        return self._rot_many(-self.a * np.sin(ts), self.b * np.cos(ts))
-
-    def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
-        ts = np.asarray(ts, dtype=float)
-        return self._rot_many(-self.a * np.cos(ts), -self.b * np.sin(ts))
 
 
 class QuadBezier(_TrimmedCurve):
     """A quadratic Bézier over control points P0, P1, P2."""
 
+    # Construction provenance retained by frontend2d.Bezier (see CircleArc).
+    points: list[Vector3] | None = None
+
     def __init__(self, p0, p1, p2, t0: float = 0.0, t1: float = 1.0):
         self.p = np.stack([np.asarray(v, dtype=float) for v in (p0, p1, p2)])
         self.t0, self.t1, self.closed = float(t0), float(t1), False
 
-    def eval(self, t: float) -> np.ndarray:
+    def eval(self, t: float | np.ndarray) -> np.ndarray:
         """Point at parameter t."""
+        t = np.asarray(t, dtype=float)[..., None]
         u = 1.0 - t
         return u * u * self.p[0] + 2 * u * t * self.p[1] + t * t * self.p[2]
 
-    def deriv(self, t: float) -> np.ndarray:
+    def deriv(self, t: float | np.ndarray) -> np.ndarray:
         """d/dt of :meth:`eval`."""
+        t = np.asarray(t, dtype=float)[..., None]
         return 2 * (1 - t) * (self.p[1] - self.p[0]) + 2 * t * (self.p[2] - self.p[1])
 
-    def deriv2(self, t: float) -> np.ndarray:
+    def deriv2(self, t: float | np.ndarray) -> np.ndarray:
         """d2/dt2 of :meth:`eval` (constant)."""
-        return 2 * (self.p[2] - 2 * self.p[1] + self.p[0])
-
-    def eval_many(self, ts: np.ndarray) -> np.ndarray:
-        return self.eval(np.asarray(ts, dtype=float)[:, None])
-
-    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
-        return self.deriv(np.asarray(ts, dtype=float)[:, None])
-
-    def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
-        return np.broadcast_to(self.deriv2(0.0), (len(ts), 2))
+        c = 2 * (self.p[2] - 2 * self.p[1] + self.p[0])
+        return np.broadcast_to(c, np.shape(np.asarray(t, dtype=float)) + (2,))
 
 
 class CubicBezier(_TrimmedCurve):
     """A cubic Bézier over control points P0..P3."""
 
+    # Construction provenance retained by frontend2d.Bezier (see CircleArc).
+    points: list[Vector3] | None = None
+
     def __init__(self, p0, p1, p2, p3, t0: float = 0.0, t1: float = 1.0):
         self.p = np.stack([np.asarray(v, dtype=float) for v in (p0, p1, p2, p3)])
         self.t0, self.t1, self.closed = float(t0), float(t1), False
 
-    def eval(self, t: float) -> np.ndarray:
+    def eval(self, t: float | np.ndarray) -> np.ndarray:
         """Point at parameter t."""
+        t = np.asarray(t, dtype=float)[..., None]
         u = 1.0 - t
         return (
             u**3 * self.p[0]
@@ -194,8 +201,9 @@ class CubicBezier(_TrimmedCurve):
             + t**3 * self.p[3]
         )
 
-    def deriv(self, t: float) -> np.ndarray:
+    def deriv(self, t: float | np.ndarray) -> np.ndarray:
         """d/dt of :meth:`eval`."""
+        t = np.asarray(t, dtype=float)[..., None]
         u = 1.0 - t
         return (
             3 * u * u * (self.p[1] - self.p[0])
@@ -203,23 +211,13 @@ class CubicBezier(_TrimmedCurve):
             + 3 * t * t * (self.p[3] - self.p[2])
         )
 
-    def deriv2(self, t: float) -> np.ndarray:
+    def deriv2(self, t: float | np.ndarray) -> np.ndarray:
         """d2/dt2 of :meth:`eval`."""
+        t = np.asarray(t, dtype=float)[..., None]
         u = 1.0 - t
         return 6 * u * (self.p[2] - 2 * self.p[1] + self.p[0]) + 6 * t * (
             self.p[3] - 2 * self.p[2] + self.p[1]
         )
-
-    # The polynomial expressions above broadcast over a column of
-    # parameters: (n, 1) * (2,) -> (n, 2).
-    def eval_many(self, ts: np.ndarray) -> np.ndarray:
-        return self.eval(np.asarray(ts, dtype=float)[:, None])
-
-    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
-        return self.deriv(np.asarray(ts, dtype=float)[:, None])
-
-    def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
-        return self.deriv2(np.asarray(ts, dtype=float)[:, None])
 
 
 class BSplineCurve(_TrimmedCurve):
@@ -231,6 +229,9 @@ class BSplineCurve(_TrimmedCurve):
     polynomial path. The live domain is ``[knots[degree], knots[n_ctrl]]``; the
     C++ side caps the degree at ``kMaxBSplineDegree = 7``.
     """
+
+    # Construction provenance retained by frontend2d.Bezier (see CircleArc).
+    points: list[Vector3] | None = None
 
     def __init__(self, degree: int, knots, ctrl, weights=None):
         from scipy.interpolate import BSpline as _SciBSpline
@@ -262,57 +263,35 @@ class BSplineCurve(_TrimmedCurve):
         self.t1 = float(self.knots[n_ctrl])
         self.closed = False
 
-    def eval(self, t: float) -> np.ndarray:
-        """Point at knot-space parameter t."""
+    # scipy's BSpline evaluates a scalar to (2,) and an array of n params to
+    # (n, 2); the rational quotient rule broadcasts the weight splines on the
+    # trailing coordinate axis, so scalar and array both work.
+    def eval(self, t: float | np.ndarray) -> np.ndarray:
+        """Point(s) at knot-space parameter(s) t."""
         A = np.asarray(self._spl(t), dtype=float)
         if self.weights is None:
             return A
-        return A / float(self._w(t))
+        return A / np.asarray(self._w(t), dtype=float)[..., None]
 
-    def deriv(self, t: float) -> np.ndarray:
+    def deriv(self, t: float | np.ndarray) -> np.ndarray:
         """d/dt of :meth:`eval` (quotient rule for the rational form)."""
         A1 = np.asarray(self._d1(t), dtype=float)
         if self.weights is None:
             return A1
-        w = float(self._w(t))
-        return (A1 - float(self._w1(t)) * self.eval(t)) / w
+        w = np.asarray(self._w(t), dtype=float)[..., None]
+        w1 = np.asarray(self._w1(t), dtype=float)[..., None]
+        return (A1 - w1 * self.eval(t)) / w
 
-    def deriv2(self, t: float) -> np.ndarray:
+    def deriv2(self, t: float | np.ndarray) -> np.ndarray:
         """d2/dt2 of :meth:`eval` (quotient rule for the rational form)."""
         A2 = np.asarray(self._d2(t), dtype=float)
         if self.weights is None:
             return A2
-        w = float(self._w(t))
+        w = np.asarray(self._w(t), dtype=float)[..., None]
+        w1 = np.asarray(self._w1(t), dtype=float)[..., None]
+        w2 = np.asarray(self._w2(t), dtype=float)[..., None]
         C, C1 = self.eval(t), self.deriv(t)
-        return (A2 - 2.0 * float(self._w1(t)) * C1 - float(self._w2(t)) * C) / w
-
-    # scipy's BSpline evaluates arrays natively; the rational form applies
-    # the same quotient rule with the weight splines as columns.
-    def eval_many(self, ts: np.ndarray) -> np.ndarray:
-        ts = np.asarray(ts, dtype=float)
-        A = np.asarray(self._spl(ts), dtype=float)
-        if self.weights is None:
-            return A
-        return A / np.asarray(self._w(ts), dtype=float)[:, None]
-
-    def deriv_many(self, ts: np.ndarray) -> np.ndarray:
-        ts = np.asarray(ts, dtype=float)
-        A1 = np.asarray(self._d1(ts), dtype=float)
-        if self.weights is None:
-            return A1
-        w = np.asarray(self._w(ts), dtype=float)[:, None]
-        w1 = np.asarray(self._w1(ts), dtype=float)[:, None]
-        return (A1 - w1 * self.eval_many(ts)) / w
-
-    def deriv2_many(self, ts: np.ndarray) -> np.ndarray:
-        ts = np.asarray(ts, dtype=float)
-        A2 = np.asarray(self._d2(ts), dtype=float)
-        if self.weights is None:
-            return A2
-        w = np.asarray(self._w(ts), dtype=float)[:, None]
-        w1 = np.asarray(self._w1(ts), dtype=float)[:, None]
-        w2 = np.asarray(self._w2(ts), dtype=float)[:, None]
-        return (A2 - 2.0 * w1 * self.deriv_many(ts) - w2 * self.eval_many(ts)) / w
+        return (A2 - 2.0 * w1 * C1 - w2 * C) / w
 
 
 class CompositePath(GeometryEntity):
@@ -330,6 +309,8 @@ class CompositePath(GeometryEntity):
     t0: float = 0.0
     t1: float = 1.0
     closed: bool = False
+    # Construction provenance retained by frontend2d.Spline/Polyline.
+    points: list[Vector3] | None = None
 
     def __init__(self, segments):
         segments = list(segments)

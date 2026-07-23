@@ -36,9 +36,12 @@ the identity, so a wrapped script builds the same headless.
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .block_topology import BlockTopology
 
 from .block_topology import ParallelWalkWarning
 from .builder import TopologyBuilder
@@ -423,7 +426,7 @@ class ExplicitTopology:
 
         def split_ends(spec):
             sp = list(spec.get("split") or ())
-            return tuple(sp[:2]) if len(sp) >= 2 else (None, None)
+            return (sp[0], sp[1]) if len(sp) >= 2 else (None, None)
 
         pending: dict = {}
         for nid, spec in nodes.items():
@@ -443,6 +446,7 @@ class ExplicitTopology:
                     pos[i] = p
                     fixed = bool(fx) if fx is not None else getattr(old, "fixed", True)
                     if old is not None:
+                        assert seed is not None  # old came from seed._corners
                         seed._corners[nid] = Corner(name=nid, position=p, fixed=fixed)
                 bind_on(i, on)
                 continue
@@ -689,7 +693,7 @@ class ExplicitTopology:
         else:
             corners, specs, assocs = base.corners, base.block_specs, base.associations
         idx = list(_product((0, 1), repeat=3))
-        pmap = {ci: i for i, ci in enumerate(idx)}
+        pmap: dict[tuple[int, ...], int] = {ci: i for i, ci in enumerate(idx)}
         pos = {name: np.asarray(c.position, float) for name, c in corners.items()}
         fixed = {name: bool(getattr(c, "fixed", True)) for name, c in corners.items()}
         edges: set = set()
@@ -697,7 +701,7 @@ class ExplicitTopology:
             cn = spec.corner_names
             for a, ci in enumerate(idx):
                 for axis in range(3):
-                    nb = list(ci)
+                    nb = [int(x) for x in ci]
                     nb[axis] ^= 1
                     b = pmap[tuple(nb)]
                     if a < b:
@@ -945,7 +949,7 @@ class ExplicitTopology:
         """The flatten diagnostics; empty means green/committable."""
         return self.flatten()[1]
 
-    def build(self):
+    def build(self) -> BlockTopology:
         """The BlockTopology, raising ValueError on the first (non-warning)
         diagnostic."""
         topo, diags = self.flatten()
@@ -1062,14 +1066,14 @@ class ExplicitTopology:
 
         nodes: dict[str, dict] = {}
         for name, c in topo.corners.items():
-            spec: dict = {
+            node_dict: dict = {
                 ("xyz" if self.d == 3 else "xy"): [
                     rnd(c.position[k]) for k in range(self.d)
                 ]
             }
             if getattr(c, "fixed", False):
-                spec["fixed"] = True
-            nodes[name] = spec
+                node_dict["fixed"] = True
+            nodes[name] = node_dict
 
         # Corners placed on a curve that has no association seed their edges
         # along it at init; a blocking has no free-yet-curve-seeded notion.
@@ -1119,9 +1123,9 @@ class ExplicitTopology:
                         on = nodes[cn].setdefault("on", [])
                         if lbl not in on:
                             on.append(lbl)
-            for spec in nodes.values():
-                if "on" in spec:
-                    spec["on"] = sorted(spec["on"])
+            for node in nodes.values():
+                if "on" in node:
+                    node["on"] = sorted(node["on"])
             out3 = {"nodes": nodes, "blocks": blocks, "res": 10}
             if topo.fan_frames:
                 out3["fan_frames"] = self._fan_frames_export(topo)

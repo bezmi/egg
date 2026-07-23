@@ -27,6 +27,7 @@ import ast
 import io
 import json
 import os
+from typing import TypeGuard
 import sys
 import threading
 import time
@@ -66,7 +67,7 @@ Bounds = tuple[np.ndarray, np.ndarray]
 class Scene:
     """Harvested world-space primitives, ready for rendering."""
 
-    curves: list[tuple[str, str, np.ndarray]] = field(default_factory=list)
+    curves: list[tuple[str, str, np.ndarray, int]] = field(default_factory=list)
     points: list[tuple[str, str, float, float]] = field(default_factory=list)
     # control cages: (name, (n, 2) vertex array, per-vertex kind) — the
     # Vector3s a curve was constructed from, drawn as CAD-style control
@@ -81,10 +82,12 @@ class Scene:
     # adjacency so no two blocks sharing a boundary get the same colour.
     block_colors: dict[str, int] = field(default_factory=dict)
     # topology-view primitives (straight-edged, from the BlockTopology)
-    topo_blocks: list[tuple[str, np.ndarray]] = field(default_factory=list)
-    topo_corners: list[tuple[str, float, float, bool]] = field(default_factory=list)
+    topo_blocks: list[tuple[str, np.ndarray, list[int]]] = field(default_factory=list)
+    topo_corners: list[tuple[str, float, float, bool, int | None, list[int]]] = field(
+        default_factory=list
+    )
     topo_connections: list[tuple[str, np.ndarray]] = field(default_factory=list)
-    topo_associations: list[tuple[str, np.ndarray]] = field(default_factory=list)
+    topo_associations: list[tuple[str, np.ndarray, int]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -136,12 +139,14 @@ class GuardParam:
     name: str
     text: str  # exact source text of the value (e.g. "5.0e-3")
     kind: str  # bool | int | float | str
-    span: tuple[int, int, int, int]  # lineno, col, end_lineno, end_col (1-based lines)
+    # lineno, col, end_lineno, end_col (1-based lines); end_* are None on some
+    # ast nodes.
+    span: tuple[int, int, int | None, int | None]
     choices: tuple | None = None  # literal options -> dropdown (editable() only)
     show_if: dict | None = None  # {param: value|[values]} -> shown only when matched
 
 
-def _is_params_call(node) -> bool:
+def _is_params_call(node: ast.AST) -> TypeGuard[ast.Call]:
     """``params(...)`` / ``egg_webui.params(...)``."""
     if not isinstance(node, ast.Call):
         return False
@@ -207,7 +212,7 @@ def _literal_kind(val: ast.expr) -> str | None:
     return None
 
 
-def _is_editable_call(node) -> bool:
+def _is_editable_call(node: ast.AST) -> TypeGuard[ast.Call]:
     """``editable(...)`` / ``egg_webui.editable(...)`` with a positional arg."""
     if not (isinstance(node, ast.Call) and node.args):
         return False
@@ -391,13 +396,14 @@ def set_guard_param(code: str, name: str, raw: str) -> str:
         raise ValueError(f"{name!r} must be one of {list(p.choices)}, not {raw!r}")
     lines = code.splitlines(keepends=True)
     l0, c0, l1, c1 = p.span
+    assert l1 is not None and c1 is not None  # value nodes carry end spans
     # splice over [l0:c0, l1:c1] (1-based lines, 0-based cols)
     start = sum(len(ln) for ln in lines[: l0 - 1]) + c0
     end = sum(len(ln) for ln in lines[: l1 - 1]) + c1
     return code[:start] + new + code[end:]
 
 
-def _is_explicit_topology_call(node) -> bool:
+def _is_explicit_topology_call(node: ast.AST) -> TypeGuard[ast.Call]:
     """``ExplicitTopology(...)`` / ``x.ExplicitTopology(...)``."""
     if not isinstance(node, ast.Call):
         return False
@@ -872,7 +878,7 @@ def su2_export_text(code: str, path: str | None = None) -> tuple[str | None, str
         return None, f"export failed: {exc}"
 
 
-def _iter_named(ns: dict, depth: int = HARVEST_DEPTH, prefix: str = ""):
+def _iter_named(ns: dict | list, depth: int = HARVEST_DEPTH, prefix: str = ""):
     """Yield (name, obj) for values, recursing ``depth`` levels into containers."""
     items = (
         ns.items()
@@ -1286,7 +1292,7 @@ def grid_quality(grid_blocks: list[np.ndarray]) -> dict[str, tuple] | None:
     }
 
 
-def _line_indices(n: int, cap: int = None) -> np.ndarray:
+def _line_indices(n: int, cap: int | None = None) -> np.ndarray:
     """Grid-line indices to draw for a block axis of ``n`` lines.
 
     Dense blocks are decimated to ``MAX_GRID_LINES`` evenly spaced lines

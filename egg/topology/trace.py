@@ -321,7 +321,7 @@ def trace_topology(
         # proximity-based, and inside a band of close parallel curves a
         # cross-band tie looks like it follows one — feeding its endpoints
         # false extra targets).
-        labels = set(declared_curves.get(i, ()) if declared_curves else ())
+        labels = set((declared_curves.get(i) or ()) if declared_curves else ())
         if not labels:
             for a, c in edge_set:
                 if i in (a, c):
@@ -467,10 +467,11 @@ def trace_topology(
         labels = [
             edge_curve(loop[m], loop[(m + 1) % len(loop)]) for m in range(len(loop))
         ]
+        lbl0 = labels[0] if labels else None
         if (
-            labels
-            and all(x is not None and x == labels[0] for x in labels)
-            and (closed_by_label.get(labels[0], False))
+            lbl0 is not None
+            and all(x == lbl0 for x in labels)
+            and closed_by_label.get(lbl0, False)
         ):
             continue  # a region we mesh around (e.g. the egg interior)
         if len(loop) != 4:

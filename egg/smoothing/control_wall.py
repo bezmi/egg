@@ -39,8 +39,12 @@ sparse gather (<= 2 terms per row), so the reduced system is
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from egg.geometry.base import GeometryEntity
 
 from egg.geometry.control_net import tensor_map, tfi_operator
 from egg.smoothing.batch import energy_and_mindet
@@ -76,7 +80,7 @@ class WallSpec:
 
     axis: int
     side: int
-    entity: object
+    entity: GeometryEntity
     ortho: str = "penalty"
     weight: float | np.ndarray = 1.0
 
@@ -103,7 +107,7 @@ class ControlWallRef:
     X0_boundary: np.ndarray  # (node_shape + (d,)) initial exact boundary
     h_min: float = 0.0
     # Frozen frame (rebuilt each outer iteration by _build_frame):
-    R: np.ndarray = field(default=None, repr=False)
+    R: np.ndarray | None = field(default=None, repr=False)
     pen: list = field(default_factory=list, repr=False)  # (i0, i1, t_hat, w_eff)
 
 
@@ -537,6 +541,7 @@ def run_control_wall_ref(
         G_full, A_full = reduced_system(Xg, cref)
         Gp, Ap = _pen_grad_hess(wref)
         R = wref.R
+        assert R is not None
         Gq = R.T @ (G_full.reshape(-1) + Gp)
         Aq = R.T @ (A_full + Ap) @ R
         nq = Gq.shape[0]
@@ -560,6 +565,7 @@ def run_control_wall_ref(
             )
             Cfree0 = cref.C.reshape(-1, 2)[free_flat]
             alpha = 1.0
+            e, md = e0, 1.0  # seed; the line search overwrites before use
             while alpha >= alpha_min:
                 e_f, md = fine_energy_mindet(Xg + alpha * corr)
                 e = e_f + _pen_energy(wref, Cfree0 + alpha * dC)

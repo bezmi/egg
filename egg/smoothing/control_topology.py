@@ -53,8 +53,41 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from itertools import product
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from egg.core.types import MultiBlockGrid
+    from egg.geometry.base import GeometryEntity
+    from egg.geometry.control_net import ControlNetMap
+    from egg.smoothing.control_ref import ControlRefContext
+
+
+class _CsrArrays(Protocol):
+    """The CSR/CSC array views the control net reads off a reduced matrix."""
+
+    indptr: np.ndarray
+    indices: np.ndarray
+    data: np.ndarray
+
+
+class SparseReduction(Protocol):
+    """The subset of the sparse-matrix interface used for the reduction ``R``.
+
+    A minimal Protocol, rather than ``scipy.sparse.csr_matrix`` directly: scipy's
+    own sparse stubs type ``@``/``.shape`` with broad unions that cascade through
+    every use site. This captures exactly the operations the control net needs.
+    """
+
+    @property
+    def shape(self) -> tuple[int, ...]: ...
+    @property
+    def T(self) -> SparseReduction: ...
+    def __matmul__(self, other: np.ndarray) -> np.ndarray: ...
+    def tocsr(self) -> _CsrArrays: ...
+    def tocsc(self) -> _CsrArrays: ...
+    def toarray(self) -> np.ndarray: ...
 
 from egg.geometry.control_net import (
     bspline_basis,
@@ -135,8 +168,10 @@ class Seam:
     mu_b: float
     tang_shape_a: tuple[int, ...]
     tang_shape_b: tuple[int, ...]
-    elim: np.ndarray = field(default=None, repr=False)
-    fan: np.ndarray = field(default=None, repr=False)
+    # Set for every seam right after construction (see _resolve_seams); the
+    # default keeps the dataclass valid before that fill.
+    elim: np.ndarray | None = field(default=None, repr=False)
+    fan: np.ndarray | None = field(default=None, repr=False)
 
     def map_tang(self, j: tuple[int, ...]) -> tuple[int, ...]:
         """Side-a face-lattice index -> side-b index."""
@@ -311,6 +346,7 @@ def _block_encodings(
                 if i != q_i or (k, side) not in seams_by_face:
                     continue
                 seam, is_a = seams_by_face[(k, side)]
+                assert seam.elim is not None  # set at seam build
                 tang = tuple(m[t] for t in range(d) if t != k)
                 tang_a = tang if is_a else seam.map_tang_inv(tang)
                 if not seam.elim[tang_a]:
@@ -356,7 +392,7 @@ def _map_symbol(sym: tuple, seam: Seam, ctrl_shapes: list) -> tuple[tuple, int] 
 
     taxes_a = [k for k in range(d) if k != seam.axis_a]
     taxes_b = [k for k in range(d) if k != seam.axis_b]
-    out = [None] * d
+    out: list[tuple[str, int] | None] = [None] * d
     out[seam.axis_b] = cb
     for m, k in enumerate(taxes_a):
         kp = taxes_b[seam.perm[m]]
@@ -379,32 +415,34 @@ def _map_symbol(sym: tuple, seam: Seam, ctrl_shapes: list) -> tuple[tuple, int] 
 class ControlTopology:
     """The global reduced control parameterization ``C_stacked = R q``."""
 
-    grid: object
+    grid: MultiBlockGrid
     d: int
     ctrl_shapes: list[tuple[int, ...]]
-    cmaps: list  # per-block ControlNetMap
+    cmaps: list[ControlNetMap]  # per-block
     seams: list[Seam]
-    R: np.ndarray  # (N_ctrl_total, n_roots) scalar reduction
+    R: SparseReduction  # sparse (N_ctrl_total, n_roots) scalar reduction (csr at runtime)
     root_free: np.ndarray  # (n_roots,) bool
-    root_syms: list  # canonical symbol per root (diagnostics / T lookup)
+    root_syms: list[tuple]  # canonical symbol per root (diagnostics / T lookup)
     q: np.ndarray  # (n_roots, d) current reduced state (fixed rows frozen)
     block_offsets: np.ndarray  # (nb + 1,) stacked-control offsets
-    b_fields: list  # per-block Boolean-sum offsets (node_shape + (d,))
-    t_root: dict = field(default_factory=dict)  # (seam_idx, tang) -> root
-    s_root: dict = field(default_factory=dict)  # (seam_idx, tang) -> root
+    b_fields: list[np.ndarray]  # per-block Boolean-sum offsets (node_shape + (d,))
+    t_root: dict = field(default_factory=dict)  # (seam_idx, tang) -> (root col, sign)
+    s_root: dict = field(default_factory=dict)  # (seam_idx, tang) -> root col
     fit_residual: float = 0.0  # max control move of the initial C1 projection
-    wall_faces: dict = field(default_factory=dict)  # (block, axis, side) -> entity
-    root_entity: dict = field(default_factory=dict)  # sliding root col -> entity
+    # (block, axis, side) -> wall entity
+    wall_faces: dict[tuple[int, int, int], GeometryEntity] = field(default_factory=dict)
+    # sliding root col -> entity
+    root_entity: dict[int, GeometryEntity] = field(default_factory=dict)
     axis_params: list = field(default_factory=list)  # per block, per axis node params
     # Optional exact-reproduction layer: the per-node difference between the
     # grid the net was fitted to and the net evaluation, at the CURRENT
     # sampling (global-node order). None when the net carries no residual.
-    residual: object = None
+    residual: np.ndarray | None = None
     # The raw source of that residual, keyed to the ORIGINAL sampling it was
     # saved at: (per-block list of per-axis params, per-block field array). Kept
     # so the residual can be re-interpolated to a NEW sampling (a regrid /
     # remesh), where the resolution-locked ``residual`` array no longer aligns.
-    residual_src: object = None
+    residual_src: tuple[list, list] | None = None
 
     @property
     def n_roots(self) -> int:
@@ -472,7 +510,8 @@ class ControlTopology:
                 np.asarray(fields[bi], dtype=float),
                 method="linear",
                 bounds_error=False,
-                fill_value=None,
+                # None = extrapolate; scipy's stub types fill_value as float only.
+                fill_value=None,  # type: ignore[arg-type]
             )
             mesh = np.stack(np.meshgrid(*new_p, indexing="ij"), axis=-1)
             shp = tuple(len(p) for p in new_p)
@@ -538,7 +577,9 @@ def _has_t(sym: tuple) -> bool:
     return any(c[0] == "T" for c in sym[1])
 
 
-def detect_control_walls(grid, seam_faces: set) -> dict[tuple[int, int, int], object]:
+def detect_control_walls(
+    grid, seam_faces: set
+) -> dict[tuple[int, int, int], GeometryEntity]:
     """Outer faces riding one CAD entity: ``(block, axis, side) -> entity``.
 
     A face is a wall when every non-corner fine node on it is constrained to
@@ -547,7 +588,7 @@ def detect_control_walls(grid, seam_faces: set) -> dict[tuple[int, int, int], ob
     entities, are not walls — their controls stay fixed.
     """
     d = grid.topology.d
-    walls: dict[tuple[int, int, int], object] = {}
+    walls: dict[tuple[int, int, int], GeometryEntity] = {}
     for bi, blk in enumerate(grid.blocks):
         dm = grid.block_dof_maps[bi]
         shape = blk.logical_shape
@@ -573,7 +614,9 @@ def detect_control_walls(grid, seam_faces: set) -> dict[tuple[int, int, int], ob
     return walls
 
 
-def _wall_crease_corners(grid, wall_faces: dict, kink_deg: float = 30.0) -> set:
+def _wall_crease_corners(
+    grid, wall_faces: dict[tuple[int, int, int], GeometryEntity], kink_deg: float = 30.0
+) -> set:
     """Fine-node gids of wall block corners where the boundary kinks.
 
     Measured on the initial boundary polyline: at each block corner of a
@@ -701,6 +744,7 @@ def _fan_mask(grid, seams: list[Seam], ctrl_shapes: list) -> None:
     if not fan_gids and not fan_edge_gids:
         return
     for s in seams:
+        assert s.elim is not None and s.fan is not None  # set at seam build
         blk = grid.blocks[s.a]
         dm = grid.block_dof_maps[s.a]
         shape = blk.logical_shape
@@ -728,7 +772,7 @@ def _fan_mask(grid, seams: list[Seam], ctrl_shapes: list) -> None:
         if fan_edge_gids:
             for m, k in enumerate(taxes):
                 for e_lat, e_fine in ((0, 0), (s.tang_shape_a[m] - 1, shape[k] - 1)):
-                    idx = [slice(None)] * 3
+                    idx: list[slice | int] = [slice(None)] * 3
                     idx[s.axis_a] = 0 if s.side_a == 0 else shape[s.axis_a] - 1
                     idx[k] = e_fine
                     line = dm[tuple(idx)]
@@ -865,6 +909,7 @@ def _harmonize_axis_params(params, groups: list[list]) -> None:
             p = params[bi][k]
             p = 1.0 - p[::-1] if f else p
             acc = p if acc is None else acc + p
+        assert acc is not None  # len(members) >= 2 above, so the loop ran
         acc = acc / len(members)
         acc[0], acc[-1] = 0.0, 1.0
         for bi, k, f in members:
@@ -942,7 +987,7 @@ def build_control_topology(
     degree: int = 3,
     c1: bool = True,
     walls: bool = False,
-    fit_spacing="uniform",
+    fit_spacing: str | list = "uniform",
     fan_refine: int = 0,
     knots: list[list[np.ndarray]] | None = None,
 ) -> ControlTopology:
@@ -1107,6 +1152,7 @@ def build_control_topology(
                 all_syms.add(sym)
                 uf.add(sym)
     for s in seams:
+        assert s.elim is not None  # set at seam build
         for sym in sorted(all_syms):
             img = _map_symbol(sym, s, ctrl_shapes)
             if img is None:
@@ -1201,7 +1247,7 @@ def build_control_topology(
             if int(grid.block_dof_maps[bi][corner]) in crease_gids:
                 r, _ = uf.find(sym)
                 root_hard_fixed[root_col[r]] = True
-    root_entity: dict[int, object] = {}
+    root_entity: dict[int, GeometryEntity] = {}
     if wall_faces:
         ent_by_id = {id(e): e for e in wall_faces.values()}
         for col, ids in root_ent_sets.items():
@@ -1216,6 +1262,7 @@ def build_control_topology(
     t_root: dict = {}
     s_root: dict = {}
     for si, s in enumerate(seams):
+        assert s.elim is not None  # set at seam build
         face_i = 0 if s.side_a == 0 else ctrl_shapes[s.a][s.axis_a] - 1
         taxes = [k for k in range(d) if k != s.axis_a]
         for tang in product(*(range(n) for n in s.tang_shape_a)):
@@ -1318,7 +1365,9 @@ def build_control_topology(
         ctrl_shapes=ctrl_shapes,
         cmaps=cmaps,
         seams=seams,
-        R=R,
+        # scipy's csr_matrix satisfies SparseReduction at runtime; its stub
+        # signatures are too imprecise to match structurally.
+        R=cast("SparseReduction", R),
         root_free=root_free,
         root_syms=root_syms,
         q=q0,
@@ -1635,7 +1684,7 @@ def _spline_face_field(
     n_row = _face_derivative_rows(topo.cmaps[bi], axis, side, orders[-1])
     out = np.zeros((pts.shape[0], d))
     for pi in range(pts.shape[0]):
-        weights = [None] * d
+        weights: list[np.ndarray | None] = [None] * d
         for m, k in enumerate(taxes):
             B = bspline_basis(
                 cs[k], 3, [pts[pi, m]], n_deriv=2, knots=topo.cmaps[bi].knots[k]
@@ -1643,8 +1692,11 @@ def _spline_face_field(
             weights[k] = B[orders[m]][0]
         weights[axis] = n_row
         W = weights[0]
+        assert W is not None  # every axis slot filled above
         for k in range(1, d):
-            W = np.multiply.outer(W, weights[k])
+            wk = weights[k]
+            assert wk is not None
+            W = np.multiply.outer(W, wk)
         out[pi] = np.tensordot(W, C, axes=d)
     return out
 
@@ -1756,7 +1808,7 @@ def _c2_rows(
         for gi in gidx:
             row = np.zeros(topo.R.shape[0])
             t_a = [gpts[m][gi[m]] for m in range(d - 1)]
-            t_b = [None] * (d - 1)
+            t_b: list[float] = [0.0] * (d - 1)
             for m in range(d - 1):
                 p = s.perm[m]
                 t_b[p] = 1.0 - t_a[m] if s.flips[m] else t_a[m]
@@ -1782,15 +1834,18 @@ def _accumulate_face_row(
     """Add a face-sample extraction row (tensor of tangential value bases and
     the given normal-axis row) into a stacked-control row vector."""
     cs = topo.ctrl_shapes[bi]
-    weights = [None] * topo.d
+    weights: list[np.ndarray | None] = [None] * topo.d
     for m, k in enumerate(taxes):
         weights[k] = bspline_basis(
             cs[k], 3, [t[m]], n_deriv=0, knots=topo.cmaps[bi].knots[k]
         )[0][0][0]
     weights[axis] = normal_row
     W = weights[0]
+    assert W is not None  # every axis slot filled above
     for k in range(1, topo.d):
-        W = np.multiply.outer(W, weights[k])
+        wk = weights[k]
+        assert wk is not None
+        W = np.multiply.outer(W, wk)
     lo = topo.block_offsets[bi]
     row[lo : lo + W.size] += sign * W.reshape(-1)
 
@@ -1814,6 +1869,7 @@ def _fan_c1_rows(topo: ControlTopology, *, reduced: bool = True) -> np.ndarray:
     d = topo.d
     rows = []
     for s in topo.seams:
+        assert s.fan is not None  # set at seam build
         if not bool(s.fan.any()):
             continue
         scale = _seam_cell_scale(topo, s)
@@ -1903,7 +1959,7 @@ def _smooth_rows(topo: ControlTopology, *, reduced: bool = True):
             keep = np.ones(tuple(cs[a] for a in taxes), dtype=bool)
             for m, a in enumerate(taxes):
                 if outer[a][0]:
-                    sl = [slice(None)] * (d - 1)
+                    sl: list[slice | int] = [slice(None)] * (d - 1)
                     sl[m] = 0
                     keep[tuple(sl)] = False
                 if outer[a][1]:
@@ -2009,6 +2065,7 @@ def _ortho_frame(
             continue
         if spec.ortho not in ("penalty", "hard"):
             raise ValueError(f"unknown seam ortho mode {spec.ortho!r}")
+        assert s.elim is not None  # set at seam build
         taxes_a = [k for k in range(d) if k != s.axis_a]
         gpts = [
             greville(n, 3, knots=topo.cmaps[s.a].knots[k])
@@ -2159,9 +2216,7 @@ def run_control_topo_ref(
     W_static = np.concatenate(W_static) if W_static else np.zeros(0)
 
     n = topo.n_roots
-    from scipy import sparse as _sp
-
-    Rd = topo.R.toarray() if _sp.issparse(topo.R) else topo.R
+    Rd = topo.R.toarray()  # R is a sparse reduction (SparseReduction)
     R_comp = np.kron(Rd, np.eye(d))
     free_int = np.repeat(topo.root_free, d)
 
@@ -2217,7 +2272,8 @@ def run_control_topo_ref(
             energies.append(e0)
             mindets.append(md0)
 
-        G_full, A_full = reduced_system(Xg, shim)  # over stacked controls
+        # shim is a SimpleNamespace standing in for a ControlRefContext.
+        G_full, A_full = reduced_system(Xg, cast("ControlRefContext", shim))
         Gq = R_comp.T @ G_full.reshape(-1)
         Aq = R_comp.T @ A_full @ R_comp
         # Penalty contributions in reduced space (interleaved layout).
@@ -2274,6 +2330,7 @@ def run_control_topo_ref(
             dq = (R2 @ dp).reshape(n, d)
             corr = Mg @ (topo.R @ dq)
             alpha = 1.0
+            e, md = e0, 1.0  # seed; the line search overwrites before use
             while alpha >= alpha_min:
                 e_f, md = fine_energy_mindet(Xg + alpha * corr)
                 e = e_f + pen_energy(topo.q + alpha * dq, pen)

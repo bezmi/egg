@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
     from egg.core.types import MultiBlockGrid
     from egg.geometry.base import GeometryEntity
-    from egg.smoothing.config_types import EnergyStencil, FlatWire
+    from egg.smoothing.config_types import CellStencil, EnergyStencil, FlatWire
     from egg.smoothing.directional import DirectionalSamples
 
 __all__ = [
@@ -104,19 +104,22 @@ class SweepContext:
     # Lazy-build ingredients for the parity-reference views: the grid (cell /
     # logical-index iteration), the cell_stencil result, and the per-sample
     # target inverses. Position-independent, so retaining the grid is safe.
-    _grid: MultiBlockGrid = field(repr=False, default=None)
-    _stencil: dict[str, object] = field(repr=False, default=None)
-    _samp_w_inv: np.ndarray = field(repr=False, default=None)
+    _grid: MultiBlockGrid | None = field(repr=False, default=None)
+    _stencil: CellStencil | None = field(repr=False, default=None)
+    _samp_w_inv: np.ndarray | None = field(repr=False, default=None)
 
     @cached_property
     def dof_patch_sizes(self) -> list[int]:
         """Corner-sample count P per DOF, from the membership table."""
+        assert self._grid is not None and self._stencil is not None
         M = self._grid.global_node_count
         return np.bincount(self._stencil["m_node"], minlength=M)[:M].tolist()
 
     @cached_property
     def dof_patches(self) -> list[dict]:
         """Per-DOF batched stencil arrays (NumPy parity reference only)."""
+        assert self._grid is not None and self._stencil is not None
+        assert self._samp_w_inv is not None
         st = self._stencil
         M = self._grid.global_node_count
         en_gc = st["gc"].astype(np.intp)
@@ -163,6 +166,7 @@ class SweepContext:
     def dof_to_cells(self) -> list[list[tuple[int, tuple]]]:
         """Cells whose energy depends on each global DOF."""
         grid = self._grid
+        assert grid is not None
         out: list[list[tuple[int, tuple]]] = [[] for _ in range(grid.global_node_count)]
         for bi, block in enumerate(grid.blocks):
             dof_map = grid.block_dof_maps[bi]
@@ -178,6 +182,7 @@ class SweepContext:
     def dof_to_locals(self) -> list[list[tuple[int, tuple]]]:
         """Block-node slots aliasing each global DOF."""
         grid = self._grid
+        assert grid is not None
         out: list[list[tuple[int, tuple]]] = [[] for _ in range(grid.global_node_count)]
         for bi, block in enumerate(grid.blocks):
             dof_map = grid.block_dof_maps[bi]
@@ -191,6 +196,7 @@ class SweepContext:
         Rows of the already-inverted per-sample stack, walked in the same
         sample order the build used."""
         grid = self._grid
+        assert grid is not None and self._samp_w_inv is not None
         corners = list(product((0, 1), repeat=self.d))
         out: dict[tuple[int, tuple, tuple], np.ndarray] = {}
         sid = 0
@@ -208,7 +214,7 @@ def build_sweep_context(
     *,
     interface_ortho: InterfaceOrtho | Mapping[str, object] | None = None,
     interface_c2: InterfaceC2 | Mapping[str, object] | None = None,
-    directional: Directional | Mapping[str, object] | DirectionalSamples | None = None,
+    directional: Directional | dict[str, object] | DirectionalSamples | None = None,
     frozen_interface=None,
 ) -> SweepContext:
     """Build the sweep context: energy stencil, constraint encoding, C++ wire.
@@ -258,17 +264,14 @@ def build_sweep_context(
         curvature = curvature_windows(grid, frozen=frozen_arr, **asdict(ic2_cfg))
 
     # Directional soft-energy samples: a prebuilt DirectionalSamples table passes
-    # through; a Directional config or plain dict is built here (references
-    # frozen from the grid's current node positions). A raw dict keeps the
-    # builder's own field defaults; a Directional carries the pipeline scale.
-    if isinstance(directional, Directional):
+    # through; a Directional config or plain dict is normalized and built here
+    # (references frozen from the grid's current node positions).
+    if isinstance(directional, (Directional, dict)):
         from egg.smoothing.directional import build_directional_samples
 
-        directional = build_directional_samples(grid, **asdict(directional))
-    elif isinstance(directional, dict):
-        from egg.smoothing.directional import build_directional_samples
-
-        directional = build_directional_samples(grid, **directional)
+        dir_cfg = Directional.coerce(directional)
+        assert dir_cfg is not None
+        directional = build_directional_samples(grid, **asdict(dir_cfg))
 
     M = grid.global_node_count
     d = grid.topology.d
@@ -308,7 +311,7 @@ def build_sweep_context(
             )
     samp_w_inv = np.linalg.inv(samp_w) if ns else np.zeros((0, d, d))
 
-    energy_stencil = {
+    energy_stencil: EnergyStencil = {
         "gc": st["gc"].astype(np.intp),
         "gn0": st["gn"][0].astype(np.intp),
         "gn1": st["gn"][1].astype(np.intp),

@@ -45,6 +45,7 @@ import tempfile
 import threading
 import urllib.parse
 import time
+from typing import Any
 from pathlib import Path
 
 from starlette.responses import JSONResponse, PlainTextResponse, Response
@@ -503,7 +504,8 @@ def _params_panel(code: str):
         return Div(id="params")
     fields = []
     for p in params:
-        common = dict(cls="param-input", data_param=p.name)
+        # A bag of dynamic DOM/htmx attributes splatted into the FT components.
+        common: dict[str, Any] = dict(cls="param-input", data_param=p.name)
         cur = (
             p.text[1:-1] if p.kind == "str" and len(p.text) >= 2 else p.text
         )  # unquoted current value, as posted back
@@ -613,7 +615,9 @@ def view_fragment(r: SceneResult, code: str, mode: str = "grid"):
     if r.edit_data is not None:
         parts.append(
             Script(
-                NotStr(json.dumps(r.edit_data)),
+                # fasthtml's Script accepts a NotStr child (raw, unescaped) at
+                # runtime, but its typed signature only declares str.
+                NotStr(json.dumps(r.edit_data)),  # type: ignore[arg-type]
                 type="application/json",
                 id="egg-edit-data",
             )
@@ -695,6 +699,7 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
             return
         h = harvest(ns, init_grid=False)
         h.grid = reg[0]
+        assert h.grid is not None  # a registered run always carries a grid
         bounds = scene_bounds(h.scene)
         hist: dict[str, list[float]] = {"energy": [], "min det": []}
         prev_hist = _last["hist"]  # previous run, faded under the chart
@@ -703,6 +708,7 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
         last_q = 0.0  # quality stats debounce off the frame hot path
         last_phase = None
         chips: list = []
+        assert proc.stdout is not None  # spawned with stdout=PIPE
         while not done:
             try:
                 msg = pickle.load(proc.stdout)
@@ -734,6 +740,7 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
                     # It arrives after the final step frame, so re-emit one
                     # frame carrying the net overlay.
                     net_bytes = msg[1]
+                    assert isinstance(net_bytes, bytes)
                     try:
                         from egg.io import load_control_net
 
@@ -816,7 +823,8 @@ def _run_reader(code: str, path: str, proc: subprocess.Popen) -> None:
     finally:
         for pipe in (proc.stdout, proc.stdin):
             try:
-                pipe.close()
+                if pipe is not None:
+                    pipe.close()
             except Exception:
                 pass
         try:

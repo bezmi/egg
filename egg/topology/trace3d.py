@@ -30,11 +30,11 @@ __all__ = ["infer_blocks", "block_edges"]
 def block_edges(corners):
     """The 12 edges (as name pairs) of a hex given 8 corners in product order."""
     idx = list(product((0, 1), repeat=3))
-    pos = {ci: i for i, ci in enumerate(idx)}
+    pos: dict[tuple[int, ...], int] = {ci: i for i, ci in enumerate(idx)}
     edges = []
     for a, ci in enumerate(idx):
         for axis in range(3):
-            nb = list(ci)
+            nb = [int(x) for x in ci]
             nb[axis] ^= 1
             b = pos[tuple(nb)]
             if a < b:

@@ -655,10 +655,11 @@ class TopologyBuilder:
                         self._corner_objs.get(n)
                         for n in spec.face_corner_names(axis, side, self._d)
                     ]
-                    if not objs or not all(isinstance(o, Node) for o in objs):
+                    node_objs = [o for o in objs if isinstance(o, Node)]
+                    if not node_objs or len(node_objs) != len(objs):
                         continue
-                    edge = objs[0].edge
-                    if not all(o.edge is edge for o in objs[1:]):
+                    edge = node_objs[0].edge
+                    if not all(o.edge is edge for o in node_objs[1:]):
                         continue
                     key = (spec.name, axis, side, id(edge.entity))
                     if key in declared:

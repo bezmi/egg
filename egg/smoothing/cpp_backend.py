@@ -27,6 +27,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from egg.core.types import MultiBlockGrid
+    from egg.smoothing.config_types import EnergyStencil
     from egg.smoothing.solver import SweepContext
 
 __all__ = [
@@ -40,7 +41,7 @@ __all__ = [
 ]
 
 
-def _grid_mindet(X: np.ndarray, es: dict) -> float:
+def _grid_mindet(X: np.ndarray, es: EnergyStencil) -> float:
     """Raw min det A over the energy stencil (mirrors solver._grid_mindet)."""
     gc, gn0, gn1 = es["gc"], es["gn0"], es["gn1"]
     s0, s1 = es["s0"], es["s1"]
@@ -497,6 +498,11 @@ class CppStructuredSweepSession:
             ctx_arrays, structured, X_flat, device=device, dim=ctx.d, control=control
         )
         self._d = ctx.d
+        # Control-point frame cache, set/read by run_control_topo across the
+        # chunked calls that reuse this session.
+        self._ctrl_cxx_frames: bool = False
+        self._ctrl_static_pen: tuple[np.ndarray, ...] = ()
+        self._ctrl_x0_blocks: list[np.ndarray] = []
 
     def run(
         self,

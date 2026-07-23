@@ -21,6 +21,11 @@ The heavy conversion (OCCT surface to NURBS, trim wires to UV polylines) runs
 once at import; the solver never sees OCCT.
 """
 
+# OCP (the OpenCASCADE bindings under build123d) ships no type stubs, so its
+# symbols are opaque to the checker. This adapter is behind the optional `cad`
+# extra.
+# pyright: reportAttributeAccessIssue=false, reportMissingImports=false
+
 from __future__ import annotations
 
 import numpy as np
@@ -174,7 +179,7 @@ def _extract_surface(bs) -> CadBSplineSurface:
         for j in range(1, nv + 1):
             p = bs.Pole(i, j)
             ctrl[i - 1, j - 1] = (p.X(), p.Y(), p.Z())
-            if rational:
+            if weights is not None:  # non-None exactly when rational
                 weights[i - 1, j - 1] = bs.Weight(i, j)
 
     def kseq(arr):

@@ -61,6 +61,8 @@ The field layouts (offsets within each record) are frozen to match the C++
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 
 __all__ = [
@@ -595,7 +597,7 @@ def project_frame_batch(entity, Q):
 
 def group_entities_by_type(
     dof_indices: list[int],
-    entities: dict[int, object],
+    entities: Mapping[int, object],
     d: int = 2,
 ) -> dict[str, dict]:
     """Partition a set of DOFs by entity type into packed-record SoA groups.

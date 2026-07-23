@@ -51,6 +51,10 @@ import traceback
 from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
 from queue import Empty, SimpleQueue
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .scene import SceneResult
 
 RENDER_TIMEOUT = 30.0  # s; a script exec'ing longer than this is killed
 
@@ -60,7 +64,7 @@ _EMPTY_SVG: str | None = None
 # scene (→ egg) imports stay out of module scope: the child must claim
 # stdout before anything heavy imports, or a stray C-level print would
 # corrupt the pickle channel.
-def _error_result(msg: str) -> "SceneResult":  # noqa: F821
+def _error_result(msg: str) -> "SceneResult":
     from .scene import Scene, SceneResult, render_svg
 
     global _EMPTY_SVG
@@ -97,25 +101,25 @@ class RenderWorker:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def submit(
-        self, code: str, mode: str = "grid", path: str = "", timeout: float = None
+        self, code: str, mode: str = "grid", path: str = "", timeout: float | None = None
     ) -> Future:
         """Queue one render. The Future always resolves to a SceneResult —
         timeouts and worker crashes are reported inside it. Cancelling the
         Future (the client gave up) skips the render."""
         return self._submit("render", code, mode, path, timeout)
 
-    def suggest(self, code: str, path: str = "", timeout: float = None) -> Future:
+    def suggest(self, code: str, path: str = "", timeout: float | None = None) -> Future:
         """Probe a script for the ``__egg_webui__`` block suggestion.
         Resolves to ``str | None`` (None on timeout/crash: no nagging)."""
         return self._submit("suggest", code, "", path, timeout)
 
-    def su2(self, code: str, path: str = "", timeout: float = None) -> Future:
+    def su2(self, code: str, path: str = "", timeout: float | None = None) -> Future:
         """Exec + export the script's grid as SU2 text. Resolves to
         ``(text, "")`` or ``(None, reason)``."""
         return self._submit("su2", code, "", path, timeout)
 
     def validate(
-        self, code: str, blocking: dict, path: str = "", timeout: float = None
+        self, code: str, blocking: dict, path: str = "", timeout: float | None = None
     ) -> Future:
         """Flatten a candidate blocking against the script's base + geometry
         (the blocking rides the ``mode`` slot as JSON). Resolves to a dict:
@@ -162,7 +166,7 @@ class RenderWorker:
                 while True:
                     jobs.append(self._q.get_nowait())
             # newest job per (kind, mode, path); the rest are stale keystrokes
-            newest: dict[tuple, tuple] = {}
+            newest: dict[tuple[str, str, str], tuple[str, float]] = {}
             futures: dict[tuple, list[Future]] = {}
             for kind, code, mode, path, timeout, fut in jobs:
                 key = (kind, mode, path)
@@ -182,6 +186,7 @@ class RenderWorker:
         rid = self._req
         try:
             proc = self._ensure()
+            assert proc.stdin is not None and proc.stdout is not None  # PIPE
             pickle.dump(
                 (kind, rid, code, mode, path),
                 proc.stdin,

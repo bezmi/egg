@@ -53,6 +53,7 @@ def save_control_net(topo, path, *, residual=None) -> None:
         "walls": np.asarray(bool(topo.wall_faces)),
         "fit_residual": np.asarray(float(topo.fit_residual)),
     }
+    X_solved: np.ndarray | None = None
     if residual is not None:
         X_solved = (
             np.asarray(topo.grid.global_nodes, dtype=float)
@@ -63,7 +64,7 @@ def save_control_net(topo, path, *, residual=None) -> None:
     for bi, cs in enumerate(topo.ctrl_shapes):
         payload[f"ctrl_shape_{bi}"] = np.asarray(cs, dtype=np.int64)
         payload[f"b_{bi}"] = np.asarray(topo.b_fields[bi], dtype=np.float64)
-        if residual is not None:
+        if X_solved is not None:
             # Per block, at the stored sampling: the exact grid minus the net
             # evaluation. Per block so a re-tabulating load can interpolate it.
             dm = topo.grid.block_dof_maps[bi]

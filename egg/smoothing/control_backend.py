@@ -18,11 +18,31 @@ form the tensor weights in registers — no global CSR ``M`` is ever built.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Literal, TypedDict, cast, overload
+
 import numpy as np
 
 from egg.geometry.control_net import ControlNetMap
 
+if TYPE_CHECKING:
+    from egg.geometry.base import GeometryEntity
+    from egg.smoothing.control_topology import SparseReduction
+
 __all__ = ["build_control_wire", "build_control_topo_wire", "run_control_topo"]
+
+
+class _RunControlKwargs(TypedDict):
+    """Kwargs forwarded to ``CppStructuredSweepSession.run_control``; typed so
+    the shared ``**run_kw`` splat is checked against that signature."""
+
+    phase: str
+    grad_tol: float
+    alpha_min: float
+    lm0: float
+    pcg_max_iter: int
+    pcg_rtol: float
+    pcg_forcing: bool
+    model_db: bool
 
 
 def _band_axis(B: np.ndarray, k_supp: int) -> tuple[np.ndarray, np.ndarray]:
@@ -161,8 +181,27 @@ def build_control_wire(
 # --------------------------------------------------------------------------- #
 
 
+@overload
 def _reduction_csr(
-    R: np.ndarray,
+    R: SparseReduction | np.ndarray,
+    root_free: np.ndarray,
+    d: int,
+    hard: dict | None = ...,
+    slide: dict | None = ...,
+    record_slide: Literal[False] = ...,
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]: ...
+@overload
+def _reduction_csr(
+    R: SparseReduction | np.ndarray,
+    root_free: np.ndarray,
+    d: int,
+    hard: dict | None = ...,
+    slide: dict | None = ...,
+    *,
+    record_slide: Literal[True],
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray, dict]: ...
+def _reduction_csr(
+    R: SparseReduction | np.ndarray,
     root_free: np.ndarray,
     d: int,
     hard: dict | None = None,
@@ -203,17 +242,18 @@ def _reduction_csr(
     from scipy import sparse as _sp
 
     if _sp.issparse(R):
-        Rc = R.tocsr()
+        Rc = cast("SparseReduction", R).tocsr()
         for i in range(n_stack):
             for e in range(Rc.indptr[i], Rc.indptr[i + 1]):
                 j = int(Rc.indices[e])
                 if col0[j] >= 0:
                     entries[i].append((j, float(Rc.data[e])))
     else:
-        nz_rows, nz_cols = np.nonzero(R)
+        Rd = cast("np.ndarray", R)
+        nz_rows, nz_cols = np.nonzero(Rd)
         for i, j in zip(nz_rows, nz_cols):
             if col0[j] >= 0:
-                entries[i].append((int(j), float(R[i, j])))
+                entries[i].append((int(j), float(Rd[i, j])))
     slide_entries: dict[int, list[tuple[int, int, int, float]]] = {j: [] for j in slide}
     for i in range(n_stack):
         for c in range(d):
@@ -407,7 +447,7 @@ def _initial_slide_frames(topo, d: int) -> dict:
     ``topo.q`` (the projection) like the driver's frame does."""
     slide0: dict[int, np.ndarray] = {}
     by_ent: dict[int, list[int]] = {}
-    ent_of: dict[int, object] = {}
+    ent_of: dict[int, GeometryEntity] = {}
     for col, ent in topo.root_entity.items():
         by_ent.setdefault(id(ent), []).append(col)
         ent_of[id(ent)] = ent
@@ -462,13 +502,13 @@ def _attach_slide_wire(topo, wire: dict) -> None:
         Rc = topo.R.tocsc()
         row_nnz = np.diff(Rr.indptr)
 
-        def column(col):
+        def column(col: int) -> tuple[np.ndarray, np.ndarray]:
             lo, hi = Rc.indptr[col], Rc.indptr[col + 1]
             return Rc.indices[lo:hi], Rc.data[lo:hi]
     else:
         row_nnz = (topo.R != 0).sum(axis=1)
 
-        def column(col):
+        def column(col: int) -> tuple[np.ndarray, np.ndarray]:
             rows = np.flatnonzero(topo.R[:, col])
             return rows, topo.R[rows, col]
 
@@ -716,16 +756,16 @@ def run_control_topo(
             np.asarray(blk.nodes, dtype=float).copy() for blk in grid.blocks
         ]
         X0_blocks_saved = sess._ctrl_x0_blocks
-    run_kw = dict(
-        phase=phase,
-        grad_tol=grad_tol,
-        alpha_min=alpha_min,
-        lm0=lm0,
-        pcg_max_iter=pcg_max_iter,
-        pcg_rtol=pcg_rtol,
-        pcg_forcing=pcg_forcing,
-        model_db=model_db,
-    )
+    run_kw: _RunControlKwargs = {
+        "phase": phase,
+        "grad_tol": grad_tol,
+        "alpha_min": alpha_min,
+        "lm0": lm0,
+        "pcg_max_iter": pcg_max_iter,
+        "pcg_rtol": pcg_rtol,
+        "pcg_forcing": pcg_forcing,
+        "model_db": model_db,
+    }
 
     # q recovery from the device C is exact (C stays in range(R)); the
     # sparse normal-equations factorization is computed once.
@@ -751,7 +791,7 @@ def run_control_topo(
         the frame-rebuild profile otherwise."""
         slide = {}
         by_ent: dict[int, list[int]] = {}
-        ent_of: dict[int, object] = {}
+        ent_of: dict[int, GeometryEntity] = {}
         for col, ent in topo.root_entity.items():
             by_ent.setdefault(id(ent), []).append(col)
             ent_of[id(ent)] = ent

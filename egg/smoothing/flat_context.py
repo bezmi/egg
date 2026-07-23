@@ -33,7 +33,7 @@ from egg.geometry.entity_soa import group_entities_by_type
 
 if TYPE_CHECKING:
     from egg.geometry.base import GeometryEntity
-    from egg.smoothing.config_types import FlatWire
+    from egg.smoothing.config_types import CellStencil, FlatWire
     from egg.smoothing.directional import DirectionalSamples
     from egg.smoothing.interface_c2 import CurvatureWindows
     from egg.smoothing.interface_ortho import InterfaceSamples
@@ -61,7 +61,7 @@ def _role_table(d):
     return role
 
 
-def cell_stencil(blocks, d):
+def cell_stencil(blocks: list[np.ndarray], d: int) -> CellStencil:
     """Vectorized per-(cell, corner) sample stencil and node->sample membership.
 
     ``blocks`` is a list of integer arrays of global node ids, each of shape
@@ -193,7 +193,7 @@ def build_flat_context(
         base_w = w_inv if not uniform_w else np.broadcast_to(w_inv, (ns, d, d))
         w_inv = np.concatenate([base_w, interface.W_inv], axis=0)
         weight = np.concatenate([np.ones(ns), np.asarray(interface.weight)])
-        st = dict(st)
+        st = st.copy()
         st["gc"] = np.concatenate([st["gc"], interface.gc])
         st["gn"] = [
             np.concatenate([st["gn"][0], interface.gn0]),
@@ -247,9 +247,9 @@ def build_flat_context(
     m_sid = st["m_sid"][keep]
     m_role = st["m_role"][keep]
 
-    def sample_fields(sid, *, uniform_out=False):
+    def sample_fields(sid, *, uniform_out=False) -> dict[str, np.ndarray]:
         gc = st["gc"][sid].astype(np.int32)
-        out = {"gc": gc}
+        out: dict[str, np.ndarray] = {"gc": gc}
         for k in range(d):
             out[f"gn{k}"] = st["gn"][k][sid].astype(np.int32)
             out[f"s{k}"] = st["s"][k][sid].astype(np.float64)
@@ -272,7 +272,7 @@ def build_flat_context(
     perm = np.argsort(m_node, kind="stable")
     m_node, m_sid, m_role = m_node[perm], m_sid[perm], m_role[perm]
 
-    groups = []
+    groups: list[dict[str, object]] = []
     dofs = np.flatnonzero(free_mask)
     if dofs.size:
         # P_of per DOF (0 for a DOF with no incident cell); m_node is ascending so
@@ -280,7 +280,7 @@ def build_flat_context(
         uniq, cnt = np.unique(m_node, return_counts=True)
         P_of = np.zeros(dofs.size, dtype=np.int32)
         P_of[np.searchsorted(dofs, uniq)] = cnt
-        g = {
+        g: dict[str, object] = {
             "D": int(dofs.size),
             "role": m_role.astype(np.int32),
             "dof_idx": dofs.astype(np.int32),
@@ -321,7 +321,7 @@ def build_flat_context(
         groups.append(g)
 
     all_sid = np.arange(ns)
-    energy_stencil = {"num_samples": int(ns)}
+    energy_stencil: dict[str, object] = {"num_samples": int(ns)}
     # A uniform target ships as one shared W_inv row (the energy reduction reads it
     # with stride 0), same as the group table — avoids one (d, d) per sample.
     energy_stencil.update(sample_fields(all_sid, uniform_out=True))

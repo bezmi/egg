@@ -14,9 +14,16 @@ tangents come from the C++ core via the
 :class:`~egg.geometry.base.GeometryEntity` base methods.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 
 from .base import GeometryEntity
+
+if TYPE_CHECKING:
+    from egg.geometry.frontend2d import Vector3
 
 __all__ = ["Circle", "Ellipse", "LineSegment"]
 
@@ -66,6 +73,9 @@ class LineSegment(GeometryEntity):
     t0: float = 0.0
     t1: float = 1.0
     closed: bool = False
+    # Construction provenance retained by frontend2d.Bezier (a 2-point Bézier
+    # returns a LineSegment); read by egg.webui.scene.
+    points: list[Vector3] | None = None
 
     @property
     def dim(self) -> int:

@@ -31,8 +31,12 @@ dimension-general and the device path validates D = 3.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from egg.core.types import MultiBlockGrid
 
 from egg.geometry.control_net import (
     ControlNetMap,
@@ -177,7 +181,7 @@ def boolean_sum_b(cmap: ControlNetMap, C: np.ndarray, X0: np.ndarray) -> np.ndar
 class ControlRefContext:
     """Everything the reference reduced-GN loop needs, built once."""
 
-    grid: object
+    grid: MultiBlockGrid
     ctx: SweepContext
     cmap: ControlNetMap
     block_idx: int
@@ -191,7 +195,7 @@ class ControlRefContext:
     # modelled (wall runners); None keeps the coordinate-diagonal Mf chain.
     Meff: np.ndarray | None = None
     # Position-independent per-sample chain Jacobian for the Hessian assembly.
-    _J: np.ndarray = field(repr=False, default=None)
+    _J: np.ndarray | None = field(repr=False, default=None)
 
     @property
     def n_free(self) -> int:
@@ -274,6 +278,7 @@ def node_grad_hess_field(
     (cell, corner) sample scatters its gradient columns and its role-restricted
     ``J^T H_T J`` block onto each participating node.
     """
+    assert ctx._grid is not None and ctx._stencil is not None
     st = ctx.energy_stencil
     mem = ctx._stencil
     gc, gn0, gn1 = st["gc"], st["gn0"], st["gn1"]
@@ -331,6 +336,7 @@ def reduced_system(
     gc, gn0, gn1 = st["gc"], st["gn0"], st["gn1"]
     s0, s1, W_inv = st["s0"], st["s1"], st["W_inv"]
     J = cref._J
+    assert J is not None
     P = gc.shape[0]
     F = cref.n_free
 
@@ -341,12 +347,14 @@ def reduced_system(
 
     # coords layout of J is [corner_x, corner_y, nbr0_x, nbr0_y, nbr1_x, nbr1_y]
     Jr = J.reshape(P, 4, 3, 2)
-    if getattr(cref, "Meff", None) is not None:
+    # cref may be a lightweight SimpleNamespace without a Meff attribute.
+    meff = getattr(cref, "Meff", None)
+    if meff is not None:
         # Coordinate-mixing effective map (node, d, F, d): the frozen-frame
         # Boolean-sum linearization d b/d C couples coordinates through the
         # wall-normal projector, so the chain runs at component level.
         M3 = np.stack(
-            [cref.Meff[gc], cref.Meff[gn0], cref.Meff[gn1]], axis=1
+            [meff[gc], meff[gn0], meff[gn1]], axis=1
         )  # (P, 3, d, F, d)
         W = np.einsum("pacx,pcxFy->paFy", Jr, M3, optimize=True).reshape(P, 4, F * 2)
     else:
@@ -411,6 +419,7 @@ def run_control_ref(
                 continue
             corr = cref.Mf @ dC.reshape(F, d)  # (M, d) node-space correction
             alpha = 1.0
+            e, md = e0, 1.0  # seed; the line search overwrites before use
             while alpha >= alpha_min:
                 e, md = energy_mindet(Xg + alpha * corr)
                 if np.isfinite(e) and e <= e0 + ENERGY_TOL and md > 0.0:

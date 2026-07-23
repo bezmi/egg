@@ -34,8 +34,9 @@ elimination for exact C1), which composes per-block maps built here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
+from collections.abc import Sequence
 from typing import NamedTuple
 
 import numpy as np
@@ -354,7 +355,9 @@ class ControlNetMap:
     basis_d1: list[np.ndarray]
     basis_d2: list[np.ndarray]
     b: np.ndarray | None = None
-    knots: list[np.ndarray] | None = None
+    # Always populated by tensor_map (the only constructor); a default keeps the
+    # dataclass field order valid after ``b``.
+    knots: list[np.ndarray] = field(default_factory=list)
 
     def prolong(self, C: np.ndarray) -> np.ndarray:
         """Control net ``C`` (``ctrl_shape + (d,)``) -> nodes (``node_shape + (d,)``)."""
@@ -393,8 +396,8 @@ def tensor_map(
     ctrl_shape,
     *,
     degree: int | tuple[int, ...] = 3,
-    spacing: list[np.ndarray | None] | None = None,
-    knots: list[np.ndarray | None] | None = None,
+    spacing: Sequence[np.ndarray | None] | None = None,
+    knots: Sequence[np.ndarray | None] | None = None,
 ) -> ControlNetMap:
     """Build the interior-only (b=0) tensor-product control-net map.
 
@@ -415,19 +418,17 @@ def tensor_map(
     degrees = (degree,) * d if isinstance(degree, int) else tuple(degree)
     if len(degrees) != d:
         raise ValueError("degree must be scalar or one per axis")
-    if spacing is None:
-        spacing = [None] * d
-    if knots is None:
-        knots = [None] * d
+    sp: list[np.ndarray | None] = list(spacing) if spacing is not None else [None] * d
+    kn: list[np.ndarray | None] = list(knots) if knots is not None else [None] * d
 
     basis: list[np.ndarray] = []
     basis_d1: list[np.ndarray] = []
     basis_d2: list[np.ndarray] = []
     knots_out: list[np.ndarray] = []
     for k in range(d):
-        params = _axis_params(node_shape[k], spacing[k])
+        params = _axis_params(node_shape[k], sp[k])
         Bk, Uk = bspline_basis(
-            ctrl_shape[k], degrees[k], params, n_deriv=2, knots=knots[k]
+            ctrl_shape[k], degrees[k], params, n_deriv=2, knots=kn[k]
         )
         basis.append(Bk[0])
         basis_d1.append(Bk[1])
@@ -470,10 +471,8 @@ def tfi_operator(node_shape) -> np.ndarray:
     # Column basis vectors run through the value-form fill; column j is the
     # interior response to a unit boundary node j. Cheaper than a symbolic
     # expansion and exact for the linear map.
+    from egg.core.types import Block
     from egg.init.tfi import tfi_fill_interior
-
-    class _Blk:
-        pass
 
     def is_boundary(idx: tuple[int, ...]) -> bool:
         return any(idx[a] in (0, node_shape[a] - 1) for a in range(d))
@@ -487,16 +486,14 @@ def tfi_operator(node_shape) -> np.ndarray:
     M = np.zeros((n_total, n_total))
     # Interior response: seed one boundary node, fill, read interior.
     for j in boundary_flats:
-        blk = _Blk()
-        blk.d = d
-        blk.logical_shape = node_shape
         nodes = np.full(node_shape + (1,), np.nan)
         # Set every boundary node to 0 except node j -> 1 (unit boundary input).
         for bf in boundary_flats:
             idx = np.unravel_index(bf, node_shape)
             nodes[idx + (0,)] = 1.0 if bf == j else 0.0
-        blk.nodes = nodes
-        tfi_fill_interior(blk)
+        # A one-component "coordinate" block: tfi_fill_interior reads d /
+        # logical_shape / nodes, which Block derives from this array.
+        tfi_fill_interior(Block(nodes))
         M[:, j] = nodes.reshape(n_total)
     # Boundary rows: identity (a boundary node maps to itself).
     for j in boundary_flats:

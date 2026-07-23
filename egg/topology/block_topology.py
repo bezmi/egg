@@ -984,15 +984,15 @@ class BlockTopology:
             }
 
         chains: list[ParallelChain] = []
-        for p, dofs in resolved:
+        for p, chain_dofs in resolved:
             to = p["to"]
             target = faces_of(to)
             label = getattr(to, "name", None) or repr(to)
             if not target:
                 raise ValueError(f"parallel_to: {label} is not an associated boundary")
-            dof_set = set(dofs)
+            dof_set = set(chain_dofs)
             wall: list[int] = []
-            for g in dofs:
+            for g in chain_dofs:
                 best = None  # (steps, tie-break order, wall_dof)
                 order = 0
                 for bi, logical in occ[g]:
@@ -1030,7 +1030,7 @@ class BlockTopology:
                     chain=p["chain"],
                     weight=float(p.get("weight", 1.0)),
                     taper=p.get("taper"),
-                    dofs=dofs,
+                    dofs=chain_dofs,
                     wall_dofs=tuple(wall),
                 )
             )
@@ -1107,7 +1107,9 @@ class BlockTopology:
             # curved wall is sampled along the curve rather than its chord,
             # which can leave a sharp apex empty. Otherwise fall back to the
             # chord; step 3 projects it onto any associated entity.
-            corner_of = dict(zip(product((0, 1), repeat=self.d), spec.corner_names))
+            corner_of: dict[tuple[int, ...], str] = dict(
+                zip(product((0, 1), repeat=self.d), spec.corner_names)
+            )
             for edge_axis in range(self.d):
                 n_edge = shape[edge_axis]
                 if n_edge < 3:
@@ -1145,6 +1147,7 @@ class BlockTopology:
                             continue
                         t = k / (n_edge - 1)
                         if param is not None:
+                            assert edge is not None  # param is set only when edge is
                             t0, dt, closed = param
                             tt = t0 + t * dt
                             if closed:
