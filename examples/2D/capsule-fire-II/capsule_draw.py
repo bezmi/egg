@@ -179,7 +179,7 @@ if __name__ == "__egg_webui__":  # this example runs ONLY in the egg web UI
             {
                 "nodes": {
                     "u0": {"xy": [0.0735, 0.524], "on": ["inflow"]},
-                    "u1": {"xy": [0.1211, 0.3369], "on": ["outflow"]},
+                    "u1": {"xy": [0.1211, 0.3369], "on": ["capsule"]},
                     "u2": {"xy": [0.0499, 0.3086], "on": ["capsule"]},
                     "u3": {"xy": [0.0453, 0.4679], "on": ["inflow"]},
                     "u4": {"xy": [-0.0678, 0.0025], "on": ["symmetry"]},
@@ -192,7 +192,7 @@ if __name__ == "__egg_webui__":  # this example runs ONLY in the egg web UI
                     {"a": "u3", "b": "u4", "bind": "inflow", "res": 45},
                     {"a": "u4", "b": "u5", "bind": "symmetry"},
                     {"a": "u5", "b": "u2", "bind": "capsule"},
-                    {"a": "u1", "b": "u2", "res": 15},
+                    {"a": "u1", "b": "u2", "bind": "capsule", "res": 15},
                 ],
                 "res": 10,
             }
