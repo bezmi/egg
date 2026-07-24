@@ -29,7 +29,7 @@ async def _ok_app(scope, receive, send):
     await send({"type": "http.response.body", "body": b"ok"})
 
 
-def _run_http(mw, *, headers, query=b""):
+def _run_http(mw, *, headers, query=b"", path="/"):
     """Drive one HTTP request through ``mw`` and return (status, headers dict)."""
     events: list[dict] = []
 
@@ -42,7 +42,7 @@ def _run_http(mw, *, headers, query=b""):
     scope = {
         "type": "http",
         "method": "GET",
-        "path": "/",
+        "path": path,
         "query_string": query,
         "headers": [(k.encode(), v.encode()) for k, v in headers.items()],
     }
@@ -113,6 +113,31 @@ def test_security_headers_present_on_success(monkeypatch):
     assert "connect-src 'self'" in csp
     assert hdrs.get("x-frame-options") == "DENY"
     assert hdrs.get("x-content-type-options") == "nosniff"
+
+
+def test_built_docs_are_same_origin_framable(monkeypatch):
+    # The in-app docs viewer wraps /docs/* in a same-origin iframe, so the docs
+    # content (only) relaxes framing to SAMEORIGIN / frame-ancestors 'self'.
+    _, hdrs = _run_http(
+        _mw(monkeypatch),
+        headers={"host": BIND},
+        query=f"token={TOKEN}".encode(),
+        path="/docs/index.html",
+    )
+    assert hdrs.get("x-frame-options") == "SAMEORIGIN"
+    assert "frame-ancestors 'self'" in hdrs.get("content-security-policy", "")
+
+
+def test_non_docs_paths_stay_unframable(monkeypatch):
+    # The main page and everything outside /docs/ keep the strict framing headers.
+    _, hdrs = _run_http(
+        _mw(monkeypatch),
+        headers={"host": BIND},
+        query=f"token={TOKEN}".encode(),
+        path="/",
+    )
+    assert hdrs.get("x-frame-options") == "DENY"
+    assert "frame-ancestors 'none'" in hdrs.get("content-security-policy", "")
 
 
 def test_layer_is_inert_without_a_token(monkeypatch):

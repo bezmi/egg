@@ -48,6 +48,9 @@ class WindowControls:
     def __init__(self) -> None:
         self.window: Any = None  # pywebview Window, filled in after create_window
         self._maximized = False
+        # Main window only: the running docs-window subprocess, if any (see
+        # open_docs). None on the docs window's own controls.
+        self.docs_proc: subprocess.Popen | None = None
 
     def start_drag(self) -> None:
         """Begin a compositor-driven window move for the frameless window.
@@ -77,6 +80,24 @@ class WindowControls:
         import webbrowser
 
         webbrowser.open(url)
+
+    def open_docs(self, url: str) -> None:
+        """Open the built docs in a native window (help > documentation).
+
+        The docs run in a SEPARATE pywebview process (``egg._docs_window``), not
+        a second window in this process: a second QtWebEngine window in the main
+        process is unreliable on this Qt build (GUI-thread deadlocks and
+        cross-thread ``QObject`` corruption that blanks the main window). A
+        separate process has its own event loop, so it cannot touch this window;
+        it loads the same-origin ``/docs-view`` shell (egg titlebar + an iframe
+        of the docs), carrying the token in ``url``. Reuse the live one instead
+        of stacking duplicates. Only the main window's controls set this up.
+        """
+        if self.docs_proc is not None and self.docs_proc.poll() is None:
+            return  # already open
+        self.docs_proc = subprocess.Popen(
+            [sys.executable, "-m", "egg._docs_window", url]
+        )
 
     def minimize(self) -> None:
         if self.window is not None:
@@ -280,6 +301,7 @@ def main() -> None:
         [sys.executable, "-m", "egg._webui_launcher", *server_args],
         start_new_session=True,
     )
+    controls: WindowControls | None = None
     try:
         _wait_until_serving(a.host, a.port, proc)
 
@@ -333,6 +355,11 @@ def main() -> None:
         storage.mkdir(parents=True, exist_ok=True)
         webview.start(_theme_qt_tooltips, private_mode=False, storage_path=str(storage))
     finally:
+        # Close the docs window (its own process) with the app, so it doesn't
+        # linger after the main window is gone.
+        if controls is not None and controls.docs_proc is not None:
+            if controls.docs_proc.poll() is None:
+                controls.docs_proc.terminate()
         # The window is gone (or we failed to open it): stop the whole tree.
         _terminate_group(proc)
 

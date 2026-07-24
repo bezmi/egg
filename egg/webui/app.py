@@ -48,7 +48,7 @@ import time
 from typing import Any
 from pathlib import Path
 
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
 
@@ -56,11 +56,14 @@ from ._assets import MISSING_MSG, VENDOR_DIR, vendor_ready
 from .lsp import DOC_URI, ROOT_URI, LspBridge, lsp_available
 
 from fasthtml.common import (
-    A,
+    Body,
     Button,
     Details,
     Div,
+    Head,
     Header,
+    Html,
+    Iframe,
     Input,
     Label,
     Link,
@@ -2120,6 +2123,132 @@ def _window_controls():
     )
 
 
+# The docs window (help > documentation) is a SEPARATE pywebview PROCESS (see
+# open_docs in egg/_desktop.py: a second window inside the main process is
+# unreliable on this Qt build). That process loads this /docs-view shell, an
+# egg-themed titlebar (back/forward + the window controls) wrapping the built
+# Sphinx site in a same-origin iframe. It reuses app.css (CSS) for the theme +
+# .desktop-titlebar rules and adds only the nav-button / iframe layout below.
+_DOCS_VIEW_CSS = (
+    ".docs-nav { display: flex; align-self: stretch; }\n"
+    ".docs-nav .desktop-titlebar__btn { width: 38px; }\n"
+    ".docs-title { font-size: calc(var(--fs-ui) * 12 / 13); "
+    "color: var(--ctp-subtext0); padding: 0 8px; }\n"
+    ".docs-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; "
+    "background: var(--ctp-base); }\n"
+)
+
+# Runs in the shell page. Matches the app's current catppuccin flavor (the docs
+# process shares the app's same-origin localStorage), wires the nav buttons to
+# the iframe's own history, and starts a frameless window drag from the titlebar
+# spacer (same start_drag bridge call as app.js).
+_DOCS_VIEW_JS = (
+    "(function () {\n"
+    "  var THEMES = ['mocha', 'macchiato', 'frappe', 'latte'];\n"
+    "  var t = localStorage.getItem('egg-webui-theme');\n"
+    "  if (THEMES.indexOf(t) < 0)\n"
+    "    t = window.matchMedia('(prefers-color-scheme: dark)').matches"
+    " ? 'mocha' : 'latte';\n"
+    "  document.documentElement.dataset.theme = t;\n"
+    "  var frame = document.getElementById('docs-frame');\n"
+    "  function onFrame(fn) {\n"
+    "    return function () { try { fn(frame.contentWindow); } catch (e) {} };\n"
+    "  }\n"
+    "  document.getElementById('docs-back').onclick ="
+    " onFrame(function (w) { w.history.back(); });\n"
+    "  document.getElementById('docs-fwd').onclick ="
+    " onFrame(function (w) { w.history.forward(); });\n"
+    "  document.getElementById('docs-reload').onclick ="
+    " onFrame(function (w) { w.location.reload(); });\n"
+    "  document.addEventListener('mousedown', function (e) {\n"
+    "    if (e.button === 0 && e.target.closest('.desktop-titlebar__drag'))\n"
+    "      window.pywebview && window.pywebview.api"
+    " && window.pywebview.api.start_drag && window.pywebview.api.start_drag();\n"
+    "  });\n"
+    "})();\n"
+)
+
+
+def _docs_window_controls():
+    """Min / maximize / close for the docs window titlebar. Like
+    :func:`_window_controls`, but close just closes the docs window (its own
+    process; no unsaved-changes prompt)."""
+    return Div(
+        Button(
+            "−",
+            type="button",
+            aria_label="Minimize",
+            cls="desktop-titlebar__btn",
+            onclick="window.pywebview.api.minimize()",
+        ),
+        Button(
+            "□",
+            type="button",
+            aria_label="Maximize",
+            cls="desktop-titlebar__btn",
+            onclick="window.pywebview.api.toggle_maximize()",
+        ),
+        Button(
+            "✕",
+            type="button",
+            aria_label="Close",
+            cls="desktop-titlebar__btn desktop-titlebar__close",
+            onclick="window.pywebview.api.close()",
+        ),
+        cls="desktop-titlebar__controls",
+    )
+
+
+@rt("/docs-view")
+def docs_view():
+    """The docs window shell (loaded by the separate docs process, see open_docs
+    in egg/_desktop.py). A standalone document (not the app's ``hdrs``, so app.js
+    / the editor never load here) that frames the built Sphinx site under an
+    egg-themed titlebar. A plain browser never hits this; it opens /docs/ in a
+    new tab instead."""
+    if not (DOCS_DIR and DOCS_DIR.is_dir()):
+        return PlainTextResponse("docs not built", status_code=404)
+
+    def _nav(sym, id_, label):
+        return Button(
+            sym,
+            type="button",
+            id=id_,
+            aria_label=label,
+            title=label,
+            cls="desktop-titlebar__btn",
+        )
+
+    doc = Html(
+        Head(
+            Meta(charset="utf-8"),
+            Meta(name="viewport", content="width=device-width, initial-scale=1"),
+            Title("egg documentation"),
+            Style(CSS),
+            Style(_DOCS_VIEW_CSS),
+        ),
+        Body(
+            Header(
+                NotStr(EGG_LOGO),
+                Div(
+                    _nav("←", "docs-back", "Back"),
+                    _nav("→", "docs-fwd", "Forward"),
+                    _nav("⟳", "docs-reload", "Reload"),
+                    cls="docs-nav",
+                ),
+                Span("documentation", cls="docs-title"),
+                Div(cls="desktop-titlebar__drag"),
+                _docs_window_controls(),
+                cls="desktop-titlebar",
+            ),
+            Iframe(src="/docs/index.html", id="docs-frame", cls="docs-frame"),
+            Script(_DOCS_VIEW_JS),
+        ),
+    )
+    # Html(doctype=True) already prepends <!DOCTYPE html>.
+    return HTMLResponse(to_xml(doc))
+
+
 def _landing_titlebar():
     """A minimal window titlebar for the landing overlay in the native app: just
     the drag handle and the min/maximize/close controls (no menus). The landing
@@ -2323,7 +2452,9 @@ async def get(view: str = "grid", desktop: int = 0):
             ),
             _menu(
                 "help",
-                A("documentation", href="/docs/", target="_blank")
+                # In the desktop app this opens the in-app docs viewer (the
+                # overlay below); in a browser app.js opens /docs/ in a new tab.
+                Button("documentation", id="help-docs")
                 if DOCS_DIR and DOCS_DIR.is_dir()
                 else Span(
                     "docs not built; restart the app to build them",
@@ -2431,10 +2562,7 @@ async def get(view: str = "grid", desktop: int = 0):
                     Button("new project", id="landing-new", cls="landing-opt"),
                     Button("open project", id="landing-open", cls="landing-opt"),
                     Button("open archive", id="landing-archive", cls="landing-opt"),
-                    Button(
-                        "documentation", id="landing-docs", cls="landing-opt",
-                        data_url="/docs/",
-                    ),
+                    Button("documentation", id="landing-docs", cls="landing-opt"),
                     Button(
                         "configuration directory", id="landing-config",
                         cls="landing-opt",

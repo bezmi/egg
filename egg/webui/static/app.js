@@ -42,6 +42,18 @@ function eggWithToken(url) {
   return url + eggTokenParam(url.includes('?') ? '&' : '?');
 }
 
+// Open the built docs. In the desktop app (pywebview), open the docs window: a
+// separate pywebview PROCESS showing the /docs-view shell (egg titlebar + an
+// iframe of /docs/), which carries the token so there's no 403 and needs no
+// system browser. In a plain browser, open /docs/ in a new tab instead (the tab
+// shares the origin's auth cookie; the token is appended as a fallback).
+function eggOpenDocs() {
+  if (window.pywebview?.api?.open_docs)
+    window.pywebview.api.open_docs(eggWithToken(location.origin + '/docs-view'));
+  else
+    window.open(eggWithToken('/docs/'), '_blank', 'noopener');
+}
+
 // Copy button shared by the error box, the warning, and the doc pane: copy the
 // text of the sibling .copytext (or pre) in the same .copybox, then flash the
 // button label. eggCopyText handles a non-secure context / the native app.
@@ -1005,6 +1017,7 @@ document.addEventListener('click', async (e) => {
     if (window.pywebview?.api?.open_url) window.pywebview.api.open_url(rep.dataset.url);
     else window.open(rep.dataset.url, '_blank', 'noopener');
   }
+  if (e.target.closest('#help-docs')) eggOpenDocs();
   if (e.target.closest('#file-save-eggy')) saveEggyPick();
   if (e.target.closest('#file-open-eggy')) openEggyPick();
   // open a config/logs directory in the OS file manager (server-side path)
@@ -1088,12 +1101,7 @@ document.addEventListener('click', (e) => {
   else if (e.target.closest('#landing-archive')) openEggyPick();
   else if (e.target.closest('#landing-config')) eggOpenDir('config');
   else if (e.target.closest('#landing-new')) eggNewProject();
-  else if (e.target.closest('#landing-docs')) {
-    const url = e.target.closest('#landing-docs').dataset.url || '/docs/';
-    if (window.pywebview?.api?.open_url)
-      window.pywebview.api.open_url(eggWithToken(location.origin + url));
-    else window.open(eggWithToken(url), '_blank', 'noopener');
-  }
+  else if (e.target.closest('#landing-docs')) eggOpenDocs();
 });
 
 // --- open/save: normal file workflow against the server's filesystem

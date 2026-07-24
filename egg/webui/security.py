@@ -60,15 +60,25 @@ _CSP_BASE = (
 )
 
 
-def content_security_policy(desktop: bool = False) -> str:
+def content_security_policy(desktop: bool = False, framable: bool = False) -> str:
     """The CSP for a response. In the native desktop app only, script-src also
     allows 'unsafe-eval': pywebview builds its ``window.pywebview`` bridge with
     ``new Function()`` (see webview/js/api.js), which the policy would otherwise
     block, killing the window controls and drag. The desktop is a local,
-    token-authed context, so this narrow relaxation stays there."""
+    token-authed context, so this narrow relaxation stays there.
+
+    ``framable`` widens ``frame-ancestors`` from 'none' to 'self' for the built
+    docs so the in-app docs viewer can wrap them in a same-origin iframe. Only
+    our own origin can frame them, and an external origin cannot reach the server
+    at all (token + Host/Origin checks), so this opens no clickjacking path."""
     directives: list[str] = list(_CSP_BASE)
     if desktop:
         directives[1] = "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+    if framable:
+        directives = [
+            "frame-ancestors 'self'" if d == "frame-ancestors 'none'" else d
+            for d in directives
+        ]
     return "; ".join(directives)
 
 
@@ -76,11 +86,19 @@ def content_security_policy(desktop: bool = False) -> str:
 CONTENT_SECURITY_POLICY = content_security_policy(False)
 
 
-def _security_headers(desktop: bool) -> tuple[tuple[bytes, bytes], ...]:
+def _security_headers(
+    desktop: bool, framable: bool = False
+) -> tuple[tuple[bytes, bytes], ...]:
     return (
-        (b"content-security-policy", content_security_policy(desktop).encode()),
+        (
+            b"content-security-policy",
+            content_security_policy(desktop, framable).encode(),
+        ),
         (b"x-content-type-options", b"nosniff"),
-        (b"x-frame-options", b"DENY"),
+        # SAMEORIGIN (not DENY) for the framable docs; X-Frame-Options and
+        # frame-ancestors must agree, or the stricter one wins and the iframe
+        # is blocked.
+        (b"x-frame-options", b"SAMEORIGIN" if framable else b"DENY"),
         (b"referrer-policy", b"no-referrer"),
     )
 
@@ -167,7 +185,11 @@ class SecurityMiddleware:
         self.relax_host = _bind()[0] == "0.0.0.0"
         # The desktop launcher sets EGG_DESKTOP so the CSP can allow the
         # pywebview bridge's use of new Function() (see content_security_policy).
-        self.sec_headers = _security_headers(bool(os.environ.get("EGG_DESKTOP")))
+        desktop = bool(os.environ.get("EGG_DESKTOP"))
+        self.sec_headers = _security_headers(desktop)
+        # Built docs (/docs/*) get same-origin framing so the in-app docs viewer
+        # can wrap them in an iframe; nothing else is framable.
+        self.sec_headers_framable = _security_headers(desktop, framable=True)
 
     async def __call__(self, scope, receive, send):
         # No token configured means auth is off: a bare import / the test suite,
@@ -194,12 +216,19 @@ class SecurityMiddleware:
 
         if scope["type"] == "http":
             set_cookie = via in ("query", "header")
+            # Only the built docs content is framable (by our own origin); the
+            # main page and everything else keep DENY / frame-ancestors none.
+            sec_headers = (
+                self.sec_headers_framable
+                if scope.get("path", "").startswith("/docs/")
+                else self.sec_headers
+            )
 
             async def send_wrap(event):
                 if event["type"] == "http.response.start":
                     event = dict(event)
                     headers = list(event.get("headers", []))
-                    headers.extend(self.sec_headers)
+                    headers.extend(sec_headers)
                     if set_cookie:
                         cookie = (f"egg_token={self.token}; Path=/; HttpOnly; "
                                   "SameSite=Strict")
