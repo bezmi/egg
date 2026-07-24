@@ -296,7 +296,19 @@ function setTheme(name) {
   // variables; only the baked-in favicon needs a manual refresh.
   updateFavicon();
   window.dispatchEvent(new Event('egg-theme'));
+  eggPublishTheme();  // keep an open docs window (a separate process) in sync
 }
+// Publish the current flavor to the server so the desktop docs window (a
+// separate process, which can't read this localStorage) can match it and track
+// changes live. Desktop only: gated on pywebview (the docs window is too), so
+// browser tabs never write the shared value. Called on change (above) and once
+// pywebview is ready (below), which is also when window.pywebview appears.
+function eggPublishTheme() {
+  if (!window.pywebview) return;
+  fetch('/api/theme', {method: 'POST', body: new URLSearchParams({theme: eggTheme})})
+    .catch(() => {});
+}
+window.addEventListener('pywebviewready', eggPublishTheme);
 updateFavicon();  // tint the initial favicon to the active flavor
 window.addEventListener('DOMContentLoaded', () => {
   const wrap = document.getElementById('wrap-toggle');

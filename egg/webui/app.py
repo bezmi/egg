@@ -1835,6 +1835,30 @@ def api_recent(path: str):
     )
 
 
+# The desktop app publishes its current catppuccin flavor here so the docs
+# window (a separate process, which can't read the app's localStorage) can match
+# it and stay in sync while open. In-memory, last-write-wins; only the desktop
+# app writes (eggPublishTheme in app.js), only its docs window polls.
+_ui_theme: str | None = None
+_THEMES = ("mocha", "macchiato", "frappe", "latte")
+
+
+@rt("/api/theme", methods=["get"])
+def api_theme():
+    """The flavor the desktop app last published (empty until it does). GET-only
+    so POST reaches api_theme_set (fast_app's rt defaults to GET and POST)."""
+    return PlainTextResponse(_ui_theme or "")
+
+
+@rt("/api/theme", methods=["post"])
+def api_theme_set(theme: str = ""):
+    """Record the desktop app's current flavor for the docs window to poll."""
+    global _ui_theme
+    if theme in _THEMES:
+        _ui_theme = theme
+    return JSONResponse({"ok": True})
+
+
 @rt("/api/clientlog", methods=["post"])
 def api_clientlog(level: str = "error", msg: str = "", src: str = ""):
     """Log a browser-side error to this process's stderr, so the tee writes it
@@ -2138,18 +2162,29 @@ _DOCS_VIEW_CSS = (
     "background: var(--ctp-base); }\n"
 )
 
-# Runs in the shell page. Matches the app's current catppuccin flavor (the docs
-# process shares the app's same-origin localStorage), wires the nav buttons to
-# the iframe's own history, and starts a frameless window drag from the titlebar
-# spacer (same start_drag bridge call as app.js).
+# Runs in the shell page. The docs are a separate process, so they can't read
+# the app's localStorage; the current flavor comes from the server (published by
+# the app via /api/theme) and is polled so it also tracks live theme changes.
+# Also wires the nav buttons to the iframe's own history and starts a frameless
+# window drag from the titlebar spacer (same start_drag bridge call as app.js).
 _DOCS_VIEW_JS = (
     "(function () {\n"
     "  var THEMES = ['mocha', 'macchiato', 'frappe', 'latte'];\n"
-    "  var t = localStorage.getItem('egg-webui-theme');\n"
-    "  if (THEMES.indexOf(t) < 0)\n"
-    "    t = window.matchMedia('(prefers-color-scheme: dark)').matches"
-    " ? 'mocha' : 'latte';\n"
-    "  document.documentElement.dataset.theme = t;\n"
+    "  var current = null;\n"
+    "  function apply(t) {\n"
+    "    if (THEMES.indexOf(t) < 0 || t === current) return;\n"
+    "    current = t;\n"
+    "    document.documentElement.dataset.theme = t;\n"
+    "  }\n"
+    "  // Until the app's flavor arrives, fall back to the OS preference.\n"
+    "  apply(window.matchMedia('(prefers-color-scheme: dark)').matches"
+    " ? 'mocha' : 'latte');\n"
+    "  function pull() {\n"
+    "    fetch('/api/theme').then(function (r) { return r.text(); })\n"
+    "      .then(function (t) { apply(t.trim()); }).catch(function () {});\n"
+    "  }\n"
+    "  pull();\n"
+    "  setInterval(pull, 1000);\n"
     "  var frame = document.getElementById('docs-frame');\n"
     "  function onFrame(fn) {\n"
     "    return function () { try { fn(frame.contentWindow); } catch (e) {} };\n"
