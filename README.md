@@ -7,9 +7,28 @@ untangler. Written as a C++23 core and a python driver.
 AdaptiveCpp SYCL compute for performance portable kernels
 from one source (OMP, ROCm, CUDA).
 
-## Setup
+## Getting Started
 
-For now, see [`DEVELOPING.md`](DEVELOPING.md) to get started.
+These instructions have been tested on archlinux and Ubuntu 24.04 LTS.
+
+Install `podman`.
+
+From the repo root, activate the devcontainer environment:
+
+```
+./.devcontainer/podman-run.sh
+```
+
+You can now run the egg desktop UI:
+
+```
+uv run egg-desktop --dev
+```
+
+The `--dev` argument is needed on first run to download some javascript dependencies to `egg/webui/static/vendor/`.
+You can omit it on subsequent runs unless you delete that directory.
+
+For more detailed instructions and GPU installs, see [`DEVELOPING.md`](DEVELOPING.md) to get started.
 
 ## Desktop app
 
